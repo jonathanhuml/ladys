@@ -48,8 +48,8 @@ class Trainer:
             strategy.on_epoch_start(model, epoch)
             train_results = strategy.train_epoch(model, train_loader, epoch, device)
             strategy.on_epoch_end(model, epoch)
-            valid_result = self.validate(model, strategy, valid_loader, epoch, device)
             seconds = time.perf_counter() - start
+            valid_result = self.validate(model, strategy, valid_loader, epoch, device)
 
             report = EpochReport(
                 epoch=epoch,
@@ -100,4 +100,3 @@ def _aggregate_results(results: list[StepResult]) -> StepResult:
         batch_size=total_batch,
         objective=results[0].objective,
     )
-

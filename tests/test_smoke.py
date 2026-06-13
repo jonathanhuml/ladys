@@ -21,7 +21,7 @@ def test_model_contracts_smoke():
     cassm = CASSMConfig(projection_dim=3).build(n_neurons=x.shape[-1], n_time=x.shape[1])
     cassm_out = cassm(x)
     cassm_loss = cassm.loss(batch, cassm_out)
-    assert cassm_out.reconstruction.shape == x.shape
+    assert cassm.predict_rates(x).shape == x.shape
     assert cassm_loss.total.ndim == 0
 
     gpfa_config = GPFAConfig(latent_dim=2)
@@ -31,4 +31,3 @@ def test_model_contracts_smoke():
     result = em.step(gpfa, batch, epoch=0)
     assert result.batch_size == x.shape[0]
     assert gpfa(x).latents.shape[:2] == x.shape[:2]
-

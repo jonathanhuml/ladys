@@ -2,13 +2,11 @@
 
 This ports the core shape of the local GPFA-MATLAB implementation:
 
-- `gpfaEngine.m` initializes observation parameters using FA/PCA-like moments.
+- `gpfaEngine.m` initializes observation parameters using factor analysis.
 - `exactInferenceWithLL.m` performs posterior inference and data likelihood.
 - `em.m` alternates posterior inference with closed-form updates for `C`, `d`,
   and diagonal `R`.
-
-The first Python version fixes GP RBF timescales during EM. Learning `gamma`
-via the MATLAB `learnGPparams.m` gradient optimization is the next extension.
+- `learnGPparams.m` updates RBF GP timescales from E-step sufficient statistics.
 """
 
 from __future__ import annotations
@@ -36,7 +34,11 @@ class GPFAConfig(BaseModelConfig):
     start_tau: float = 100.0
     start_eps: float = 1e-3
     min_var_frac: float = 0.01
-    learn_kernel_params: bool = False
+    learn_kernel_params: bool = True
+    fa_max_iters: int = 500
+    fa_tol: float = 1e-8
+    kernel_param_max_iters: int = 8
+    kernel_param_lr: float = 1.0
     jitter: float = 1e-5
     optimization: OptimizationConfig = Field(
         default_factory=lambda: OptimizationConfig(name="em")
@@ -52,6 +54,10 @@ class GPFAConfig(BaseModelConfig):
             start_eps=self.start_eps,
             min_var_frac=self.min_var_frac,
             learn_kernel_params=self.learn_kernel_params,
+            fa_max_iters=self.fa_max_iters,
+            fa_tol=self.fa_tol,
+            kernel_param_max_iters=self.kernel_param_max_iters,
+            kernel_param_lr=self.kernel_param_lr,
             jitter=self.jitter,
             objective=self.objective,
         )
@@ -61,6 +67,7 @@ class GPFAConfig(BaseModelConfig):
 class GPFAPosterior:
     latents: Tensor
     cov_t: Tensor
+    cov_gp: Tensor
     cov_big: Tensor
     log_likelihood: Tensor
 
@@ -77,7 +84,11 @@ class GPFA(BaseDynamicsModel):
         start_tau: float = 100.0,
         start_eps: float = 1e-3,
         min_var_frac: float = 0.01,
-        learn_kernel_params: bool = False,
+        learn_kernel_params: bool = True,
+        fa_max_iters: int = 500,
+        fa_tol: float = 1e-8,
+        kernel_param_max_iters: int = 8,
+        kernel_param_lr: float = 1.0,
         jitter: float = 1e-5,
         objective: str = "negative_log_marginal_likelihood",
     ) -> None:
@@ -88,6 +99,10 @@ class GPFA(BaseDynamicsModel):
         self.bin_width = float(bin_width)
         self.min_var_frac = float(min_var_frac)
         self.learn_kernel_params = learn_kernel_params
+        self.fa_max_iters = int(fa_max_iters)
+        self.fa_tol = float(fa_tol)
+        self.kernel_param_max_iters = int(kernel_param_max_iters)
+        self.kernel_param_lr = float(kernel_param_lr)
         self.jitter = float(jitter)
         self.objective = objective
 
@@ -132,21 +147,17 @@ class GPFA(BaseDynamicsModel):
     def fit_em_epoch(self, x: Tensor, epoch: int = 0) -> LossOutput:
         """Run one full E/M update and report normalized negative LL."""
 
+        x = x.float()
         with torch.no_grad():
-            x = x.float()
             if not self.initialized:
                 self.initialize(x)
             posterior = self._e_step(x, get_ll=True)
             self._m_step(x, posterior)
 
-            if self.learn_kernel_params:
-                # The MATLAB code calls learnGPparams.m here. Keeping this
-                # explicit prevents silent divergence from the reference.
-                raise NotImplementedError(
-                    "GPFA kernel timescale learning is not ported yet. "
-                    "Set learn_kernel_params=false or implement learnGPparams.m."
-                )
+        if self.learn_kernel_params:
+            self._learn_gp_params(posterior)
 
+        with torch.no_grad():
             total = -posterior.log_likelihood / x.numel()
             return LossOutput(
                 total=total,
@@ -154,33 +165,89 @@ class GPFA(BaseDynamicsModel):
                 objective=self.objective,
             )
 
+    @torch.no_grad()
     def initialize(self, x: Tensor) -> None:
-        """Moment/PCA initialization analogous to GPFA-MATLAB's FA init."""
+        """Initialize observation parameters with GPFA-MATLAB's fast FA EM."""
 
         x = x.float()
         flat = x.reshape(-1, self.n_neurons)
+        n_points = flat.shape[0]
         mean = flat.mean(dim=0)
         centered = flat - mean
-        covariance = centered.T @ centered / max(flat.shape[0], 1)
-        covariance = 0.5 * (covariance + covariance.T)
+        c_x = centered.T @ centered / max(n_points, 1)
+        c_x = 0.5 * (c_x + c_x.T)
+        diag_cx = torch.clamp(torch.diagonal(c_x), min=self.jitter)
+        var_floor = torch.clamp(self.min_var_frac * diag_cx, min=self.jitter)
 
-        evals, evecs = torch.linalg.eigh(covariance)
-        order = torch.argsort(evals, descending=True)
-        evals = evals[order]
-        evecs = evecs[:, order]
+        scale = self._factor_analysis_scale(c_x)
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(0)
+        loadings = torch.randn(
+            self.n_neurons,
+            self.latent_dim,
+            generator=generator,
+            dtype=x.dtype,
+        ).to(x.device)
+        loadings = loadings * math.sqrt(scale / max(self.latent_dim, 1))
+        private_var = diag_cx.clone()
 
-        noise_floor = torch.clamp(
-            self.min_var_frac * torch.diagonal(covariance),
-            min=self.jitter,
-        )
-        shared_scale = torch.clamp(evals[: self.latent_dim] - noise_floor.mean(), min=0.0)
-        C = evecs[:, : self.latent_dim] * torch.sqrt(shared_scale).unsqueeze(0)
-        R_diag = torch.diagonal(covariance) - C.pow(2).sum(dim=1)
-        R_diag = torch.clamp(R_diag, min=noise_floor)
+        eye_z = torch.eye(self.latent_dim, device=x.device, dtype=x.dtype)
+        ll_base: Tensor | None = None
+        ll_old = torch.tensor(0.0, device=x.device, dtype=x.dtype)
 
-        self.C.copy_(C)
+        for iteration in range(max(self.fa_max_iters, 1)):
+            inv_private = 1.0 / torch.clamp(private_var, min=self.jitter)
+            inv_private_loadings = inv_private[:, None] * loadings
+            inner = eye_z + loadings.T @ inv_private_loadings
+            chol_inner = torch.linalg.cholesky(
+                0.5 * (inner + inner.T)
+                + self.jitter * torch.eye(self.latent_dim, device=x.device, dtype=x.dtype)
+            )
+
+            beta_rhs = loadings.T * inv_private.unsqueeze(0)
+            beta = torch.cholesky_solve(beta_rhs, chol_inner)
+            c_x_beta = c_x @ beta.T
+            expected_zz = eye_z - beta @ loadings + beta @ c_x_beta
+            expected_zz = 0.5 * (expected_zz + expected_zz.T)
+
+            logdet_sigma = torch.log(torch.clamp(private_var, min=self.jitter)).sum()
+            logdet_sigma = logdet_sigma + 2.0 * torch.log(
+                torch.diagonal(chol_inner)
+            ).sum()
+            middle = inv_private_loadings.T @ c_x @ inv_private_loadings
+            trace_term = (diag_cx * inv_private).sum()
+            trace_term = trace_term - torch.trace(
+                torch.cholesky_solve(middle, chol_inner)
+            )
+            ll_current = (
+                n_points * (-self.n_neurons / 2.0 * math.log(2 * math.pi))
+                - 0.5 * n_points * (logdet_sigma + trace_term)
+            )
+
+            loadings_new = torch.linalg.solve(expected_zz.T, c_x_beta.T).T
+            private_new = diag_cx - (c_x_beta * loadings_new).sum(dim=1)
+            private_new = torch.maximum(var_floor, private_new)
+
+            if iteration <= 1:
+                ll_base = ll_current
+            elif ll_base is not None:
+                previous_gain = ll_old - ll_base
+                current_gain = ll_current - ll_base
+                if (
+                    ll_current >= ll_old
+                    and current_gain < (1.0 + self.fa_tol) * previous_gain
+                ):
+                    loadings = loadings_new
+                    private_var = private_new
+                    break
+
+            loadings = loadings_new
+            private_var = private_new
+            ll_old = ll_current
+
+        self.C.copy_(loadings)
         self.d.copy_(mean)
-        self.R_diag.copy_(R_diag + self.jitter)
+        self.R_diag.copy_(private_var + self.jitter)
         self._initialized.copy_(torch.tensor(True, device=x.device))
 
     def _decode(self, latents: Tensor) -> Tensor:
@@ -227,6 +294,17 @@ class GPFA(BaseDynamicsModel):
             idx = slice(t * self.latent_dim, (t + 1) * self.latent_dim)
             cov_t[t] = cov_big[idx, idx]
 
+        cov_gp = torch.empty(
+            self.latent_dim,
+            n_time,
+            n_time,
+            device=x.device,
+            dtype=x.dtype,
+        )
+        for dim in range(self.latent_dim):
+            idx = torch.arange(dim, self.latent_dim * n_time, self.latent_dim, device=x.device)
+            cov_gp[dim] = cov_big[idx[:, None], idx[None, :]]
+
         if get_ll:
             logdet_r = torch.log(torch.clamp(self.R_diag, min=self.jitter)).sum().to(
                 x.device, x.dtype
@@ -246,6 +324,7 @@ class GPFA(BaseDynamicsModel):
         return GPFAPosterior(
             latents=xsm,
             cov_t=cov_t,
+            cov_gp=cov_gp,
             cov_big=cov_big,
             log_likelihood=ll,
         )
@@ -297,6 +376,50 @@ class GPFA(BaseDynamicsModel):
         self.d.copy_(d_new)
         self.R_diag.copy_(r + self.jitter)
 
+    def _learn_gp_params(self, posterior: GPFAPosterior) -> None:
+        """Port of learnGPparams.m for RBF gamma with fixed GP noise."""
+
+        batch_size, n_time, _ = posterior.latents.shape
+        new_gamma = self.gamma.detach().clone()
+
+        for dim in range(self.latent_dim):
+            x_dim = posterior.latents[:, :, dim]
+            pauto_sum = batch_size * posterior.cov_gp[dim] + x_dim.T @ x_dim
+            pauto_sum = pauto_sum.detach()
+            log_gamma = torch.nn.Parameter(
+                torch.log(torch.clamp(self.gamma[dim].detach(), min=self.jitter))
+                .to(device=pauto_sum.device, dtype=pauto_sum.dtype)
+                .clone()
+            )
+            optimizer = torch.optim.LBFGS(
+                [log_gamma],
+                lr=self.kernel_param_lr,
+                max_iter=max(self.kernel_param_max_iters, 1),
+                line_search_fn="strong_wolfe",
+            )
+
+            def closure() -> Tensor:
+                optimizer.zero_grad(set_to_none=True)
+                objective = self._kernel_objective(
+                    log_gamma=log_gamma,
+                    pauto_sum=pauto_sum,
+                    n_trials=batch_size,
+                    eps=self.eps[dim].to(pauto_sum.device, pauto_sum.dtype),
+                    jitter=self.jitter,
+                )
+                objective.backward()
+                return objective
+
+            try:
+                optimizer.step(closure)
+            except RuntimeError:
+                continue
+
+            updated = torch.exp(log_gamma.detach()).clamp(min=self.jitter, max=1e6)
+            new_gamma[dim] = updated.to(new_gamma.device, new_gamma.dtype)
+
+        self.gamma.copy_(new_gamma)
+
     def _make_k_big(
         self,
         n_time: int,
@@ -325,3 +448,40 @@ class GPFA(BaseDynamicsModel):
             k_inv[idx[:, None], idx[None, :]] = k_dim_inv
 
         return k_big, k_inv, logdet_k
+
+    def _factor_analysis_scale(self, covariance: Tensor) -> float:
+        eye = torch.eye(covariance.shape[0], device=covariance.device, dtype=covariance.dtype)
+        try:
+            chol = torch.linalg.cholesky(covariance)
+            scale = torch.exp(2.0 * torch.log(torch.diagonal(chol)).sum() / covariance.shape[0])
+        except RuntimeError:
+            evals = torch.linalg.eigvalsh(covariance)
+            positive = evals[evals > self.jitter]
+            if positive.numel() == 0:
+                scale = torch.diagonal(covariance).mean()
+            else:
+                scale = torch.exp(torch.log(positive).mean())
+        scale = torch.clamp(scale, min=self.jitter)
+        if not torch.isfinite(scale):
+            scale = torch.clamp(torch.diagonal(covariance + self.jitter * eye).mean(), min=self.jitter)
+        return float(scale.detach().cpu())
+
+    @staticmethod
+    def _kernel_objective(
+        log_gamma: Tensor,
+        pauto_sum: Tensor,
+        n_trials: int,
+        eps: Tensor,
+        jitter: float,
+    ) -> Tensor:
+        n_time = pauto_sum.shape[0]
+        times = torch.arange(n_time, device=pauto_sum.device, dtype=pauto_sum.dtype)
+        dif_sq = (times[:, None] - times[None, :]).pow(2)
+        eye = torch.eye(n_time, device=pauto_sum.device, dtype=pauto_sum.dtype)
+        gamma = torch.exp(log_gamma)
+        kernel = (1.0 - eps) * torch.exp(-0.5 * gamma * dif_sq)
+        kernel = kernel + eps * eye + jitter * eye
+        chol = torch.linalg.cholesky(kernel)
+        logdet = 2.0 * torch.log(torch.diagonal(chol)).sum()
+        solve = torch.cholesky_solve(pauto_sum, chol)
+        return 0.5 * n_trials * logdet + 0.5 * torch.trace(solve)

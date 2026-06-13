@@ -6,8 +6,10 @@ All models must accept observations in `forward(x)` with shape:
 (batch, time, neurons)
 ```
 
-The return value is `ModelOutput`. The benchmark should treat these fields as
-the stable output surface:
+The return value is `ModelOutput`. Some methods cannot cheaply populate every
+field during the training path, so benchmark metrics should use
+`model.predict_rates(x)` when they specifically need firing-rate curves. The
+stable output fields are:
 
 - `rates`: predicted firing-rate curves in `(batch, time, neurons)` format.
   This is the primary Lorenz benchmark output.
@@ -21,11 +23,10 @@ the stable output surface:
   marginal log likelihoods, or internal states.
 
 For the Lorenz task, the default accuracy metric should compare
-`ModelOutput.rates` against the generated ground-truth rates. If a method cannot
-produce rates directly, it should provide `reconstruction`; `predict_rates()`
-falls back to that field.
+`model.predict_rates(x)` against the generated ground-truth rates. By default
+`predict_rates()` uses `ModelOutput.rates` and then `reconstruction`; methods
+such as CASSM can override it to call their native prediction path.
 
 Future benchmark tasks may add metrics that use `latents` for recovery of the
 known Lorenz state, `distribution` for calibration/log-likelihood, and `extras`
 for method-specific diagnostics. The forward signature should not change.
-

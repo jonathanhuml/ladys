@@ -135,7 +135,8 @@ def run_case(
     started = time.perf_counter()
     try:
         history = trainer.fit(model, strategy, train_loader, valid_loader)
-        elapsed = time.perf_counter() - started
+        wall_seconds = time.perf_counter() - started
+        optimizer_seconds = sum(report.seconds for report in history)
         final = history[-1]
         rate_mse = evaluate_rate_mse(model, valid_loader, args.device)
         return {
@@ -144,8 +145,9 @@ def run_case(
             "neurons": neurons,
             "seed": seed,
             "epochs": args.epochs,
-            "seconds": elapsed,
-            "seconds_per_epoch": elapsed / max(args.epochs, 1),
+            "seconds": optimizer_seconds,
+            "seconds_per_epoch": optimizer_seconds / max(args.epochs, 1),
+            "wall_seconds": wall_seconds,
             "train_loss": final.train.loss,
             "valid_loss": np.nan if final.valid is None else final.valid.loss,
             "rate_mse": rate_mse,
@@ -162,6 +164,7 @@ def run_case(
             "epochs": args.epochs,
             "seconds": elapsed,
             "seconds_per_epoch": elapsed / max(args.epochs, 1),
+            "wall_seconds": elapsed,
             "train_loss": np.nan,
             "valid_loss": np.nan,
             "rate_mse": np.nan,
@@ -250,6 +253,7 @@ def _write_csv(path: Path, rows: list[dict]) -> None:
         "epochs",
         "seconds",
         "seconds_per_epoch",
+        "wall_seconds",
         "train_loss",
         "valid_loss",
         "rate_mse",
@@ -271,6 +275,7 @@ def _write_numpy(path: Path, rows: list[dict]) -> None:
         ("epochs", "i8"),
         ("seconds", "f8"),
         ("seconds_per_epoch", "f8"),
+        ("wall_seconds", "f8"),
         ("train_loss", "f8"),
         ("valid_loss", "f8"),
         ("rate_mse", "f8"),
@@ -278,7 +283,15 @@ def _write_numpy(path: Path, rows: list[dict]) -> None:
     ]
     arr = np.empty(len(rows), dtype=dtype)
     for idx, row in enumerate(rows):
-        arr[idx] = tuple(row.get(name, "") for name, _ in dtype)
+        values = []
+        for name, dtype_name in dtype:
+            value = row.get(name, "")
+            if value == "" and dtype_name.startswith("f"):
+                value = np.nan
+            elif value == "" and dtype_name.startswith("i"):
+                value = 0
+            values.append(value)
+        arr[idx] = tuple(values)
     np.save(path, arr)
 
 

@@ -1,14 +1,14 @@
 name: cassm
-objective: dense_filter_gaussian_nll
-latent_dim: 3
-projection_dim: 8
-dt: 1.0
-init_obs_noise: 0.1
-jitter: 1.0e-5
+objective: cassm_elbo
+projection_dim: 20
+dt: 0.01
+dataset_name: null
+save_model: false
+use_dense_projection: false
+health_checks: true
 optimization:
   name: gradient
-  optimizer: AdamW
-  lr: 1.0e-3
+  optimizer: Adam
+  lr: 5.0e-2
   weight_decay: 0.0
-  gradient_clip: 1.0
-
+  gradient_clip: 300.0

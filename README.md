@@ -8,11 +8,12 @@ and a Lorenz synthetic dataset. Models accept `(batch, time, neurons)` tensors i
 
 ## Initial Examples
 
-- `zynamics.models.cassm`: dense computation-aware filtering prototype inspired
-  by CASSM. This is the API adapter shape; the full upstream sparse CASSM core
-  should replace the dense prototype as the benchmark matures.
-- `zynamics.models.gpfa`: Gaussian-observation GPFA with an EM optimization
-  strategy. One EM cycle is treated as one benchmark epoch.
+- `zynamics.models.cassm`: thin adapter around the upstream sparse CASSM
+  `KalmanFilterSmoother` implementation. Install the original `cassm` package
+  or the local CASSM repository before constructing this model.
+- `zynamics.models.gpfa`: Gaussian-observation GPFA with FA initialization,
+  EM updates, and RBF GP timescale learning. One full-dataset E/M update is
+  treated as one benchmark epoch.
 
 ## References Inspected
 
@@ -40,3 +41,4 @@ The script writes `lorenz_scaling_results.csv`,
 `artifacts/lorenz_scaling/`.
 
 See `docs/model_output_contract.md` for the forward-output convention.
+See `docs/optimizer_contract.md` for the benchmark epoch definition.

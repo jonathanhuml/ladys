@@ -19,7 +19,11 @@ model:
   start_tau: 100.0
   start_eps: 1.0e-3
   min_var_frac: 0.01
-  learn_kernel_params: false
+  learn_kernel_params: true
+  fa_max_iters: 500
+  fa_tol: 1.0e-8
+  kernel_param_max_iters: 8
+  kernel_param_lr: 1.0
   jitter: 1.0e-5
   optimization:
     name: em
@@ -28,4 +32,3 @@ trainer:
   epochs: 5
   batch_size: 4
   device: cpu
-
