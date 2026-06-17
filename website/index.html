@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>zkunkworks</title>
+    <meta
+      name="description"
+      content="zkunkworks hosts research software and documentation for neural dynamics projects."
+    >
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f7f5ef;
+        --ink: #151515;
+        --muted: #5c5a53;
+        --line: #d8d2c5;
+        --accent: #006b5f;
+        --accent-strong: #004c43;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #111412;
+          --ink: #f4f0e8;
+          --muted: #b6b0a5;
+          --line: #343933;
+          --accent: #6bd2c3;
+          --accent-strong: #91e8dc;
+        }
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+        background: var(--bg);
+        color: var(--ink);
+      }
+
+      main {
+        width: min(920px, calc(100% - 40px));
+        min-height: 100vh;
+        margin: 0 auto;
+        display: grid;
+        align-content: center;
+        gap: 40px;
+        padding: 72px 0;
+      }
+
+      header {
+        display: grid;
+        gap: 18px;
+      }
+
+      .mark {
+        width: 72px;
+        height: 72px;
+        border: 1px solid var(--line);
+        display: grid;
+        place-items: center;
+        background:
+          linear-gradient(135deg, transparent 0 45%, var(--accent) 45% 55%, transparent 55%),
+          linear-gradient(45deg, transparent 0 42%, var(--line) 42% 58%, transparent 58%);
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(3rem, 9vw, 6.5rem);
+        line-height: 0.95;
+        font-weight: 760;
+      }
+
+      p {
+        max-width: 680px;
+        margin: 0;
+        color: var(--muted);
+        font-size: 1.1rem;
+        line-height: 1.7;
+      }
+
+      nav {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 14px;
+      }
+
+      a {
+        color: var(--accent-strong);
+      }
+
+      .button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 44px;
+        padding: 0 18px;
+        border: 1px solid var(--accent);
+        color: var(--bg);
+        background: var(--accent);
+        text-decoration: none;
+        font-weight: 650;
+      }
+
+      .link {
+        display: inline-flex;
+        align-items: center;
+        min-height: 44px;
+        color: var(--accent-strong);
+        text-decoration: none;
+        font-weight: 650;
+      }
+
+      .link:hover,
+      .button:hover {
+        text-decoration: underline;
+      }
+
+      footer {
+        border-top: 1px solid var(--line);
+        padding-top: 22px;
+        color: var(--muted);
+        font-size: 0.92rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div class="mark" aria-hidden="true"></div>
+        <h1>zkunkworks</h1>
+        <p>
+          Research software, benchmarks, and documentation for neural dynamics
+          experiments. The first published project is zynamics, a PyTorch
+          scaffold for latent variable models of neural population activity.
+        </p>
+      </header>
+
+      <nav aria-label="Primary">
+        <a class="button" href="/zynamics/">Open zynamics docs</a>
+        <a class="link" href="https://github.com/jonathanhuml/zynamics">GitHub repository</a>
+      </nav>
+
+      <footer>
+        Built from the <code>jonathanhuml/zynamics</code> repository.
+      </footer>
+    </main>
+  </body>
+</html>

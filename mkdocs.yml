@@ -1,4 +1,5 @@
 site_name: zynamics
+site_url: https://zkunkworks.com/zynamics/
 docs_dir: docs
 site_dir: site
 
@@ -12,6 +13,7 @@ nav:
       - Model Output: model_output_contract.md
       - Optimizer: optimizer_contract.md
       - GPFA Port Notes: gpfa_port_notes.md
+  - Deployment: deployment.md
 
 theme:
   name: mkdocs
