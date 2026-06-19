@@ -13,6 +13,7 @@
         color-scheme: light;
         --bg: #ffffff;
         --ink: #111111;
+        --logo-ink: #2b2c2d;
         --muted: #3f3f3f;
         --line: #e5e5e5;
       }
@@ -46,19 +47,28 @@
         gap: 18px;
       }
 
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 22px;
+        min-width: 0;
+      }
+
       .logo {
         display: block;
         width: 132px;
-        max-width: 36vw;
         height: auto;
+        flex: 0 0 auto;
       }
 
       h1 {
         margin: 0;
-        font-size: clamp(3rem, 9vw, 6.5rem);
+        color: var(--logo-ink);
+        font-size: 5.6rem;
         line-height: 0.95;
         font-weight: 760;
         letter-spacing: 0;
+        white-space: nowrap;
       }
 
       p {
@@ -112,13 +122,43 @@
         color: var(--muted);
         font-size: 0.92rem;
       }
+
+      @media (max-width: 700px) {
+        .brand {
+          gap: 16px;
+        }
+
+        .logo {
+          width: 86px;
+        }
+
+        h1 {
+          font-size: 3.6rem;
+        }
+      }
+
+      @media (max-width: 430px) {
+        .brand {
+          gap: 12px;
+        }
+
+        .logo {
+          width: 54px;
+        }
+
+        h1 {
+          font-size: 2.25rem;
+        }
+      }
     </style>
   </head>
   <body>
     <main>
       <header>
-        <img class="logo" src="img/skunk.png" alt="zkunkworks skunk logo">
-        <h1>zkunkworks</h1>
+        <div class="brand">
+          <img class="logo" src="img/skunk.png" alt="zkunkworks skunk logo">
+          <h1>zkunkworks</h1>
+        </div>
         <p>
           Research software, benchmarks, and documentation for neural dynamics
           experiments. This is a small public workspace for rough ideas that
