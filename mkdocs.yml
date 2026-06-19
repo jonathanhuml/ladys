@@ -3,6 +3,9 @@ site_url: https://zkunkworks.com/zynamics/
 docs_dir: docs
 site_dir: site
 
+hooks:
+  - scripts/mkdocs_favicon.py
+
 nav:
   - Home: index.md
   - Models:
