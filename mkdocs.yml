@@ -17,3 +17,6 @@ nav:
 
 theme:
   name: mkdocs
+
+extra_css:
+  - stylesheets/minimal.css

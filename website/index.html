@@ -10,24 +10,11 @@
     >
     <style>
       :root {
-        color-scheme: light dark;
-        --bg: #f7f5ef;
-        --ink: #151515;
-        --muted: #5c5a53;
-        --line: #d8d2c5;
-        --accent: #006b5f;
-        --accent-strong: #004c43;
-      }
-
-      @media (prefers-color-scheme: dark) {
-        :root {
-          --bg: #111412;
-          --ink: #f4f0e8;
-          --muted: #b6b0a5;
-          --line: #343933;
-          --accent: #6bd2c3;
-          --accent-strong: #91e8dc;
-        }
+        color-scheme: light;
+        --bg: #ffffff;
+        --ink: #111111;
+        --muted: #3f3f3f;
+        --line: #e5e5e5;
       }
 
       * {
@@ -45,12 +32,12 @@
       }
 
       main {
-        width: min(920px, calc(100% - 40px));
+        width: min(760px, calc(100% - 40px));
         min-height: 100vh;
         margin: 0 auto;
         display: grid;
         align-content: center;
-        gap: 40px;
+        gap: 36px;
         padding: 72px 0;
       }
 
@@ -59,15 +46,11 @@
         gap: 18px;
       }
 
-      .mark {
-        width: 72px;
-        height: 72px;
-        border: 1px solid var(--line);
-        display: grid;
-        place-items: center;
-        background:
-          linear-gradient(135deg, transparent 0 45%, var(--accent) 45% 55%, transparent 55%),
-          linear-gradient(45deg, transparent 0 42%, var(--line) 42% 58%, transparent 58%);
+      .logo {
+        display: block;
+        width: 132px;
+        max-width: 36vw;
+        height: auto;
       }
 
       h1 {
@@ -75,14 +58,15 @@
         font-size: clamp(3rem, 9vw, 6.5rem);
         line-height: 0.95;
         font-weight: 760;
+        letter-spacing: 0;
       }
 
       p {
         max-width: 680px;
         margin: 0;
-        color: var(--muted);
         font-size: 1.1rem;
         line-height: 1.7;
+        color: var(--muted);
       }
 
       nav {
@@ -92,7 +76,7 @@
       }
 
       a {
-        color: var(--accent-strong);
+        color: var(--ink);
       }
 
       .button {
@@ -101,9 +85,9 @@
         justify-content: center;
         min-height: 44px;
         padding: 0 18px;
-        border: 1px solid var(--accent);
-        color: var(--bg);
-        background: var(--accent);
+        border: 1px solid var(--ink);
+        color: var(--ink);
+        background: var(--bg);
         text-decoration: none;
         font-weight: 650;
       }
@@ -112,7 +96,7 @@
         display: inline-flex;
         align-items: center;
         min-height: 44px;
-        color: var(--accent-strong);
+        color: var(--ink);
         text-decoration: none;
         font-weight: 650;
       }
@@ -133,7 +117,7 @@
   <body>
     <main>
       <header>
-        <div class="mark" aria-hidden="true"></div>
+        <img class="logo" src="img/skunk.png" alt="zkunkworks skunk logo">
         <h1>zkunkworks</h1>
         <p>
           Research software, benchmarks, and documentation for neural dynamics
