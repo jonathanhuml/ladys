@@ -94,5 +94,4 @@ mkdocs serve
 
 The GitHub Pages workflow publishes the root homepage at
 `https://zkunkworks.com/` from `website/` and the generated documentation at
-`https://zkunkworks.com/zynamics/`. Deployment notes live in
-`docs/deployment.md`.
+`https://zkunkworks.com/zynamics/`.

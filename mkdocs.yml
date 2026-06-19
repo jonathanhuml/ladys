@@ -13,7 +13,6 @@ nav:
       - Model Output: model_output_contract.md
       - Optimizer: optimizer_contract.md
       - GPFA Port Notes: gpfa_port_notes.md
-  - Deployment: deployment.md
 
 theme:
   name: mkdocs
