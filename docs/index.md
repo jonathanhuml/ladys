@@ -9,6 +9,17 @@ latent variable models of neural dynamics.
 - [Model output contract](model_output_contract.md)
 - [Optimizer contract](optimizer_contract.md)
 
+## CLI
+
+Run a full LaDyS experiment with:
+
+```bash
+ladys run -d lorenz -m cassm
+```
+
+This builds the dataset, model, trainer, evaluation metrics, and a self-contained
+run folder through the public `ladys.Experiment` orchestration API.
+
 Model pages are generated from model class docstrings and config defaults:
 
 ```bash

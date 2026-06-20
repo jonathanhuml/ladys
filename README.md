@@ -27,6 +27,33 @@ and a Lorenz synthetic dataset. Models accept `(batch, time, neurons)` tensors i
 PYTHONPATH=src python3 examples/smoke_compare.py
 ```
 
+## Public Experiment API
+
+LaDyS is organized around three public pieces:
+
+- `ladys.models`: model configs build PyTorch `nn.Module` instances and carry
+  their optimization settings.
+- `ladys.data.DataModule`: creates PyTorch train/validation datasets and
+  dataloaders.
+- `ladys.Experiment`: gathers data, model, training, evaluation metrics, and
+  artifacts into one inspectable run folder.
+
+Run the canonical CLI path with a dataset and model:
+
+```bash
+ladys run -d lorenz -m cassm
+```
+
+The run folder includes `config.json`, `history.csv`, `metrics.json`,
+`predictions.npz`, `model.pt`, and `report.md`. The CLI also accepts full YAML
+experiment configs:
+
+```bash
+ladys run -c configs/experiment/gpfa_lorenz.yaml
+ladys list datasets
+ladys list models
+```
+
 ## Scaling Benchmark
 
 ```bash

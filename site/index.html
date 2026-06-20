@@ -100,6 +100,10 @@
               <ul class="nav flex-column">
               </ul>
             </li>
+            <li class="nav-item" data-bs-level="2"><a href="#cli" class="nav-link">CLI</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
               </ul>
             </li>
         </ul>
@@ -116,6 +120,12 @@ latent variable models of neural dynamics.</p>
 <li><a href="model_output_contract/">Model output contract</a></li>
 <li><a href="optimizer_contract/">Optimizer contract</a></li>
 </ul>
+<h2 id="cli">CLI</h2>
+<p>Run a full LaDyS experiment with:</p>
+<pre><code class="language-bash">ladys run -d lorenz -m cassm
+</code></pre>
+<p>This builds the dataset, model, trainer, evaluation metrics, and a self-contained
+run folder through the public <code>ladys.Experiment</code> orchestration API.</p>
 <p>Model pages are generated from model class docstrings and config defaults:</p>
 <pre><code class="language-bash">python scripts/generate_model_docs.py
 </code></pre>
@@ -211,5 +221,5 @@ model pages rewrite those links to the correct relative path.</p>
 
 <!--
 MkDocs version : 1.6.1
-Build Date UTC : 2026-06-20 20:07:00.222442+00:00
+Build Date UTC : 2026-06-20 21:18:21.900695+00:00
 -->
