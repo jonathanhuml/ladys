@@ -1,5 +1,9 @@
 # LaDyS (Latent Dynamical Systems) Package
 
+<p align="center">
+  <img src="https://zkunkworks.com/ladys/assets/lorenz.png" alt="LaDyS Lorenz attractor logo" width="240">
+</p>
+
 PyTorch benchmark scaffolding for latent variable models of neural dynamics.
 
 The first API pass standardizes model construction, training/reporting contracts,
