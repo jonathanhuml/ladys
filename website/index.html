@@ -167,6 +167,7 @@
         display: inline-flex;
         align-items: center;
         justify-content: center;
+        gap: 8px;
         min-height: 44px;
         padding: 0 18px;
         border: 1px solid var(--ink);
@@ -179,10 +180,18 @@
       .link {
         display: inline-flex;
         align-items: center;
+        gap: 8px;
         min-height: 44px;
         color: var(--ink);
         text-decoration: none;
         font-weight: 650;
+      }
+
+      .nav-icon {
+        display: block;
+        width: 22px;
+        height: 22px;
+        flex: 0 0 auto;
       }
 
       .link:hover,
@@ -304,8 +313,26 @@
       </header>
 
       <nav aria-label="Primary">
-        <a class="button" href="/zynamics/">Open zynamics docs</a>
-        <a class="link" href="https://github.com/jonathanhuml/zynamics">GitHub repository</a>
+        <a class="button" href="/zynamics/">
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path
+              fill="currentColor"
+              d="M6 2h8l5 5v15H6V2zm7 1.7V8h4.3L13 3.7zM8 12v1.5h8V12H8zm0 4v1.5h8V16H8z"
+            >
+            </path>
+          </svg>
+          Open zynamics docs
+        </a>
+        <a class="link" href="https://github.com/jonathanhuml/zynamics">
+          <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path
+              fill="currentColor"
+              d="M12 0.3c-6.6 0-12 5.4-12 12 0 5.3 3.4 9.8 8.2 11.4 0.6 0.1 0.8-0.3 0.8-0.6v-2.1c-3.3 0.7-4-1.4-4-1.4-0.5-1.3-1.3-1.7-1.3-1.7-1.1-0.7 0.1-0.7 0.1-0.7 1.2 0.1 1.8 1.2 1.8 1.2 1.1 1.8 2.8 1.3 3.5 1 0.1-0.8 0.4-1.3 0.8-1.6-2.7-0.3-5.5-1.3-5.5-5.9 0-1.3 0.5-2.4 1.2-3.2-0.1-0.3-0.5-1.5 0.1-3.2 0 0 1-0.3 3.3 1.2 1-0.3 2-0.4 3-0.4s2 0.1 3 0.4c2.3-1.6 3.3-1.2 3.3-1.2 0.6 1.7 0.2 2.9 0.1 3.2 0.8 0.9 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9 0.4 0.4 0.8 1.1 0.8 2.2v3.2c0 0.3 0.2 0.7 0.8 0.6 4.8-1.6 8.2-6.1 8.2-11.4 0.1-6.6-5.3-12-11.9-12z"
+            >
+            </path>
+          </svg>
+          GitHub repository
+        </a>
       </nav>
 
     </main>
