@@ -19,6 +19,7 @@ nav:
 
 theme:
   name: mkdocs
+  custom_dir: overrides
 
 extra_css:
   - stylesheets/minimal.css
