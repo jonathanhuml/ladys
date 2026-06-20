@@ -43,6 +43,21 @@ body > .container {
   color: #111111;
 }
 
+.navbar-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.navbar-brand::before {
+  content: "";
+  display: inline-block;
+  width: 32px;
+  height: 22px;
+  background: url("../assets/lorenz.png") center / contain no-repeat;
+  flex: 0 0 auto;
+}
+
 .navbar-dark .navbar-nav .nav-link:focus,
 .navbar-dark .navbar-nav .nav-link:hover {
   color: #000000;
@@ -93,6 +108,21 @@ h6 {
 
 h1 {
   font-size: 2.6rem;
+}
+
+body.homepage [role="main"] > h1#zynamics {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+body.homepage [role="main"] > h1#zynamics::before {
+  content: "";
+  display: inline-block;
+  width: 72px;
+  height: 50px;
+  background: url("../assets/lorenz.png") center / contain no-repeat;
+  flex: 0 0 auto;
 }
 
 a {
