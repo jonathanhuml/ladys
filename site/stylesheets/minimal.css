@@ -73,8 +73,10 @@ body > .container {
 
 .zkunkworks-nav-logo {
   display: block;
-  width: 34px;
-  height: auto;
+  width: 34px !important;
+  max-width: 34px;
+  height: auto !important;
+  max-height: 24px;
 }
 
 .navbar-dark .navbar-toggler {
@@ -175,7 +177,9 @@ footer {
 
 .zkunkworks-footer-logo {
   display: inline-block;
-  width: 28px;
-  height: auto;
+  width: 28px !important;
+  max-width: 28px;
+  height: auto !important;
+  max-height: 20px;
   flex: 0 0 auto;
 }
