@@ -1,6 +1,7 @@
-# ladys
+# LaDyS
 
-PyTorch benchmark scaffolding for latent variable models of neural dynamics.
+LaDyS (Latent Dynamical Systems) provides PyTorch benchmark scaffolding for
+latent variable models of neural dynamics.
 
 ## Documentation
 

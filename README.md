@@ -1,4 +1,4 @@
-# ladys
+# LaDyS (Latent Dynamical Systems) Package
 
 PyTorch benchmark scaffolding for latent variable models of neural dynamics.
 

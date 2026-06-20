@@ -76,7 +76,7 @@ class CASSM(BaseDynamicsModel):
 
     Use CASSM when benchmarking computation-aware sparse state-space models
     against latent dynamics baselines. The scientific implementation lives in
-    the upstream CASSM package; this class maps it onto ladys' model, loss,
+    the upstream CASSM package; this class maps it onto the LaDyS model, loss,
     prediction, and device contracts.
 
     ## Inputs

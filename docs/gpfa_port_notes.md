@@ -16,13 +16,13 @@ Python structure while keeping tensors in PyTorch:
 
 Current Elephant-aligned choices:
 
-- Elephant uses `sklearn.decomposition.FactorAnalysis`; ladys ports the same
+- Elephant uses `sklearn.decomposition.FactorAnalysis`; LaDyS ports the same
   FA EM objective in torch to avoid adding sklearn to the model dependency
   surface.
-- Elephant uses SciPy `L-BFGS-B` for `grad_betgam`; ladys uses PyTorch
+- Elephant uses SciPy `L-BFGS-B` for `grad_betgam`; LaDyS uses PyTorch
   autograd with `torch.optim.LBFGS` on the equivalent objective.
 - Elephant exposes both raw latent trajectories and `latent_variable_orth`.
-  Ladys now returns raw latents in `ModelOutput.latents` and
+  LaDyS now returns raw latents in `ModelOutput.latents` and
   orthonormalized latents plus `Corth` in `ModelOutput.extras`.
 
 Orthonormalization is postprocessing for latent visualization. It should not

@@ -9,7 +9,7 @@
         <link rel="canonical" href="https://zkunkworks.com/ladys/gpfa_port_notes/">
         <link rel="shortcut icon" href="../assets/favicon.ico">
         
-        <title>GPFA Port Notes - ladys</title>
+        <title>GPFA Port Notes - LaDyS</title>
         <link href="../css/bootstrap.min.css" rel="stylesheet">
         <link href="../css/fontawesome.min.css" rel="stylesheet">
         <link href="../css/brands.min.css" rel="stylesheet">
@@ -26,7 +26,7 @@
     <body>
         <div class="navbar fixed-top navbar-expand-lg navbar-dark bg-primary">
             <div class="container">
-                <a class="navbar-brand" href="..">ladys</a>
+                <a class="navbar-brand" href="..">LaDyS</a>
                 <!-- Expander button -->
                 <button type="button" class="navbar-toggler" data-bs-toggle="collapse" data-bs-target="#navbar-collapse" aria-controls="navbar-collapse" aria-expanded="false" aria-label="Toggle navigation">
                     <span class="navbar-toggler-icon"></span>
@@ -124,13 +124,13 @@ Python structure while keeping tensors in PyTorch:</p>
 </ul>
 <p>Current Elephant-aligned choices:</p>
 <ul>
-<li>Elephant uses <code>sklearn.decomposition.FactorAnalysis</code>; ladys ports the same
+<li>Elephant uses <code>sklearn.decomposition.FactorAnalysis</code>; LaDyS ports the same
   FA EM objective in torch to avoid adding sklearn to the model dependency
   surface.</li>
-<li>Elephant uses SciPy <code>L-BFGS-B</code> for <code>grad_betgam</code>; ladys uses PyTorch
+<li>Elephant uses SciPy <code>L-BFGS-B</code> for <code>grad_betgam</code>; LaDyS uses PyTorch
   autograd with <code>torch.optim.LBFGS</code> on the equivalent objective.</li>
 <li>Elephant exposes both raw latent trajectories and <code>latent_variable_orth</code>.
-  Ladys now returns raw latents in <code>ModelOutput.latents</code> and
+  LaDyS now returns raw latents in <code>ModelOutput.latents</code> and
   orthonormalized latents plus <code>Corth</code> in <code>ModelOutput.extras</code>.</li>
 </ul>
 <p>Orthonormalization is postprocessing for latent visualization. It should not
