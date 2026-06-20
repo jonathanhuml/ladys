@@ -18,6 +18,7 @@
         --logo-ink: #2b2c2d;
         --muted: #3f3f3f;
         --line: #e5e5e5;
+        --focus: #6b6b6b;
       }
 
       * {
@@ -73,12 +74,55 @@
         white-space: nowrap;
       }
 
+      h2,
+      h3,
+      p {
+        margin: 0;
+      }
+
+      h2 {
+        color: var(--ink);
+        font-size: 1rem;
+        font-weight: 700;
+        line-height: 1.3;
+      }
+
+      h3 {
+        color: var(--ink);
+        font-size: 1.1rem;
+        font-weight: 700;
+        line-height: 1.4;
+      }
+
       p {
         max-width: 680px;
-        margin: 0;
         font-size: 1.1rem;
         line-height: 1.7;
         color: var(--muted);
+      }
+
+      .content {
+        display: grid;
+        gap: 24px;
+      }
+
+      .projects {
+        display: grid;
+        gap: 18px;
+        border-top: 1px solid var(--line);
+        padding-top: 24px;
+      }
+
+      .project {
+        display: grid;
+        gap: 6px;
+      }
+
+      .content a {
+        color: var(--ink);
+        text-decoration: underline;
+        text-decoration-thickness: 1px;
+        text-underline-offset: 0.18em;
       }
 
       nav {
@@ -116,6 +160,11 @@
       .link:hover,
       .button:hover {
         text-decoration: underline;
+      }
+
+      a:focus-visible {
+        outline: 2px solid var(--focus);
+        outline-offset: 4px;
       }
 
       footer {
@@ -161,12 +210,46 @@
           <img class="logo" src="img/skunk.png" alt="zkunkworks skunk logo">
           <h1>zkunkworks</h1>
         </div>
-        <p>
-          Research software, benchmarks, and documentation for neural dynamics
-          experiments. This is a small public workspace for rough ideas that
-          become usable tools. The first published project is zynamics, a PyTorch
-          scaffold for latent variable models of neural population activity.
-        </p>
+        <div class="content">
+          <p>
+            Zkunkworks is a small open-source initiative for developing tools
+            for researchers to build better computational models of the brain,
+            specifically dynamical latent variable models to predict neural
+            activity forward in time. At the moment, we focus exclusively on
+            single-cell neural recordings, which means we primarily work with
+            animal data.
+          </p>
+
+          <section class="projects" aria-labelledby="projects-title">
+            <h2 id="projects-title">Current Projects</h2>
+
+            <article class="project">
+              <h3><a href="/zynamics/">Zynamics</a></h3>
+              <p>
+                A PyTorch package for benchmarking new models against standard
+                dynamical latent variable models like GPFA, LFADS, and CASSM.
+                Unfortunately, the Neural Latents Benchmark was sunsetted for
+                this task in January 2026, and benchmarked on just four
+                small-scale datasets. Thus, the code was a black box, preventing
+                researchers from testing their models on new datasets or
+                debugging on synthetic datasets. We are paying out
+                <a href="https://docs.google.com/spreadsheets/d/13rB_wCwwvbkaSnQLZv7R8A8GGw9F93wmmn-9LOATJxc/edit?usp=sharing">model-code bounties</a>.
+                However, we welcome any new task suggestions and are willing to
+                pay out bounties for tasks you think are useful. Currently
+                released.
+              </p>
+            </article>
+
+            <article class="project">
+              <h3>RODIN</h3>
+              <p>
+                A large-scale, pretrained foundation model trained on tens of
+                thousands of hours of primate recordings to predict neural
+                activity forward in time. Coming soon.
+              </p>
+            </article>
+          </section>
+        </div>
       </header>
 
       <nav aria-label="Primary">
