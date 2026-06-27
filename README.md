@@ -13,23 +13,11 @@ and a Lorenz synthetic dataset. Models accept `(batch, time, neurons)` tensors i
 ## Initial Examples
 
 - `ladys.models.cassm`: thin adapter around the upstream sparse CASSM
-  `KalmanFilterSmoother` implementation. Install the original `cassm` package
-  or the local CASSM repository before constructing this model.
+  `KalmanFilterSmoother` implementation. 
 - `ladys.models.gpfa`: Gaussian-observation GPFA with FA initialization,
   EM updates, and RBF GP timescale learning. One full-dataset E/M update is
   treated as one benchmark epoch.
 
-## References Inspected
-
-- Local planning note: `/Users/jonathanhuml/Desktop/npdb.md`
-- CASSM Lorenz data source: `jonathanhuml/cassm/src/cassm/datasets`
-- Local GPFA-MATLAB reference: `/Users/jonathanhuml/Desktop/gpfa-matlab`
-
-## Smoke Usage
-
-```bash
-PYTHONPATH=src python3 examples/smoke_compare.py
-```
 
 ## Public Experiment API
 
@@ -122,7 +110,3 @@ Install the docs extra and serve the site locally:
 pip install -e ".[docs]"
 mkdocs serve
 ```
-
-The GitHub Pages workflow publishes the root homepage at
-`https://zkunkworks.com/` from `website/` and the generated documentation at
-`https://zkunkworks.com/ladys/`.
