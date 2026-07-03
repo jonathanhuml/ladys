@@ -33,7 +33,11 @@ def matern_time_noise(delta_t: torch.Tensor,
 def transition_matrix_time(delta_t: torch.Tensor, ell: torch.Tensor) -> torch.Tensor:
 
     lam = torch.sqrt(torch.tensor(3.0, device=delta_t.device)) / ell
-    F_t = torch.tensor([[0.0, 1.0], [-lam**2, -2.0 * lam]], device=delta_t.device)
+    zero = torch.zeros_like(lam)
+    one = torch.ones_like(lam)
+    F_t = torch.stack(
+        [torch.stack([zero, one]), torch.stack([-(lam**2), -2.0 * lam])],
+    ).squeeze(-1)
     return torch.matrix_exp(F_t * delta_t)
 
 class KalmanFilterSmoother(nn.Module):

@@ -5,7 +5,7 @@ time-axis length used by GPFA's dense posterior covariance operations.
 
 Example:
     PYTHONPATH=src python3 scripts/benchmark_lorenz_time_scaling.py \
-        --models cassm gpfa --time-steps 10 100 1000 10000 \
+        --models cassm gpfa kalman --time-steps 10 100 1000 10000 \
         --neurons 100 --cassm-projection-dim 5 --gpfa-latent-dim 5
 """
 
@@ -33,7 +33,7 @@ from benchmark_lorenz_scaling import MODEL_CONFIGS, run_case
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--models", nargs="+", default=["cassm", "gpfa"])
+    parser.add_argument("--models", nargs="+", default=["cassm", "gpfa", "kalman"])
     parser.add_argument("--time-steps", nargs="+", type=int, default=[10, 100, 1000])
     parser.add_argument("--neurons", type=int, default=100)
     parser.add_argument("--seeds", nargs="+", type=int, default=[1])
@@ -198,28 +198,50 @@ def plot_results(rows: list[dict], path: Path) -> None:
 
 
 def write_summary(rows: list[dict], path: Path) -> None:
+    models = _ordered_models(rows)
+    include_ratio = {"cassm", "gpfa"}.issubset(models)
     lines = [
         "# Lorenz Time-Length Scaling Summary",
         "",
-        "| time bins | CASSM s/epoch | GPFA s/epoch | CASSM/GPFA time ratio | CASSM status | GPFA status |",
-        "| ---: | ---: | ---: | ---: | --- | --- |",
+        "| time bins | "
+        + " | ".join(f"{model.upper()} s/epoch" for model in models)
+        + (" | CASSM/GPFA time ratio" if include_ratio else "")
+        + " | "
+        + " | ".join(f"{model.upper()} status" for model in models)
+        + " |",
+        "| ---: | "
+        + " | ".join("---:" for _ in models)
+        + (" | ---:" if include_ratio else "")
+        + " | "
+        + " | ".join("---" for _ in models)
+        + " |",
     ]
     by_key = {(str(row["model"]), int(row["time_steps"])): row for row in rows}
     for time_steps in sorted({int(row["time_steps"]) for row in rows}):
+        model_rows = [by_key.get((model, time_steps)) for model in models]
+        ratio = ""
         cassm = by_key.get(("cassm", time_steps))
         gpfa = by_key.get(("gpfa", time_steps))
-        cassm_seconds = _format_seconds(cassm)
-        gpfa_seconds = _format_seconds(gpfa)
-        ratio = ""
         if cassm and gpfa and cassm.get("status") == "ok" and gpfa.get("status") == "ok":
             ratio = f"{float(cassm['seconds_per_epoch']) / float(gpfa['seconds_per_epoch']):.2f}x"
         lines.append(
             "| "
-            f"{time_steps} | {cassm_seconds} | {gpfa_seconds} | {ratio} | "
-            f"{'' if cassm is None else cassm.get('status', '')} | "
-            f"{'' if gpfa is None else gpfa.get('status', '')} |"
+            f"{time_steps} | "
+            + " | ".join(_format_seconds(row) for row in model_rows)
+            + (f" | {ratio}" if include_ratio else "")
+            + " | "
+            + " | ".join("" if row is None else str(row.get("status", "")) for row in model_rows)
+            + " |"
         )
     path.write_text("\n".join(lines) + "\n")
+
+
+def _ordered_models(rows: list[dict]) -> list[str]:
+    known_order = ["cassm", "gpfa", "kalman"]
+    present = {str(row["model"]) for row in rows}
+    ordered = [model for model in known_order if model in present]
+    ordered.extend(sorted(present - set(ordered)))
+    return ordered
 
 
 def _format_seconds(row: dict | None) -> str:

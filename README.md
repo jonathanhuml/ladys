@@ -17,6 +17,8 @@ and a Lorenz synthetic dataset. Models accept `(batch, time, neurons)` tensors i
 - `ladys.models.gpfa`: Gaussian-observation GPFA with FA initialization,
   EM updates, and RBF GP timescale learning. One full-dataset E/M update is
   treated as one benchmark epoch.
+- `ladys.models.kalman`: dense Kalman filter baseline from the bundled CASSM
+  source, exposed with per-trial rate predictions for benchmark metrics.
 
 
 ## Public Experiment API
@@ -50,7 +52,7 @@ ladys list models
 
 ```bash
 PYTHONPATH=src python3 scripts/benchmark_lorenz_scaling.py \
-  --models cassm gpfa \
+  --models cassm gpfa kalman \
   --neurons 10 100 1000 \
   --seeds 1
 ```
@@ -63,7 +65,7 @@ The script writes `lorenz_scaling_results.csv`,
 
 ```bash
 PYTHONPATH=src python3 scripts/benchmark_lorenz_loss_curves.py \
-  --models cassm gpfa \
+  --models cassm gpfa kalman \
   --neurons 100 \
   --epochs 30
 ```
@@ -86,7 +88,8 @@ preprocessing:
     kern_sd_ms: 50.0
 ```
 
-`configs/experiment/cassm_lorenz.yaml` enables this CASSM-style spike
+`configs/experiment/cassm_lorenz.yaml` and
+`configs/experiment/kalman_lorenz.yaml` enable this CASSM-style spike
 smoothing. `configs/experiment/gpfa_lorenz.yaml` leaves observations raw.
 
 See `docs/model_output_contract.md` for the forward-output convention.

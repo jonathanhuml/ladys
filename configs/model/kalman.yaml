@@ -1,0 +1,11 @@
+name: kalman
+objective: negative_log_marginal_likelihood
+dt: 0.01
+dataset_name: null
+save_model: false
+optimization:
+  name: gradient
+  optimizer: Adam
+  lr: 5.0e-2
+  weight_decay: 0.0
+  gradient_clip: 300.0

@@ -1,0 +1,36 @@
+dataset:
+  name: lorenz
+  neurons: 32
+  num_inits: 4
+  num_trials: 8
+  num_steps: 100
+  burn_steps: 1000
+  train_fraction: 0.8
+  seed: 0
+  latent_dt: 0.015
+  spike_bin_size: 1.0
+  base_rate: 1.0
+
+model:
+  name: kalman
+  objective: negative_log_marginal_likelihood
+  dt: 0.01
+  dataset_name: null
+  save_model: false
+  optimization:
+    name: gradient
+    optimizer: Adam
+    lr: 5.0e-2
+    weight_decay: 0.0
+    gradient_clip: 300.0
+
+preprocessing:
+  observations:
+    name: smooth_firing_rate
+    sampling_precision: 20.0
+    kern_sd_ms: 50.0
+
+trainer:
+  epochs: 5
+  batch_size: 4
+  device: cpu

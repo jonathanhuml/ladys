@@ -110,3 +110,4 @@ def test_cli_lists_models(capsys):
     assert main(["list", "models"]) == 0
     output = capsys.readouterr().out
     assert "gpfa" in output
+    assert "kalman" in output

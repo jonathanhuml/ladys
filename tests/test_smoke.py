@@ -1,7 +1,7 @@
 from torch.utils.data import DataLoader
 
 from ladys.datasets import LorenzDataset, LorenzDatasetConfig
-from ladys.models import CASSMConfig, GPFAConfig
+from ladys.models import CASSMConfig, GPFAConfig, KalmanConfig
 from ladys.training.strategies import build_strategy
 
 
@@ -23,6 +23,12 @@ def test_model_contracts_smoke():
     cassm_loss = cassm.loss(batch, cassm_out)
     assert cassm.predict_rates(x).shape == x.shape
     assert cassm_loss.total.ndim == 0
+
+    kalman = KalmanConfig().build(n_neurons=x.shape[-1], n_time=x.shape[1])
+    kalman_out = kalman(x)
+    kalman_loss = kalman.loss(batch, kalman_out)
+    assert kalman.predict_rates(x).shape == x.shape
+    assert kalman_loss.total.ndim == 0
 
     gpfa_config = GPFAConfig(latent_dim=2)
     gpfa = gpfa_config.build(n_neurons=x.shape[-1], n_time=x.shape[1])

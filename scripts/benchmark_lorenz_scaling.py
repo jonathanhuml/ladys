@@ -10,10 +10,10 @@ one or more methods through the shared trainer/strategy contract, then writes:
 
 Example:
     PYTHONPATH=src python3 scripts/benchmark_lorenz_scaling.py \
-        --models cassm gpfa --neurons 10 100 1000 --seeds 1 2 3 4 5
+        --models cassm gpfa kalman --neurons 10 100 1000 --seeds 1 2 3 4 5
 
     PYTHONPATH=src python3 scripts/benchmark_lorenz_scaling.py \
-        --models cassm gpfa --neurons 90 900 --cassm-projection-dim 10 \
+        --models cassm gpfa kalman --neurons 90 900 --cassm-projection-dim 10 \
         --gpfa-latent-dim 10
 """
 
@@ -41,7 +41,7 @@ from torch import Tensor
 from torch.utils.data import DataLoader
 
 from ladys.datasets import LorenzDataset, LorenzDatasetConfig
-from ladys.models import CASSMConfig, GPFAConfig
+from ladys.models import CASSMConfig, GPFAConfig, KalmanConfig
 from ladys.models.base import BaseModelConfig
 from ladys.preprocessing import PreprocessedDataset, PreprocessingConfig
 from ladys.training import Trainer, TrainerConfig
@@ -52,12 +52,13 @@ from ladys.utils.yaml import load_yaml
 MODEL_CONFIGS = {
     "cassm": CASSMConfig,
     "gpfa": GPFAConfig,
+    "kalman": KalmanConfig,
 }
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--models", nargs="+", default=["cassm", "gpfa"])
+    parser.add_argument("--models", nargs="+", default=["cassm", "gpfa", "kalman"])
     parser.add_argument("--neurons", nargs="+", type=int, default=[10, 100, 1000])
     parser.add_argument("--seeds", nargs="+", type=int, default=[1])
     parser.add_argument("--epochs", type=int, default=1)
@@ -225,6 +226,8 @@ def build_model_config(
         return CASSMConfig(projection_dim=projection_dim)
     if model_name == "gpfa":
         return GPFAConfig(latent_dim=args.gpfa_latent_dim)
+    if model_name == "kalman":
+        return KalmanConfig()
     raise KeyError(model_name)
 
 

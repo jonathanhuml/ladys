@@ -13,10 +13,10 @@ contract, then writes:
 
 Example:
     PYTHONPATH=src python3 scripts/benchmark_lorenz_loss_curves.py \
-        --models cassm gpfa --neurons 100 --epochs 30
+        --models cassm gpfa kalman --neurons 100 --epochs 30
 
     PYTHONPATH=src python3 scripts/benchmark_lorenz_loss_curves.py \
-        --models cassm gpfa --neurons 90 --epochs 30 \
+        --models cassm gpfa kalman --neurons 90 --epochs 30 \
         --cassm-projection-dim 10 --gpfa-latent-dim 10
 """
 
@@ -42,7 +42,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from ladys.datasets import LorenzDataset, LorenzDatasetConfig
-from ladys.models import CASSMConfig, GPFAConfig
+from ladys.models import CASSMConfig, GPFAConfig, KalmanConfig
 from ladys.models.base import BaseModelConfig
 from ladys.preprocessing import PreprocessedDataset, PreprocessingConfig
 from ladys.training import Trainer, TrainerConfig
@@ -53,12 +53,13 @@ from ladys.utils.yaml import load_yaml
 MODEL_CONFIGS = {
     "cassm": CASSMConfig,
     "gpfa": GPFAConfig,
+    "kalman": KalmanConfig,
 }
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--models", nargs="+", default=["cassm", "gpfa"])
+    parser.add_argument("--models", nargs="+", default=["cassm", "gpfa", "kalman"])
     parser.add_argument("--neurons", type=int, default=100)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--epochs", type=int, default=30)
@@ -247,6 +248,8 @@ def build_model_config(
         return CASSMConfig(projection_dim=projection_dim)
     if model_name == "gpfa":
         return GPFAConfig(latent_dim=args.gpfa_latent_dim)
+    if model_name == "kalman":
+        return KalmanConfig()
     raise KeyError(model_name)
 
 
