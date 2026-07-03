@@ -1,4 +1,4 @@
-"""Adapter for the upstream sparse CASSM implementation."""
+"""Adapter for the bundled sparse CASSM implementation."""
 
 from __future__ import annotations
 
@@ -22,20 +22,21 @@ os.environ.setdefault("MPLCONFIGDIR", str(_MPL_CACHE))
 os.environ.setdefault("XDG_CACHE_HOME", str(_XDG_CACHE))
 
 
-def _upstream_cassm_class():
+def _bundled_cassm_class():
     try:
-        from cassm.models.computation_aware_ssm import KalmanFilterSmoother
+        from cassm.models import ComputationAwareFilterSmoother
     except ImportError as exc:
         raise ImportError(
-            "CASSMConfig requires the upstream `cassm` package. Install it with "
-            "`pip install cassm` or install the local CASSM repository in editable mode."
+            "LaDyS ships the CASSM source under `src/cassm`, but its runtime "
+            "dependencies are unavailable. Install LaDyS with its project "
+            "dependencies, for example `pip install -e .`."
         ) from exc
-    return KalmanFilterSmoother
+    return ComputationAwareFilterSmoother
 
 
 @BaseModelConfig.register
 class CASSMConfig(BaseModelConfig):
-    """Config for the upstream sparse CASSM adapter."""
+    """Config for the bundled sparse CASSM adapter."""
 
     name: Literal["cassm"] = "cassm"
     objective: str = "cassm_elbo"
@@ -70,14 +71,14 @@ class CASSMConfig(BaseModelConfig):
 
 
 class CASSM(BaseDynamicsModel):
-    """Thin wrapper around the original CASSM KalmanFilterSmoother.
+    """Thin wrapper around the bundled CASSM sparse filter/smoother.
 
     ## When to use
 
     Use CASSM when benchmarking computation-aware sparse state-space models
-    against latent dynamics baselines. The scientific implementation lives in
-    the upstream CASSM package; this class maps it onto the LaDyS model, loss,
-    prediction, and device contracts.
+    against latent dynamics baselines. LaDyS ships the CASSM source directly in
+    `src/cassm`; this class maps it onto the LaDyS model, loss, prediction, and
+    device contracts.
 
     ## Inputs
 
@@ -85,7 +86,7 @@ class CASSM(BaseDynamicsModel):
 
     ## Outputs
 
-    The training path returns the upstream ELBO-style loss in `extras["loss"]`.
+    The training path returns the CASSM ELBO-style loss in `extras["loss"]`.
     `predict_rates` calls CASSM's native filtering path and returns nonnegative
     rate predictions shaped like the input observations.
     """
@@ -116,8 +117,8 @@ class CASSM(BaseDynamicsModel):
         self.health_checks = bool(health_checks)
         self.objective = objective
 
-        upstream_cls = _upstream_cassm_class()
-        self.core = upstream_cls(
+        bundled_cls = _bundled_cassm_class()
+        self.core = bundled_cls(
             projection_dim=self.projection_dim,
             nneurons=self.n_neurons,
             timesteps=self.n_time,
@@ -126,7 +127,6 @@ class CASSM(BaseDynamicsModel):
             dataset_name=self.dataset_name,
             save_model=self.save_model,
             use_dense_projection=self.use_dense_projection,
-            health_checks=self.health_checks,
         )
 
     def forward(self, x: Tensor) -> ModelOutput:
@@ -165,7 +165,7 @@ class CASSM(BaseDynamicsModel):
         return module
 
     def _sync_core_device(self, device: torch.device) -> None:
-        """Move upstream plain tensor attributes that are not registered buffers."""
+        """Move CASSM plain tensor attributes that are not registered buffers."""
 
         self.core.device = device
         if hasattr(self.core, "dt"):

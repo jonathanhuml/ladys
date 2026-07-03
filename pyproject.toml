@@ -9,7 +9,7 @@ description = "PyTorch benchmark scaffolding for latent neural dynamics models."
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "THIRD_PARTY_LICENSES/*"]
 authors = [
   { name = "Jon Huml" },
 ]
@@ -25,10 +25,16 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
+  "geotorch",
+  "gpytorch",
+  "jaxtyping>=0.2.31",
+  "linear-operator",
+  "matplotlib>=3.4.3",
   "numpy>=1.24",
+  "prettytable>=3.0",
   "pydantic>=2",
   "scipy>=1.10",
-  "torch>=2.0",
+  "torch>=2.1.2",
   "PyYAML>=6.0",
 ]
 

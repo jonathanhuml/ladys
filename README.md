@@ -12,8 +12,8 @@ and a Lorenz synthetic dataset. Models accept `(batch, time, neurons)` tensors i
 
 ## Initial Examples
 
-- `ladys.models.cassm`: thin adapter around the upstream sparse CASSM
-  `KalmanFilterSmoother` implementation. 
+- `ladys.models.cassm`: thin adapter around the bundled sparse CASSM
+  implementation shipped in `src/cassm`.
 - `ladys.models.gpfa`: Gaussian-observation GPFA with FA initialization,
   EM updates, and RBF GP timescale learning. One full-dataset E/M update is
   treated as one benchmark epoch.

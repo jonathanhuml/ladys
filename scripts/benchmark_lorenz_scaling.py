@@ -11,6 +11,10 @@ one or more methods through the shared trainer/strategy contract, then writes:
 Example:
     PYTHONPATH=src python3 scripts/benchmark_lorenz_scaling.py \
         --models cassm gpfa --neurons 10 100 1000 --seeds 1 2 3 4 5
+
+    PYTHONPATH=src python3 scripts/benchmark_lorenz_scaling.py \
+        --models cassm gpfa --neurons 90 900 --cassm-projection-dim 10 \
+        --gpfa-latent-dim 10
 """
 
 from __future__ import annotations
@@ -65,6 +69,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--output-dir", default="artifacts/lorenz_scaling")
     parser.add_argument("--experiment-config-dir", default="configs/experiment")
+    parser.add_argument(
+        "--preprocessing-mode",
+        choices=["model", "none"],
+        default="model",
+        help=(
+            "Observation preprocessing: 'model' uses each experiment config, "
+            "and 'none' uses raw spikes for all models."
+        ),
+    )
+    parser.add_argument(
+        "--cassm-projection-dim",
+        type=int,
+        default=None,
+        help="CASSM sparse projection dimension. Defaults to min(20, neurons).",
+    )
+    parser.add_argument(
+        "--gpfa-latent-dim",
+        type=int,
+        default=3,
+        help="GPFA latent dimensionality.",
+    )
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -126,14 +151,18 @@ def run_case(
         seed=seed,
     )
     train_ds, valid_ds = LorenzDataset.make_splits(dataset_config)
-    preprocessing = build_preprocessing_config(model_name, args.experiment_config_dir)
+    preprocessing = build_preprocessing_config(
+        model_name,
+        args.experiment_config_dir,
+        args.preprocessing_mode,
+    )
     train_ds = PreprocessedDataset(train_ds, preprocessing)
     valid_ds = PreprocessedDataset(valid_ds, preprocessing)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
     valid_loader = DataLoader(valid_ds, batch_size=args.batch_size, shuffle=False)
     n_time, n_neurons = train_ds.spikes.shape[1:]
 
-    model_config = build_model_config(model_name, n_neurons)
+    model_config = build_model_config(args, model_name, n_neurons)
     model = model_config.build(n_neurons=n_neurons, n_time=n_time)
     strategy = build_strategy(model_config.optimization)
     trainer = Trainer(TrainerConfig(epochs=args.epochs, device=args.device))
@@ -178,15 +207,35 @@ def run_case(
         }
 
 
-def build_model_config(model_name: str, n_neurons: int) -> BaseModelConfig:
+def build_model_config(
+    args: argparse.Namespace,
+    model_name: str,
+    n_neurons: int,
+) -> BaseModelConfig:
     if model_name == "cassm":
-        return CASSMConfig(projection_dim=min(20, n_neurons))
+        projection_dim = args.cassm_projection_dim
+        if projection_dim is None:
+            projection_dim = min(20, n_neurons)
+        if n_neurons % projection_dim != 0:
+            raise ValueError(
+                "CASSM sparse projection requires neurons to be divisible by "
+                f"projection_dim; got neurons={n_neurons}, "
+                f"projection_dim={projection_dim}."
+            )
+        return CASSMConfig(projection_dim=projection_dim)
     if model_name == "gpfa":
-        return GPFAConfig(latent_dim=3)
+        return GPFAConfig(latent_dim=args.gpfa_latent_dim)
     raise KeyError(model_name)
 
 
-def build_preprocessing_config(model_name: str, config_dir: str) -> PreprocessingConfig:
+def build_preprocessing_config(
+    model_name: str,
+    config_dir: str,
+    preprocessing_mode: str = "model",
+) -> PreprocessingConfig:
+    if preprocessing_mode == "none":
+        return PreprocessingConfig()
+
     path = Path(config_dir) / f"{model_name}_lorenz.yaml"
     if not path.exists():
         return PreprocessingConfig()

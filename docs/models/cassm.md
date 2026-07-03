@@ -2,7 +2,7 @@
 
 # CASSM
 
-Thin wrapper around the original CASSM KalmanFilterSmoother.
+Thin wrapper around the bundled CASSM sparse filter/smoother.
 
 ## Source
 
@@ -14,9 +14,9 @@ Thin wrapper around the original CASSM KalmanFilterSmoother.
 ## When to use
 
 Use CASSM when benchmarking computation-aware sparse state-space models
-against latent dynamics baselines. The scientific implementation lives in
-the upstream CASSM package; this class maps it onto the LaDyS model, loss,
-prediction, and device contracts.
+against latent dynamics baselines. LaDyS ships the CASSM source directly in
+`src/cassm`; this class maps it onto the LaDyS model, loss, prediction, and
+device contracts.
 
 ## Inputs
 
@@ -24,13 +24,13 @@ prediction, and device contracts.
 
 ## Outputs
 
-The training path returns the upstream ELBO-style loss in `extras["loss"]`.
+The training path returns the CASSM ELBO-style loss in `extras["loss"]`.
 `predict_rates` calls CASSM's native filtering path and returns nonnegative
 rate predictions shaped like the input observations.
 
 ## Configuration
 
-Config for the upstream sparse CASSM adapter.
+Config for the bundled sparse CASSM adapter.
 
 | Field | Type | Default |
 | --- | --- | --- |
