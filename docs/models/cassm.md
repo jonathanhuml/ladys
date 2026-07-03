@@ -14,9 +14,9 @@ Thin wrapper around the bundled CASSM sparse filter/smoother.
 ## When to use
 
 Use CASSM when benchmarking computation-aware sparse state-space models
-against latent dynamics baselines. LaDyS ships the CASSM source directly in
-`src/cassm`; this class maps it onto the LaDyS model, loss, prediction, and
-device contracts.
+against latent dynamics baselines. LaDyS keeps the compact filtering core
+inside `ladys.models` and maps it onto the shared model, loss, prediction,
+and device contracts.
 
 ## Inputs
 

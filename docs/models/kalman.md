@@ -2,7 +2,7 @@
 
 # Kalman
 
-Dense Kalman filter baseline from the bundled CASSM source.
+Dense Kalman filter baseline adapted from the CASSM source.
 
 ## Source
 

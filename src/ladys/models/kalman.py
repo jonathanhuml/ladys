@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import tempfile
-from pathlib import Path
 from typing import Literal, Optional
 
 import torch
@@ -12,26 +9,8 @@ from pydantic import Field
 from torch import Tensor
 
 from ladys.models.base import BaseDynamicsModel, BaseModelConfig, OptimizationConfig
+from ladys.models._filtering_core import DenseKalmanFilterSmoother
 from ladys.types import LossOutput, ModelOutput
-
-_MPL_CACHE = Path(tempfile.gettempdir()) / "ladys_matplotlib"
-_XDG_CACHE = Path(tempfile.gettempdir()) / "ladys_cache"
-_MPL_CACHE.mkdir(parents=True, exist_ok=True)
-_XDG_CACHE.mkdir(parents=True, exist_ok=True)
-os.environ.setdefault("MPLCONFIGDIR", str(_MPL_CACHE))
-os.environ.setdefault("XDG_CACHE_HOME", str(_XDG_CACHE))
-
-
-def _bundled_kalman_class():
-    try:
-        from cassm.models.mssm import KalmanFilterSmoother
-    except ImportError as exc:
-        raise ImportError(
-            "LaDyS ships the dense Kalman source under `src/cassm`, but its "
-            "runtime dependencies are unavailable. Install LaDyS with its "
-            "project dependencies, for example `pip install -e .`."
-        ) from exc
-    return KalmanFilterSmoother
 
 
 @BaseModelConfig.register
@@ -65,7 +44,7 @@ class KalmanConfig(BaseModelConfig):
 
 
 class Kalman(BaseDynamicsModel):
-    """Dense Kalman filter baseline from the bundled CASSM source.
+    """Dense Kalman filter baseline adapted from the CASSM source.
 
     ## When to use
 
@@ -102,8 +81,7 @@ class Kalman(BaseDynamicsModel):
         self.save_model = bool(save_model)
         self.objective = objective
 
-        bundled_cls = _bundled_kalman_class()
-        self.core = bundled_cls(
+        self.core = DenseKalmanFilterSmoother(
             nneurons=self.n_neurons,
             timesteps=self.n_time,
             device=torch.device("cpu"),

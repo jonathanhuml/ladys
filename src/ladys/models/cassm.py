@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import tempfile
-from pathlib import Path
 from typing import Literal, Optional
 
 import torch
@@ -12,26 +9,8 @@ from pydantic import Field
 from torch import Tensor
 
 from ladys.models.base import BaseDynamicsModel, BaseModelConfig, OptimizationConfig
+from ladys.models._filtering_core import ComputationAwareFilterSmoother
 from ladys.types import LossOutput, ModelOutput
-
-_MPL_CACHE = Path(tempfile.gettempdir()) / "ladys_matplotlib"
-_XDG_CACHE = Path(tempfile.gettempdir()) / "ladys_cache"
-_MPL_CACHE.mkdir(parents=True, exist_ok=True)
-_XDG_CACHE.mkdir(parents=True, exist_ok=True)
-os.environ.setdefault("MPLCONFIGDIR", str(_MPL_CACHE))
-os.environ.setdefault("XDG_CACHE_HOME", str(_XDG_CACHE))
-
-
-def _bundled_cassm_class():
-    try:
-        from cassm.models import ComputationAwareFilterSmoother
-    except ImportError as exc:
-        raise ImportError(
-            "LaDyS ships the CASSM source under `src/cassm`, but its runtime "
-            "dependencies are unavailable. Install LaDyS with its project "
-            "dependencies, for example `pip install -e .`."
-        ) from exc
-    return ComputationAwareFilterSmoother
 
 
 @BaseModelConfig.register
@@ -76,9 +55,9 @@ class CASSM(BaseDynamicsModel):
     ## When to use
 
     Use CASSM when benchmarking computation-aware sparse state-space models
-    against latent dynamics baselines. LaDyS ships the CASSM source directly in
-    `src/cassm`; this class maps it onto the LaDyS model, loss, prediction, and
-    device contracts.
+    against latent dynamics baselines. LaDyS keeps the compact filtering core
+    inside `ladys.models` and maps it onto the shared model, loss, prediction,
+    and device contracts.
 
     ## Inputs
 
@@ -117,8 +96,7 @@ class CASSM(BaseDynamicsModel):
         self.health_checks = bool(health_checks)
         self.objective = objective
 
-        bundled_cls = _bundled_cassm_class()
-        self.core = bundled_cls(
+        self.core = ComputationAwareFilterSmoother(
             projection_dim=self.projection_dim,
             nneurons=self.n_neurons,
             timesteps=self.n_time,

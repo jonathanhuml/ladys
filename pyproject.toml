@@ -25,13 +25,9 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-  "geotorch",
   "gpytorch",
-  "jaxtyping>=0.2.31",
   "linear-operator",
-  "matplotlib>=3.4.3",
   "numpy>=1.24",
-  "prettytable>=3.0",
   "pydantic>=2",
   "scipy>=1.10",
   "torch>=2.1.2",
@@ -41,6 +37,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 docs = ["mkdocs>=1.6"]
+benchmarks = ["matplotlib>=3.4.3"]
 
 [project.scripts]
 ladys = "ladys.cli:main"

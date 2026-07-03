@@ -143,9 +143,9 @@
 </ul>
 <h2 id="when-to-use">When to use</h2>
 <p>Use CASSM when benchmarking computation-aware sparse state-space models
-against latent dynamics baselines. LaDyS ships the CASSM source directly in
-<code>src/cassm</code>; this class maps it onto the LaDyS model, loss, prediction, and
-device contracts.</p>
+against latent dynamics baselines. LaDyS keeps the compact filtering core
+inside <code>ladys.models</code> and maps it onto the shared model, loss, prediction,
+and device contracts.</p>
 <h2 id="inputs">Inputs</h2>
 <p><code>forward</code> expects observations shaped <code>(batch, time, neurons)</code>.</p>
 <h2 id="outputs">Outputs</h2>

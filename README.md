@@ -12,13 +12,13 @@ and a Lorenz synthetic dataset. Models accept `(batch, time, neurons)` tensors i
 
 ## Initial Examples
 
-- `ladys.models.cassm`: thin adapter around the bundled sparse CASSM
-  implementation shipped in `src/cassm`.
+- `ladys.models.cassm`: thin adapter around the compact sparse CASSM
+  filtering core in `ladys.models`.
 - `ladys.models.gpfa`: Gaussian-observation GPFA with FA initialization,
   EM updates, and RBF GP timescale learning. One full-dataset E/M update is
   treated as one benchmark epoch.
-- `ladys.models.kalman`: dense Kalman filter baseline from the bundled CASSM
-  source, exposed with per-trial rate predictions for benchmark metrics.
+- `ladys.models.kalman`: dense Kalman filter baseline adapted from the CASSM
+  filtering code, exposed with per-trial rate predictions for benchmark metrics.
 
 
 ## Public Experiment API
@@ -49,6 +49,13 @@ ladys list models
 ```
 
 ## Scaling Benchmark
+
+Install the plotting extra before running benchmark artifact scripts in a clean
+environment:
+
+```bash
+pip install -e ".[benchmarks]"
+```
 
 ```bash
 PYTHONPATH=src python3 scripts/benchmark_lorenz_scaling.py \
