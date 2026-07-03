@@ -115,69 +115,6 @@ class BlockDiagonalSparseLinearOperator(LinearOperator):
         ).scatter_(src=self.blocks, index=self.non_zero_idcs, dim=1)
 
 
-def _svd_f_and_t_inv(s: Tensor) -> tuple[Tensor, Tensor]:
-    s2 = s * s
-    s2 = torch.where(s2 < 1e-30, torch.zeros_like(s2), s2)
-    s_i = s2[..., :, None]
-    s_j = s2[..., None, :]
-    denom = s_j - s_i
-    both_zero = (s_i == 0) & (s_j == 0)
-    eq_mask = denom == 0
-
-    inv = torch.where(eq_mask | both_zero, torch.zeros_like(denom), 1.0 / denom)
-    f_matrix = torch.where(torch.isfinite(inv), inv, torch.zeros_like(inv))
-    logi = f_matrix.abs() > 1e30
-    f_matrix = torch.where(logi, torch.zeros_like(f_matrix), f_matrix)
-
-    k = s.shape[-1]
-    diag_mask = torch.eye(k, dtype=torch.bool, device=s.device)
-    eq_offdiag = eq_mask & (~diag_mask)
-
-    inv_sj = (1.0 / s)[..., None, :]
-    t_matrix = torch.zeros_like(f_matrix)
-    t_matrix = torch.where(eq_offdiag & ~both_zero, inv_sj, t_matrix)
-    t_matrix = torch.where(logi, inv_sj, t_matrix)
-
-    return f_matrix, t_matrix
-
-
-class _SVDInv(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x):
-        u, s_vec, vh = torch.linalg.svd(x, full_matrices=False)
-        v = vh.mH
-        ctx.save_for_backward(x, u, s_vec, v)
-        return u, s_vec, v
-
-    @staticmethod
-    def backward(ctx, dl_du, dl_ds_vec, dl_dv):
-        _, u, s_vec, v = ctx.saved_tensors
-        dtype = u.dtype
-        s_inv_vec = torch.where(s_vec > 0, 1.0 / s_vec, torch.zeros_like(s_vec))
-
-        utdu = u.mH @ dl_du
-        vtdv = v.mH @ dl_dv
-        f_matrix, t_matrix = _svd_f_and_t_inv(s_vec)
-        f_matrix = f_matrix.to(utdu.dtype)
-        t_matrix = t_matrix.to(utdu.dtype)
-        fmat_u = f_matrix * (utdu - utdu.mH)
-        fmat_v = f_matrix * (vtdv - vtdv.mH)
-        c_u1 = (fmat_u * s_vec[..., None, :]) + (t_matrix * utdu)
-        c_u1 = u @ c_u1
-
-        dl_du_sinv = dl_du * s_inv_vec[..., None, :]
-        c_u2 = dl_du_sinv - u @ (u.mH @ dl_du_sinv)
-
-        c_u = (c_u1 + c_u2) @ v.mH
-        c_s = (u * dl_ds_vec.to(dtype)[..., None, :]) @ v.mH
-
-        c_v1 = (s_vec[..., :, None] * fmat_v) @ v.mH
-        tmp = (s_inv_vec[..., :, None] * dl_dv.mH)
-        c_v2 = tmp - tmp @ v @ v.mH
-
-        return c_u + c_s + (u @ (c_v1 + c_v2))
-
-
 def _matern32_time_process_cov(
     delta_t: Tensor,
     sigma_f2: Tensor,
@@ -314,8 +251,16 @@ class ComputationAwareFilterSmoother(nn.Module):
             )
 
         self.observation_matrix = KroneckerProductLinearOperator(
-            IdentityLinearOperator(self.dim, device=device),
-            torch.tensor([[1.0, 0.0]], device=device),
+            IdentityLinearOperator(
+                self.dim,
+                device=device,
+                dtype=self.obs_noise_values.dtype,
+            ),
+            torch.tensor(
+                [[1.0, 0.0]],
+                device=device,
+                dtype=self.obs_noise_values.dtype,
+            ),
         )
 
         if self.save_model:
@@ -330,7 +275,7 @@ class ComputationAwareFilterSmoother(nn.Module):
 
         a_t = _matern32_transition_matrix(self.dt, ell)
         transition_matrix = KroneckerProductLinearOperator(
-            IdentityLinearOperator(self.dim, device=self.device),
+            IdentityLinearOperator(self.dim, device=self.device, dtype=a_t.dtype),
             a_t,
         )
 
@@ -365,8 +310,10 @@ class ComputationAwareFilterSmoother(nn.Module):
         return h_proj, r_proj
 
     def _truncate_downdate(self, matrix: Tensor) -> Tensor:
-        u, s, _ = _SVDInv.apply(matrix)
-        return u[..., : self.projection_dim] * s[..., : self.projection_dim].unsqueeze(-2)
+        with torch.no_grad():
+            _, _, vh = torch.linalg.svd(matrix.detach(), full_matrices=False)
+            truncation_basis = vh.mH[..., : self.projection_dim]
+        return matrix @ truncation_basis
 
     def filter(self, data: Tensor, return_type: str = "forward"):
         num_trials, time_steps = data.shape[:2]
@@ -378,10 +325,12 @@ class ComputationAwareFilterSmoother(nn.Module):
             updated_belief_state_means = torch.empty(
                 (num_trials, time_steps, self.state_dim),
                 device=self.device,
+                dtype=data.dtype,
             )
             updated_belief_obs_vars = torch.empty(
                 (num_trials, time_steps, self.dim),
                 device=self.device,
+                dtype=data.dtype,
             )
 
         prior_belief_state_mean = self.belief_initial_state.unsqueeze(0).expand(
@@ -393,6 +342,7 @@ class ComputationAwareFilterSmoother(nn.Module):
         downdate_sqrt = torch.zeros(
             size=(1, self.state_dim, self.projection_dim),
             device=self.device,
+            dtype=data.dtype,
         )
         loss = data.new_zeros(())
 
@@ -529,7 +479,11 @@ class DenseKalmanFilterSmoother(nn.Module):
             os.makedirs(self.save_path, exist_ok=True)
 
     def build_matern_observation_matrix(self) -> Tensor:
-        eye = torch.eye(self.dim, device=self.device)
+        eye = torch.eye(
+            self.dim,
+            device=self.device,
+            dtype=self.obs_noise_values.dtype,
+        )
         h_time = torch.tensor(
             [[1.0, 0.0]],
             device=self.device,
@@ -551,20 +505,24 @@ class DenseKalmanFilterSmoother(nn.Module):
         updated_belief_state_means = torch.zeros(
             size=(num_trials, time_steps, self.state_dim),
             device=self.device,
+            dtype=data.dtype,
         )
         updated_belief_state_covs = torch.zeros(
             size=(1, time_steps, self.state_dim, self.state_dim),
             device=self.device,
+            dtype=data.dtype,
         )
 
         prior_belief_state_mean = torch.zeros(
             size=(num_trials, self.state_dim, 1),
             device=self.device,
+            dtype=data.dtype,
         )
         prior_belief_state_cov = IdentityLinearOperator(
             self.state_dim,
             batch_shape=(1,),
             device=self.device,
+            dtype=data.dtype,
         )
         loss = data.new_zeros(())
 
@@ -574,7 +532,7 @@ class DenseKalmanFilterSmoother(nn.Module):
 
         a_t = _matern32_transition_matrix(self.dt, ell)
         transition_matrix = torch.kron(
-            torch.eye(self.latent_dim, device=self.device),
+            torch.eye(self.latent_dim, device=self.device, dtype=a_t.dtype),
             a_t,
         ).unsqueeze(0)
 
@@ -583,7 +541,10 @@ class DenseKalmanFilterSmoother(nn.Module):
 
         if holdout:
             n_held_in = data.shape[2]
-            truncated = torch.eye(self.dim, device=self.device)[:n_held_in, :]
+            truncated = torch.eye(self.dim, device=self.device, dtype=data.dtype)[
+                :n_held_in,
+                :,
+            ]
             h_time = torch.tensor(
                 [[1.0, 0.0]],
                 device=self.device,

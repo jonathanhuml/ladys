@@ -96,7 +96,9 @@ class Kalman(BaseDynamicsModel):
         if x.shape[-1] != self.n_neurons:
             raise ValueError(f"Expected {self.n_neurons} neurons, got {x.shape[-1]}.")
 
-        loss = self.core(x.float())
+        self._sync_core_device(self.device)
+        x = x.to(device=self.device, dtype=self.core.obs_noise_values.dtype)
+        loss = self.core(x)
         return ModelOutput(extras={"loss": loss})
 
     def loss(
@@ -116,7 +118,8 @@ class Kalman(BaseDynamicsModel):
     def predict_rates(self, x: Tensor) -> Tensor:
         if x.ndim != 3:
             raise ValueError("Kalman expects input shape (batch, time, neurons).")
-        x = x.float().to(self.device)
+        self._sync_core_device(self.device)
+        x = x.to(device=self.device, dtype=self.core.obs_noise_values.dtype)
         state_means, _ = self.core.filter(x, return_type="for_prediction")
         return state_means[..., 0::2].clamp_min(0.0)
 

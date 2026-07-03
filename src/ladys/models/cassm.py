@@ -113,7 +113,9 @@ class CASSM(BaseDynamicsModel):
         if x.shape[-1] != self.n_neurons:
             raise ValueError(f"Expected {self.n_neurons} neurons, got {x.shape[-1]}.")
 
-        loss = self.core(x.float())
+        self._sync_core_device(self.device)
+        x = x.to(device=self.device, dtype=self.core.obs_noise_values.dtype)
+        loss = self.core(x)
         return ModelOutput(extras={"loss": loss})
 
     def loss(
@@ -133,7 +135,8 @@ class CASSM(BaseDynamicsModel):
     def predict_rates(self, x: Tensor) -> Tensor:
         if x.ndim != 3:
             raise ValueError("CASSM expects input shape (batch, time, neurons).")
-        x = x.float().to(self.device)
+        self._sync_core_device(self.device)
+        x = x.to(device=self.device, dtype=self.core.obs_noise_values.dtype)
         state_means, _ = self.core.filter(x, return_type="prediction")
         return state_means[..., 0::2].clamp_min(0.0)
 
@@ -143,7 +146,7 @@ class CASSM(BaseDynamicsModel):
         return module
 
     def _sync_core_device(self, device: torch.device) -> None:
-        """Move CASSM plain tensor attributes that are not registered buffers."""
+        """Synchronize CASSM runtime-only tensors with module device and dtype."""
 
         self.core.device = device
         if hasattr(self.core, "dt"):
@@ -156,7 +159,8 @@ class CASSM(BaseDynamicsModel):
                 KroneckerProductLinearOperator,
             )
 
+            dtype = self.core.obs_noise_values.dtype
             self.core.observation_matrix = KroneckerProductLinearOperator(
-                IdentityLinearOperator(self.core.dim, device=device),
-                torch.tensor([[1.0, 0.0]], device=device),
+                IdentityLinearOperator(self.core.dim, device=device, dtype=dtype),
+                torch.tensor([[1.0, 0.0]], device=device, dtype=dtype),
             )

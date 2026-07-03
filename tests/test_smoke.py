@@ -5,6 +5,25 @@ from ladys.models import CASSMConfig, GPFAConfig, KalmanConfig
 from ladys.training.strategies import build_strategy
 
 
+def _assert_all_trainable_parameters_receive_gradients(model, loss):
+    model.zero_grad(set_to_none=True)
+    loss.backward()
+    missing = [
+        name
+        for name, param in model.named_parameters()
+        if param.requires_grad and param.grad is None
+    ]
+    nonfinite = [
+        name
+        for name, param in model.named_parameters()
+        if param.requires_grad
+        and param.grad is not None
+        and not bool(param.grad.isfinite().all())
+    ]
+    assert missing == []
+    assert nonfinite == []
+
+
 def test_model_contracts_smoke():
     config = LorenzDatasetConfig(
         neurons=6,
@@ -23,12 +42,14 @@ def test_model_contracts_smoke():
     cassm_loss = cassm.loss(batch, cassm_out)
     assert cassm.predict_rates(x).shape == x.shape
     assert cassm_loss.total.ndim == 0
+    _assert_all_trainable_parameters_receive_gradients(cassm, cassm_loss.total)
 
     kalman = KalmanConfig().build(n_neurons=x.shape[-1], n_time=x.shape[1])
     kalman_out = kalman(x)
     kalman_loss = kalman.loss(batch, kalman_out)
     assert kalman.predict_rates(x).shape == x.shape
     assert kalman_loss.total.ndim == 0
+    _assert_all_trainable_parameters_receive_gradients(kalman, kalman_loss.total)
 
     gpfa_config = GPFAConfig(latent_dim=2)
     gpfa = gpfa_config.build(n_neurons=x.shape[-1], n_time=x.shape[1])
