@@ -41,9 +41,7 @@ class CASSMElboLoss(nn.Module):
         residual_quadratic = torch.mean(
             (prior_predictive_residual.mT * inv_obs_noise) @ prior_predictive_residual
         )
-        normalizer = obs_noise.numel() * torch.log(
-            2 * torch.tensor(math.pi, device=obs_noise.device, dtype=obs_noise.dtype)
-        )
+        normalizer = obs_noise.numel() * torch.log(2 * obs_noise.new_tensor(math.pi))
 
         expectation_term = 0.5 * (
             obs_noise.log().sum()
@@ -185,7 +183,7 @@ def _matern32_time_process_cov(
     sigma_f2: Tensor,
     ell: Tensor,
 ) -> Tensor:
-    lam = torch.sqrt(torch.tensor(3.0, device=delta_t.device)) / ell
+    lam = delta_t.new_tensor(3.0).sqrt() / ell
     rho2 = torch.exp(-2.0 * lam * delta_t)
     u = lam * delta_t
 
@@ -200,7 +198,7 @@ def _matern32_time_process_cov(
 
 
 def _matern32_transition_matrix(delta_t: Tensor, ell: Tensor) -> Tensor:
-    lam = torch.sqrt(torch.tensor(3.0, device=delta_t.device)) / ell
+    lam = delta_t.new_tensor(3.0).sqrt() / ell
     zero = torch.zeros_like(lam)
     one = torch.ones_like(lam)
     f_time = torch.stack(
@@ -210,7 +208,7 @@ def _matern32_transition_matrix(delta_t: Tensor, ell: Tensor) -> Tensor:
 
 
 def _matern32_time_stationary_cov(sigma_f2: Tensor, ell: Tensor) -> Tensor:
-    lam = torch.sqrt(torch.tensor(3.0, device=sigma_f2.device)) / ell
+    lam = sigma_f2.new_tensor(3.0).sqrt() / ell
     return torch.stack(
         [
             torch.stack([sigma_f2, torch.zeros_like(sigma_f2)], -1),
@@ -229,7 +227,7 @@ def _log_marginal_likelihood(residual: Tensor, y_cholesky: Tensor) -> Tensor:
     )
     cholesky_diags = torch.diagonal(y_cholesky, offset=0, dim1=1, dim2=2)
     loss2 = torch.mean(torch.sum(torch.log(cholesky_diags), dim=1))
-    loss3 = 0.5 * torch.log(2 * torch.tensor(math.pi, device=residual.device)) * n_neurons
+    loss3 = 0.5 * torch.log(2 * residual.new_tensor(math.pi)) * n_neurons
     return loss1 + loss2 + loss3
 
 
@@ -269,7 +267,7 @@ class ComputationAwareFilterSmoother(nn.Module):
         self.t = timesteps
         self.device = device
         self.save_model = save_model
-        self.dt = torch.tensor(float(dt), device=device)
+        self.register_buffer("dt", torch.tensor(float(dt), device=device))
 
         self.raw_sigma_f = nn.Parameter(1e-1 * torch.ones(1, device=device))
         self.raw_ell = nn.Parameter(1e-1 * torch.ones(1, device=device))
@@ -277,11 +275,11 @@ class ComputationAwareFilterSmoother(nn.Module):
         self.loss_fn = CASSMElboLoss()
 
         if spatial_prior is not None:
-            self.latent_locations = spatial_prior.float().to(device)
+            self.register_buffer("latent_locations", spatial_prior.float().to(device))
         else:
             self.latent_locations = nn.Parameter(
                 torch.randn(self.dim, 3, device=device)
-                / torch.sqrt(torch.tensor(float(self.dim), device=device))
+                / torch.tensor(float(self.dim), device=device).sqrt()
             )
 
         self.spatial_kernel = gpytorch.kernels.ScaleKernel(
@@ -291,7 +289,9 @@ class ComputationAwareFilterSmoother(nn.Module):
 
         self.use_dense_projection = use_dense_projection
         self.obs_noise_values = nn.Parameter(1e-2 * torch.ones(self.dim, device=device))
-        self.belief_initial_state = nn.Parameter(torch.empty(self.state_dim, 1, device=device))
+        self.belief_initial_state = nn.Parameter(
+            torch.zeros(self.state_dim, 1, device=device)
+        )
 
         if self.use_dense_projection:
             self.dense_projection = nn.Parameter(
@@ -305,9 +305,12 @@ class ComputationAwareFilterSmoother(nn.Module):
                     device=device,
                 )
             )
-            self.projection_indices = torch.arange(device=device, end=self.dim).reshape(
-                self.projection_dim,
-                self.dim // self.projection_dim,
+            self.register_buffer(
+                "projection_indices",
+                torch.arange(self.dim, device=device).reshape(
+                    self.projection_dim,
+                    self.dim // self.projection_dim,
+                ),
             )
 
         self.observation_matrix = KroneckerProductLinearOperator(
@@ -391,7 +394,7 @@ class ComputationAwareFilterSmoother(nn.Module):
             size=(1, self.state_dim, self.projection_dim),
             device=self.device,
         )
-        loss = torch.tensor(0.0, device=self.device)
+        loss = data.new_zeros(())
 
         transition_matrix, sigma_inf_op = self._build_dynamics()
         h_proj, r_proj = self._build_projected_obs()
@@ -505,7 +508,7 @@ class DenseKalmanFilterSmoother(nn.Module):
         self.t = timesteps
         self.device = device
         self.save_model = save_model
-        self.dt = torch.tensor(float(dt), device=device)
+        self.register_buffer("dt", torch.tensor(float(dt), device=device))
 
         self.raw_sigma_f = nn.Parameter(1e-1 * torch.ones(1, device=device))
         self.raw_ell = nn.Parameter(1e-1 * torch.ones(1, device=device))
@@ -527,7 +530,11 @@ class DenseKalmanFilterSmoother(nn.Module):
 
     def build_matern_observation_matrix(self) -> Tensor:
         eye = torch.eye(self.dim, device=self.device)
-        h_time = torch.tensor([[1.0, 0.0]], device=self.device)
+        h_time = torch.tensor(
+            [[1.0, 0.0]],
+            device=self.device,
+            dtype=self.obs_noise_values.dtype,
+        )
         return torch.kron(eye, h_time)
 
     def spatial_cov(self) -> Tensor:
@@ -559,7 +566,7 @@ class DenseKalmanFilterSmoother(nn.Module):
             batch_shape=(1,),
             device=self.device,
         )
-        loss = torch.tensor(0.0, device=self.device)
+        loss = data.new_zeros(())
 
         ell = self.softplus(self.raw_ell)
         sigma_f2 = self.softplus(self.raw_sigma_f)
@@ -577,7 +584,11 @@ class DenseKalmanFilterSmoother(nn.Module):
         if holdout:
             n_held_in = data.shape[2]
             truncated = torch.eye(self.dim, device=self.device)[:n_held_in, :]
-            h_time = torch.tensor([[1.0, 0.0]], device=self.device)
+            h_time = torch.tensor(
+                [[1.0, 0.0]],
+                device=self.device,
+                dtype=data.dtype,
+            )
             observation_matrix = torch.kron(truncated, h_time).unsqueeze(0)
             obs_noise = obs_noise[:n_held_in]
         else:
