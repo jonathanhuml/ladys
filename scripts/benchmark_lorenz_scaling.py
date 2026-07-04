@@ -45,7 +45,7 @@ from ladys.models import (
     GPFAConfig,
     KalmanConfig,
     LFADSConfig,
-    NeuralDataTransformerConfig,
+    NDTConfig,
 )
 from ladys.models.base import BaseModelConfig
 from ladys.preprocessing import PreprocessedDataset, PreprocessingConfig
@@ -59,8 +59,7 @@ MODEL_CONFIGS = {
     "gpfa": GPFAConfig,
     "kalman": KalmanConfig,
     "lfads": LFADSConfig,
-    "neural_data_transformer": NeuralDataTransformerConfig,
-    "ndt": NeuralDataTransformerConfig,
+    "ndt": NDTConfig,
 }
 
 
@@ -69,7 +68,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--models",
         nargs="+",
-        default=["cassm", "gpfa", "kalman", "lfads", "neural_data_transformer"],
+        default=["cassm", "gpfa", "kalman", "lfads", "ndt"],
     )
     parser.add_argument("--neurons", nargs="+", type=int, default=[10, 100, 1000])
     parser.add_argument("--seeds", nargs="+", type=int, default=[1])
@@ -143,9 +142,7 @@ def main() -> None:
     }
     rows = list(existing)
 
-    model_names = [canonical_model_name(model_name) for model_name in args.models]
-
-    for model_name in model_names:
+    for model_name in args.models:
         if model_name not in MODEL_CONFIGS:
             raise KeyError(f"Unknown model '{model_name}'. Choices: {sorted(MODEL_CONFIGS)}")
 
@@ -258,7 +255,6 @@ def build_model_config(
     model_name: str,
     n_neurons: int,
 ) -> BaseModelConfig:
-    model_name = canonical_model_name(model_name)
     if model_name == "cassm":
         projection_dim = args.cassm_projection_dim
         if projection_dim is None:
@@ -291,8 +287,8 @@ def build_model_config(
                 "gradient_clip": 200.0,
             },
         )
-    if model_name == "neural_data_transformer":
-        return NeuralDataTransformerConfig(
+    if model_name == "ndt":
+        return NDTConfig(
             hidden_size=getattr(args, "ndt_hidden_size", 128),
             num_layers=getattr(args, "ndt_num_layers", 6),
             num_heads=getattr(args, "ndt_num_heads", 2),
@@ -312,7 +308,6 @@ def build_model_config(
 
 
 def epochs_for_model(args: argparse.Namespace, model_name: str) -> int:
-    model_name = canonical_model_name(model_name)
     if model_name == "lfads" and args.lfads_epochs is not None:
         return int(args.lfads_epochs)
     return int(args.epochs)
@@ -326,17 +321,11 @@ def build_preprocessing_config(
     if preprocessing_mode == "none":
         return PreprocessingConfig()
 
-    path = Path(config_dir) / f"{canonical_model_name(model_name)}_lorenz.yaml"
+    path = Path(config_dir) / f"{model_name}_lorenz.yaml"
     if not path.exists():
         return PreprocessingConfig()
     data = load_yaml(path)
     return PreprocessingConfig.model_validate(data.get("preprocessing", {}))
-
-
-def canonical_model_name(model_name: str) -> str:
-    if model_name == "ndt":
-        return "neural_data_transformer"
-    return model_name
 
 
 def plot_results(rows: list[dict], path: Path) -> None:

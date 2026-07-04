@@ -5,10 +5,7 @@ from ladys.models.cassm import CASSM, CASSMConfig
 from ladys.models.gpfa import GPFA, GPFAConfig
 from ladys.models.kalman import Kalman, KalmanConfig
 from ladys.models.lfads import LFADS, LFADSConfig
-from ladys.models.neural_data_transformer import (
-    NeuralDataTransformer,
-    NeuralDataTransformerConfig,
-)
+from ladys.models.ndt import NDT, NDTConfig
 
 __all__ = [
     "BaseDynamicsModel",
@@ -22,6 +19,6 @@ __all__ = [
     "KalmanConfig",
     "LFADS",
     "LFADSConfig",
-    "NeuralDataTransformer",
-    "NeuralDataTransformerConfig",
+    "NDT",
+    "NDTConfig",
 ]

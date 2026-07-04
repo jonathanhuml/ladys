@@ -1,4 +1,4 @@
-"""Neural Data Transformer adapter for masked spike-count modeling."""
+"""NDT adapter for masked spike-count modeling."""
 
 from __future__ import annotations
 
@@ -18,10 +18,10 @@ UNMASKED_LABEL = -100.0
 
 
 @BaseModelConfig.register
-class NeuralDataTransformerConfig(BaseModelConfig):
-    """Config for the masked-count Neural Data Transformer adapter."""
+class NDTConfig(BaseModelConfig):
+    """Config for the masked-count NeuralDataTransformer (NDT) adapter."""
 
-    name: Literal["neural_data_transformer"] = "neural_data_transformer"
+    name: Literal["ndt"] = "ndt"
     objective: str = "masked_poisson_nll"
     context_forward: int = 4
     context_backward: int = 8
@@ -66,7 +66,7 @@ class NeuralDataTransformerConfig(BaseModelConfig):
     )
 
     @model_validator(mode="after")
-    def validate_dimensions(self) -> "NeuralDataTransformerConfig":
+    def validate_dimensions(self) -> "NDTConfig":
         if self.embed_dim < 0:
             raise ValueError("embed_dim must be nonnegative.")
         if self.num_heads < 1:
@@ -95,8 +95,8 @@ class NeuralDataTransformerConfig(BaseModelConfig):
             raise ValueError("topk_loss_fraction must be in (0, 1].")
         return self
 
-    def build(self, n_neurons: int, n_time: int) -> "NeuralDataTransformer":
-        return NeuralDataTransformer(
+    def build(self, n_neurons: int, n_time: int) -> "NDT":
+        return NDT(
             n_neurons=n_neurons,
             n_time=n_time,
             context_forward=self.context_forward,
@@ -135,23 +135,23 @@ class NeuralDataTransformerConfig(BaseModelConfig):
         )
 
 
-class NeuralDataTransformer(BaseDynamicsModel):
+class NDT(BaseDynamicsModel):
     """Transformer encoder trained with a masked Poisson spike objective.
 
     ## When to use
 
-    Use Neural Data Transformer as a self-supervised sequence baseline for
-    binned spike counts. This adapter follows the Lorenz NDT configuration
-    from `snel-repo/neural-data-transformers`: per-neuron spike-count
-    embeddings, optional local temporal attention, learnable positions,
-    pre-norm transformer layers, and a Poisson decoder trained on randomly
-    masked observations.
+    Use NeuralDataTransformer (NDT) as a self-supervised sequence baseline for
+    binned spike counts. This adapter follows the Lorenz NDT configuration from
+    `snel-repo/neural-data-transformers`: per-neuron spike-count embeddings,
+    optional local temporal attention, learnable positions, pre-norm transformer
+    layers, and a Poisson decoder trained on randomly masked observations.
 
     ## Assumptions
 
-    NDT expects raw nonnegative spike counts. Dataset-level smoothing should be
-    disabled for this model. The model returns natural-space rates for metrics;
-    internally, the default decoder predicts log rates for stable Poisson loss.
+    NeuralDataTransformer (NDT) expects raw nonnegative spike counts.
+    Dataset-level smoothing should be disabled for this model. The model
+    returns natural-space rates for metrics; internally, the default decoder
+    predicts log rates for stable Poisson loss.
 
     ## Outputs
 
@@ -351,13 +351,13 @@ class NeuralDataTransformer(BaseDynamicsModel):
 
     def _forward(self, x: Tensor, should_mask: bool) -> ModelOutput:
         if x.ndim != 3:
-            raise ValueError("NeuralDataTransformer expects input shape (batch, time, neurons).")
+            raise ValueError("NDT expects input shape (batch, time, neurons).")
         if x.shape[1] != self.n_time:
             raise ValueError(f"Expected {self.n_time} time bins, got {x.shape[1]}.")
         if x.shape[-1] != self.n_neurons:
             raise ValueError(f"Expected {self.n_neurons} neurons, got {x.shape[-1]}.")
         if torch.any(x < 0):
-            raise ValueError("NeuralDataTransformer expects nonnegative spike-count observations.")
+            raise ValueError("NDT expects nonnegative spike-count observations.")
 
         x = x.to(device=self.device, dtype=torch.float32)
         masked_x, labels, loss_mask = self._mask_observations(x, should_mask=should_mask)

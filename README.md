@@ -20,7 +20,7 @@ tensors in `forward`.
   available through config.
 - `ladys.models.kalman`: dense Kalman filter baseline adapted from the CASSM
   filtering code, exposed with per-trial rate predictions for benchmark metrics.
-- `ladys.models.neural_data_transformer`: masked-count Neural Data Transformer
+- `ladys.models.ndt`: masked-count NeuralDataTransformer (NDT)
   adapter with native LaDyS config, training, prediction, and metrics contracts.
 
 
@@ -47,7 +47,7 @@ experiment configs:
 
 ```bash
 ladys run -c configs/experiment/gpfa_lorenz.yaml
-ladys run -c configs/experiment/neural_data_transformer_lorenz.yaml
+ladys run -c configs/experiment/ndt_lorenz.yaml
 ladys list datasets
 ladys list models
 ```
@@ -63,7 +63,7 @@ pip install -e ".[benchmarks]"
 
 ```bash
 PYTHONPATH=src python3 scripts/benchmark_lorenz_scaling.py \
-  --models cassm gpfa kalman neural_data_transformer \
+  --models cassm gpfa kalman ndt \
   --neurons 10 100 1000 \
   --seeds 1
 ```

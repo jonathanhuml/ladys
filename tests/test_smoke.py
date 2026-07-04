@@ -13,7 +13,7 @@ from ladys.models import (
     GPFAConfig,
     KalmanConfig,
     LFADSConfig,
-    NeuralDataTransformerConfig,
+    NDTConfig,
 )
 from ladys.training.strategies import build_strategy
 
@@ -94,7 +94,7 @@ def test_model_contracts_smoke():
     assert lfads_loss.total.ndim == 0
     _assert_all_trainable_parameters_receive_gradients(lfads, lfads_loss.total)
 
-    ndt = NeuralDataTransformerConfig(
+    ndt = NDTConfig(
         hidden_size=16,
         num_layers=1,
         embed_dim=2,

@@ -116,7 +116,7 @@ def test_cli_lists_models(capsys):
     assert "gpfa" in output
     assert "kalman" in output
     assert "lfads" in output
-    assert "neural_data_transformer" in output
+    assert "ndt" in output
 
 
 def test_cli_lists_datasets(capsys):

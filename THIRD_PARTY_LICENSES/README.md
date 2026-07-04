@@ -9,9 +9,9 @@ into this repository.
 - Source URL: https://pypi.org/project/cassm/0.2.0/
 - License: MIT, see `CASSM-MIT.txt`
 
-LaDyS includes a native PyTorch adapter inspired by the Neural Data Transformer
-model and Lorenz/chaotic-RNN experiment configs. The upstream repository is not
-vendored.
+LaDyS includes a native PyTorch adapter inspired by the NeuralDataTransformer
+(NDT) model and Lorenz/chaotic-RNN experiment configs. The upstream repository
+is not vendored.
 
 - Source package: `neural-data-transformers`
 - Source URL: https://github.com/snel-repo/neural-data-transformers

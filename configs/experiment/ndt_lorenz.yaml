@@ -12,7 +12,7 @@ dataset:
   base_rate: 1.0
 
 model:
-  name: neural_data_transformer
+  name: ndt
   objective: masked_poisson_nll
   context_forward: 4
   context_backward: 8
