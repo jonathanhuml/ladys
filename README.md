@@ -56,6 +56,27 @@ ladys list datasets
 ladys list models
 ```
 
+## Neural Latents Benchmark Data
+
+LaDyS can prepare the four core NLB'21 datasets, `area2_bump`, `mc_maze`,
+`mc_rtt`, and `dmfc_rsg`, as held-in/held-out co-smoothing H5 files in
+`data/real/nlb`. The command uses DANDI NWB files for held-in inputs and the
+public `nlb_tools/data/eval_data_test.h5` targets for the former EvalAI hidden
+test split:
+
+```bash
+PYTHONPATH=src python3 scripts/prepare_nlb_data.py \
+  --datasets area2_bump mc_maze mc_rtt dmfc_rsg \
+  --splits test \
+  --bin-sizes-ms 5 20 \
+  --target-h5 ../mint/data/eval_data_test.h5 \
+  --download
+```
+
+If NWB files are already present in a DANDI-style directory, omit `--download`
+and pass `--nwb-root` or repeated `--search-root` values. Dataset configs for
+the 5 ms and 20 ms NLB test files live under `configs/dataset/`.
+
 ## Scaling Benchmark
 
 Install the plotting extra before running benchmark artifact scripts in a clean

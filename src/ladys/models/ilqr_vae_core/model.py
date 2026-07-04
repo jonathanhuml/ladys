@@ -49,31 +49,44 @@ class ILQRVAE(torch.nn.Module):
     solvers for objective checks.
     """
 
-    def __init__(self, params: TutorialParams, *, dt: float = 5e-3) -> None:
+    def __init__(
+        self,
+        params: TutorialParams,
+        *,
+        dt: float = 5e-3,
+        trainable: bool = False,
+    ) -> None:
         super().__init__()
         self.dt = dt
+        self.trainable = bool(trainable)
         self.n_latent = params.wh.shape[0]
         self.n_input = params.b.shape[0]
         if self.n_latent % self.n_input != 0:
             raise ValueError("latent dimension must be divisible by input dimension")
         self.n_beg = self.n_latent // self.n_input
 
-        self.register_buffer("spatial_stds", _tensor(params.spatial_stds.reshape(-1)))
-        self.register_buffer("nu", torch.tensor(float(params.nu), dtype=torch.float64))
-        self.register_buffer("first_step", _tensor(params.first_step.reshape(-1)))
-        self.register_buffer("uf", _tensor(params.uf))
-        self.register_buffer("wh", _tensor(params.wh))
-        self.register_buffer("uh", _tensor(params.uh))
-        self.register_buffer("bh", _tensor(params.bh))
-        self.register_buffer("b", _tensor(params.b))
-        self.register_buffer("c", _tensor(params.c))
-        self.register_buffer("bias", _tensor(params.bias))
-        self.register_buffer("gain", _tensor(params.gain))
+        self._register_model_tensor("spatial_stds", _tensor(params.spatial_stds.reshape(-1)))
+        self._register_model_tensor("nu", torch.tensor(float(params.nu), dtype=torch.float64))
+        self._register_model_tensor("first_step", _tensor(params.first_step.reshape(-1)))
+        self._register_model_tensor("uf", _tensor(params.uf))
+        self._register_model_tensor("wh", _tensor(params.wh))
+        self._register_model_tensor("uh", _tensor(params.uh))
+        self._register_model_tensor("bh", _tensor(params.bh))
+        self._register_model_tensor("b", _tensor(params.b))
+        self._register_model_tensor("c", _tensor(params.c))
+        self._register_model_tensor("bias", _tensor(params.bias))
+        self._register_model_tensor("gain", _tensor(params.gain))
         self.register_buffer("beg_bs", self._make_initial_condition_maps())
 
     @property
     def n_neurons(self) -> int:
         return self.c.shape[0]
+
+    def _register_model_tensor(self, name: str, value: torch.Tensor) -> None:
+        if self.trainable:
+            self.register_parameter(name, torch.nn.Parameter(value.clone()))
+        else:
+            self.register_buffer(name, value)
 
     def infer_controls(
         self,

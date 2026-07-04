@@ -123,5 +123,9 @@ def test_cli_lists_models(capsys):
 def test_cli_lists_datasets(capsys):
     assert main(["list", "datasets"]) == 0
     output = capsys.readouterr().out
+    assert "area2_bump" in output
     assert "chaotic_rnn" in output
+    assert "dmfc_rsg" in output
     assert "lorenz" in output
+    assert "mc_maze" in output
+    assert "mc_rtt" in output

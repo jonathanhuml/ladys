@@ -13,16 +13,19 @@ from ladys.datasets import (
     ChaoticRNNDatasetConfig,
     LorenzDataset,
     LorenzDatasetConfig,
-    MCMazeDataset,
-    MCMazeDatasetConfig,
+    NLBDataset,
+    NLBDatasetConfig,
 )
 from ladys.preprocessing import PreprocessedDataset, PreprocessingConfig
 
 
 DATASET_CONFIGS: dict[str, type[BaseModel]] = {
+    "area2_bump": NLBDatasetConfig,
     "chaotic_rnn": ChaoticRNNDatasetConfig,
+    "dmfc_rsg": NLBDatasetConfig,
     "lorenz": LorenzDatasetConfig,
-    "mc_maze": MCMazeDatasetConfig,
+    "mc_maze": NLBDatasetConfig,
+    "mc_rtt": NLBDatasetConfig,
 }
 
 
@@ -51,8 +54,8 @@ def make_dataset_splits(config: BaseModel) -> tuple[Dataset, Dataset]:
         return ChaoticRNNDataset.make_splits(config)
     if isinstance(config, LorenzDatasetConfig):
         return LorenzDataset.make_splits(config)
-    if isinstance(config, MCMazeDatasetConfig):
-        return MCMazeDataset.make_splits(config)
+    if isinstance(config, NLBDatasetConfig):
+        return NLBDataset.make_splits(config)
     raise TypeError(f"Unsupported dataset config type {type(config).__name__}.")
 
 

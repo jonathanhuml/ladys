@@ -1,0 +1,4 @@
+name: dmfc_rsg
+split: test
+bin_size_ms: 5
+data_path: data/real/nlb/dmfc_rsg_test_5ms.h5

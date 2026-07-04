@@ -1,0 +1,4 @@
+name: mc_rtt
+split: test
+bin_size_ms: 20
+data_path: data/real/nlb/mc_rtt_test_20ms.h5

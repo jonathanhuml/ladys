@@ -10,6 +10,7 @@ import sys
 
 from ladys.config import ExperimentConfig, load_experiment_config
 from ladys.data import available_datasets, build_dataset_config
+from ladys.datasets.nlb import NLB_BIN_SIZES_MS, NLB_DATASETS, prepare_nlb_data
 from ladys.experiment import Experiment
 from ladys.models.base import BaseModelConfig, load_model_config
 from ladys.preprocessing import PreprocessingConfig
@@ -65,6 +66,37 @@ def build_parser() -> argparse.ArgumentParser:
     list_parser.add_argument("kind", choices=["datasets", "models"])
     list_parser.set_defaults(handler=list_command)
 
+    prepare_nlb_parser = subparsers.add_parser(
+        "prepare-nlb",
+        help="prepare Neural Latents Benchmark H5 files",
+        description=(
+            "Build LaDyS-ready NLB held-in/held-out H5 files from DANDI NWB files "
+            "and the public nlb_tools test target H5."
+        ),
+    )
+    prepare_nlb_parser.add_argument("--datasets", nargs="+", default=list(NLB_DATASETS))
+    prepare_nlb_parser.add_argument("--splits", nargs="+", default=["test"], choices=["val", "test"])
+    prepare_nlb_parser.add_argument(
+        "--bin-sizes-ms",
+        nargs="+",
+        type=int,
+        default=list(NLB_BIN_SIZES_MS),
+        choices=list(NLB_BIN_SIZES_MS),
+    )
+    prepare_nlb_parser.add_argument("--output-dir", default="data/real/nlb")
+    prepare_nlb_parser.add_argument("--target-h5", help="path to nlb_tools/data/eval_data_test.h5")
+    prepare_nlb_parser.add_argument("--nwb-root", default="data/real/nlb/dandi")
+    prepare_nlb_parser.add_argument(
+        "--search-root",
+        action="append",
+        dest="search_roots",
+        help="additional root to search for DANDI-style NWB paths",
+    )
+    prepare_nlb_parser.add_argument("--download", action="store_true", help="download missing NWB files with dandi")
+    prepare_nlb_parser.add_argument("--overwrite", action="store_true")
+    prepare_nlb_parser.add_argument("--include-psth", action="store_true", help="include PSTHs for val targets")
+    prepare_nlb_parser.set_defaults(handler=prepare_nlb_command)
+
     return parser
 
 
@@ -92,6 +124,27 @@ def list_command(args: argparse.Namespace) -> int:
 
     for name in sorted(BaseModelConfig.registry):
         print(name)
+    return 0
+
+
+def prepare_nlb_command(args: argparse.Namespace) -> int:
+    prepared = prepare_nlb_data(
+        datasets=args.datasets,
+        splits=args.splits,
+        bin_sizes_ms=args.bin_sizes_ms,
+        output_dir=Path(args.output_dir),
+        target_h5=Path(args.target_h5) if args.target_h5 else None,
+        nwb_root=Path(args.nwb_root),
+        search_roots=[Path(item) for item in args.search_roots] if args.search_roots else None,
+        download=bool(args.download),
+        overwrite=bool(args.overwrite),
+        include_psth=bool(args.include_psth),
+    )
+    for item in prepared:
+        print(
+            f"{item.dataset} {item.split} {item.bin_size_ms}ms: "
+            f"{item.path} heldin={item.heldin_shape} heldout={item.heldout_shape}"
+        )
     return 0
 
 

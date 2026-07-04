@@ -26,6 +26,7 @@ class ILQRVAEConfig(BaseModelConfig):
     solver: Literal["ilqr", "lbfgs", "adam"] = "ilqr"
     max_iter: int = 100
     lr: Optional[float] = None
+    trainable_parameters: bool = False
     held_in_neurons: Optional[int] = None
     output_neuron_start: Optional[int] = None
     output_neurons: Optional[int] = None
@@ -43,6 +44,7 @@ class ILQRVAEConfig(BaseModelConfig):
             solver=self.solver,
             max_iter=self.max_iter,
             lr=self.lr,
+            trainable_parameters=self.trainable_parameters,
             held_in_neurons=self.held_in_neurons,
             output_neuron_start=self.output_neuron_start,
             output_neurons=self.output_neurons,
@@ -69,6 +71,7 @@ class ILQRVAE(BaseDynamicsModel):
         solver: str = "ilqr",
         max_iter: int = 100,
         lr: Optional[float] = None,
+        trainable_parameters: bool = False,
         held_in_neurons: Optional[int] = None,
         output_neuron_start: Optional[int] = None,
         output_neurons: Optional[int] = None,
@@ -83,6 +86,7 @@ class ILQRVAE(BaseDynamicsModel):
         self.solver = solver
         self.max_iter = int(max_iter)
         self.lr = lr
+        self.trainable_parameters = bool(trainable_parameters)
         self.held_in_neurons = held_in_neurons
         self.output_neuron_start = output_neuron_start
         self.output_neurons = output_neurons
@@ -91,7 +95,7 @@ class ILQRVAE(BaseDynamicsModel):
         self.objective = objective
 
         params = load_tutorial_params(Path(params_path))
-        self.core = TutorialILQRVAE(params, dt=self.dt)
+        self.core = TutorialILQRVAE(params, dt=self.dt, trainable=self.trainable_parameters)
 
     def forward(self, x: Tensor) -> ModelOutput:
         if x.ndim != 3:

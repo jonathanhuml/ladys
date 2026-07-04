@@ -1,5 +1,8 @@
 import importlib.util
+from pathlib import Path
 
+import h5py
+import numpy as np
 import pytest
 import torch
 from torch.utils.data import DataLoader
@@ -9,7 +12,10 @@ from ladys.datasets import (
     ChaoticRNNDatasetConfig,
     LorenzDataset,
     LorenzDatasetConfig,
+    NLBDataset,
+    NLBDatasetConfig,
 )
+from ladys.metrics import compute_available_metrics
 from ladys.models import (
     BGPFAConfig,
     CASSMConfig,
@@ -186,6 +192,37 @@ def test_chaotic_rnn_dataset_contract():
 
     sample = train_ds[0]
     assert set(sample) == {"spikes", "rates", "latents", "dt"}
+
+
+def test_nlb_dataset_loads_grouped_20ms_h5(tmp_path: Path):
+    path = tmp_path / "nlb.h5"
+    heldin = np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4)
+    heldout = np.arange(2 * 3 * 2, dtype=np.float32).reshape(2, 3, 2)
+    with h5py.File(path, "w") as handle:
+        group = handle.create_group("mc_rtt_20")
+        group.create_dataset("eval_spikes_heldin", data=heldin)
+        group.create_dataset("eval_spikes_heldout", data=heldout)
+
+    config = NLBDatasetConfig(name="mc_rtt", data_path=str(path), bin_size_ms=20)
+    train_ds, valid_ds = NLBDataset.make_splits(config)
+
+    assert train_ds.spikes.shape == (2, 3, 4)
+    assert train_ds.raw_spikes.shape == (2, 3, 2)
+    assert valid_ds[0]["dt"].item() == pytest.approx(0.02)
+    assert set(train_ds[0]) == {
+        "spikes",
+        "heldin_spikes",
+        "raw_spikes",
+        "heldout_spikes",
+        "dt",
+    }
+
+
+def test_metrics_skip_incompatible_nlb_shapes():
+    predictions = {"rates": torch.ones(2, 3, 4)}
+    targets = {"spikes": torch.ones(2, 3, 2)}
+
+    assert compute_available_metrics(predictions, targets) == {}
 
 
 def test_gpfa_warns_when_configured_for_em():

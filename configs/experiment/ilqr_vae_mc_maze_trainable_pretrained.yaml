@@ -11,7 +11,7 @@ model:
   solver: ilqr
   max_iter: 100
   lr: null
-  trainable_parameters: false
+  trainable_parameters: true
   held_in_neurons: 137
   output_neuron_start: 137
   output_neurons: 45
@@ -30,5 +30,5 @@ trainer:
 
 experiment:
   output_dir: runs
-  run_name: ilqr_vae_mc_maze
+  run_name: ilqr_vae_mc_maze_trainable_pretrained
   save_predictions: true

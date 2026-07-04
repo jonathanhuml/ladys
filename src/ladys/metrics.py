@@ -154,14 +154,14 @@ def compute_available_metrics(
     pred_latents = predictions.get("latents")
     latents = targets.get("latents")
 
-    if pred_rates is not None and spikes is not None:
+    if pred_rates is not None and spikes is not None and pred_rates.shape == spikes.shape:
         metrics["co_bps"] = bits_per_spike(pred_rates, spikes)
         nll = poisson_negative_log_likelihood(pred_rates, spikes).mean()
         metrics["poisson_nll"] = float(nll.detach().cpu())
-    if pred_rates is not None and rates is not None:
+    if pred_rates is not None and rates is not None and pred_rates.shape == rates.shape:
         metrics["rate_mse"] = float(torch.mean((pred_rates - rates) ** 2).detach().cpu())
         metrics["rate_r2"] = r2_score(pred_rates, rates)
-    if pred_latents is not None and latents is not None:
+    if pred_latents is not None and latents is not None and pred_latents.shape[:-1] == latents.shape[:-1]:
         metrics["latent_linear_r2"] = linear_r2_score(pred_latents, latents)
 
     return metrics

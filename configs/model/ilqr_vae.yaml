@@ -4,6 +4,7 @@ params_path: data/real/ilqr_vae/final_params.bin
 solver: ilqr
 max_iter: 100
 lr: null
+trainable_parameters: false
 held_in_neurons: 137
 output_neuron_start: 137
 output_neurons: 45

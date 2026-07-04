@@ -15,6 +15,7 @@ python scripts/generate_model_docs.py
 | [BGPFA](bgpfa.md) | `bgpfa` | Variational Bayesian GPFA with ARD and differentiable ELBO training. |
 | [CASSM](cassm.md) | `cassm` | Thin wrapper around the bundled CASSM sparse filter/smoother. |
 | [GPFA](gpfa.md) | `gpfa` | Gaussian Process Factor Analysis with diagonal observation noise. |
+| [ILQRVAE](ilqr_vae.md) | `ilqr_vae` | Fixed-parameter iLQR-VAE posterior inference. |
 | [Kalman](kalman.md) | `kalman` | Dense Kalman filter baseline adapted from the CASSM source. |
 | [LFADS](lfads.md) | `lfads` | Latent Factor Analysis via Dynamical Systems for binned spike counts. |
 | [NDT](ndt.md) | `ndt` | Transformer encoder trained with a masked Poisson spike objective. |
