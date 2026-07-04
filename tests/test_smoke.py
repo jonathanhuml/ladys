@@ -1,7 +1,7 @@
 from torch.utils.data import DataLoader
 
 from ladys.datasets import LorenzDataset, LorenzDatasetConfig
-from ladys.models import CASSMConfig, GPFAConfig, KalmanConfig
+from ladys.models import CASSMConfig, GPFAConfig, KalmanConfig, LFADSConfig
 from ladys.training.strategies import build_strategy
 
 
@@ -58,3 +58,20 @@ def test_model_contracts_smoke():
     result = em.step(gpfa, batch, epoch=0)
     assert result.batch_size == x.shape[0]
     assert gpfa(x).latents.shape[:2] == x.shape[:2]
+
+    lfads = LFADSConfig(
+        generator_dim=8,
+        inferred_input_dim=1,
+        factor_dim=4,
+        g0_encoder_dim=8,
+        controller_encoder_dim=8,
+        controller_dim=8,
+        keep_prob=1.0,
+    ).build(n_neurons=x.shape[-1], n_time=x.shape[1])
+    lfads_out = lfads(x)
+    lfads_loss = lfads.loss(batch, lfads_out)
+    assert lfads_out.rates.shape == x.shape
+    assert lfads_out.latents.shape[:2] == x.shape[:2]
+    assert lfads.predict_rates(x).shape == x.shape
+    assert lfads_loss.total.ndim == 0
+    _assert_all_trainable_parameters_receive_gradients(lfads, lfads_loss.total)

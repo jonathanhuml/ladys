@@ -111,3 +111,4 @@ def test_cli_lists_models(capsys):
     output = capsys.readouterr().out
     assert "gpfa" in output
     assert "kalman" in output
+    assert "lfads" in output

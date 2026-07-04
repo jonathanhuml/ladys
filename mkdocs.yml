@@ -13,6 +13,7 @@ nav:
       - CASSM: models/cassm.md
       - GPFA: models/gpfa.md
       - Kalman: models/kalman.md
+      - LFADS: models/lfads.md
   - Contracts:
       - Model Output: model_output_contract.md
       - Optimizer: optimizer_contract.md

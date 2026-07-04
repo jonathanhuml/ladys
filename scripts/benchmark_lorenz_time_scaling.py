@@ -5,7 +5,7 @@ time-axis length used by GPFA's dense posterior covariance operations.
 
 Example:
     PYTHONPATH=src python3 scripts/benchmark_lorenz_time_scaling.py \
-        --models cassm gpfa kalman --time-steps 10 100 1000 10000 \
+        --models cassm gpfa kalman lfads --time-steps 10 100 1000 10000 \
         --neurons 100 --cassm-projection-dim 5 --gpfa-latent-dim 5
 """
 
@@ -33,11 +33,17 @@ from benchmark_lorenz_scaling import MODEL_CONFIGS, run_case
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--models", nargs="+", default=["cassm", "gpfa", "kalman"])
+    parser.add_argument("--models", nargs="+", default=["cassm", "gpfa", "kalman", "lfads"])
     parser.add_argument("--time-steps", nargs="+", type=int, default=[10, 100, 1000])
     parser.add_argument("--neurons", type=int, default=100)
     parser.add_argument("--seeds", nargs="+", type=int, default=[1])
     parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument(
+        "--lfads-epochs",
+        type=int,
+        default=None,
+        help="Optional LFADS-specific epoch count for accuracy runs.",
+    )
     parser.add_argument("--num-inits", type=int, default=10)
     parser.add_argument("--num-trials", type=int, default=10)
     parser.add_argument("--burn-steps", type=int, default=1000)
@@ -66,6 +72,13 @@ def parse_args() -> argparse.Namespace:
         default=3,
         help="GPFA latent dimensionality.",
     )
+    parser.add_argument("--lfads-generator-dim", type=int, default=64)
+    parser.add_argument("--lfads-factor-dim", type=int, default=20)
+    parser.add_argument("--lfads-inferred-input-dim", type=int, default=2)
+    parser.add_argument("--lfads-encoder-dim", type=int, default=64)
+    parser.add_argument("--lfads-controller-dim", type=int, default=64)
+    parser.add_argument("--lfads-lr", type=float, default=1e-3)
+    parser.add_argument("--lfads-keep-prob", type=float, default=0.95)
     parser.add_argument(
         "--max-gpfa-dense-elements",
         type=int,
@@ -157,6 +170,10 @@ def _maybe_skip_large_gpfa(
         "train_loss": np.nan,
         "valid_loss": np.nan,
         "rate_mse": np.nan,
+        "rate_r2": np.nan,
+        "co_bps": np.nan,
+        "poisson_nll": np.nan,
+        "latent_linear_r2": np.nan,
         "error": error,
     }
 
@@ -237,7 +254,7 @@ def write_summary(rows: list[dict], path: Path) -> None:
 
 
 def _ordered_models(rows: list[dict]) -> list[str]:
-    known_order = ["cassm", "gpfa", "kalman"]
+    known_order = ["cassm", "gpfa", "kalman", "lfads"]
     present = {str(row["model"]) for row in rows}
     ordered = [model for model in known_order if model in present]
     ordered.extend(sorted(present - set(ordered)))
@@ -273,10 +290,14 @@ def _write_csv(path: Path, rows: list[dict]) -> None:
         "train_loss",
         "valid_loss",
         "rate_mse",
+        "rate_r2",
+        "co_bps",
+        "poisson_nll",
+        "latent_linear_r2",
         "error",
     ]
     with path.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         for row in rows:
             writer.writerow(row)

@@ -4,6 +4,7 @@ from ladys.models.base import BaseDynamicsModel, BaseModelConfig, OptimizationCo
 from ladys.models.cassm import CASSM, CASSMConfig
 from ladys.models.gpfa import GPFA, GPFAConfig
 from ladys.models.kalman import Kalman, KalmanConfig
+from ladys.models.lfads import LFADS, LFADSConfig
 
 __all__ = [
     "BaseDynamicsModel",
@@ -15,4 +16,6 @@ __all__ = [
     "GPFAConfig",
     "Kalman",
     "KalmanConfig",
+    "LFADS",
+    "LFADSConfig",
 ]

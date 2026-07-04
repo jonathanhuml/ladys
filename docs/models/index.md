@@ -15,3 +15,4 @@ python scripts/generate_model_docs.py
 | [CASSM](cassm.md) | `cassm` | Thin wrapper around the bundled CASSM sparse filter/smoother. |
 | [GPFA](gpfa.md) | `gpfa` | Gaussian Process Factor Analysis with diagonal observation noise. |
 | [Kalman](kalman.md) | `kalman` | Dense Kalman filter baseline adapted from the CASSM source. |
+| [LFADS](lfads.md) | `lfads` | Latent Factor Analysis via Dynamical Systems for binned spike counts. |

@@ -10,10 +10,10 @@ one or more methods through the shared trainer/strategy contract, then writes:
 
 Example:
     PYTHONPATH=src python3 scripts/benchmark_lorenz_scaling.py \
-        --models cassm gpfa kalman --neurons 10 100 1000 --seeds 1 2 3 4 5
+        --models cassm gpfa kalman lfads --neurons 10 100 1000 --seeds 1 2 3 4 5
 
     PYTHONPATH=src python3 scripts/benchmark_lorenz_scaling.py \
-        --models cassm gpfa kalman --neurons 90 900 --cassm-projection-dim 10 \
+        --models cassm gpfa kalman lfads --neurons 90 900 --cassm-projection-dim 10 \
         --gpfa-latent-dim 10
 """
 
@@ -24,7 +24,6 @@ import csv
 import os
 import time
 from pathlib import Path
-from typing import Iterable
 
 os.environ.setdefault("MPLCONFIGDIR", "/private/tmp/ladys_matplotlib")
 os.environ.setdefault("XDG_CACHE_HOME", "/private/tmp/ladys_cache")
@@ -37,11 +36,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from torch import Tensor
 from torch.utils.data import DataLoader
 
 from ladys.datasets import LorenzDataset, LorenzDatasetConfig
-from ladys.models import CASSMConfig, GPFAConfig, KalmanConfig
+from ladys.metrics import evaluate_model
+from ladys.models import CASSMConfig, GPFAConfig, KalmanConfig, LFADSConfig
 from ladys.models.base import BaseModelConfig
 from ladys.preprocessing import PreprocessedDataset, PreprocessingConfig
 from ladys.training import Trainer, TrainerConfig
@@ -53,15 +52,22 @@ MODEL_CONFIGS = {
     "cassm": CASSMConfig,
     "gpfa": GPFAConfig,
     "kalman": KalmanConfig,
+    "lfads": LFADSConfig,
 }
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--models", nargs="+", default=["cassm", "gpfa", "kalman"])
+    parser.add_argument("--models", nargs="+", default=["cassm", "gpfa", "kalman", "lfads"])
     parser.add_argument("--neurons", nargs="+", type=int, default=[10, 100, 1000])
     parser.add_argument("--seeds", nargs="+", type=int, default=[1])
     parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument(
+        "--lfads-epochs",
+        type=int,
+        default=None,
+        help="Optional LFADS-specific epoch count for accuracy runs.",
+    )
     parser.add_argument("--num-inits", type=int, default=10)
     parser.add_argument("--num-trials", type=int, default=10)
     parser.add_argument("--num-steps", type=int, default=100)
@@ -91,6 +97,13 @@ def parse_args() -> argparse.Namespace:
         default=3,
         help="GPFA latent dimensionality.",
     )
+    parser.add_argument("--lfads-generator-dim", type=int, default=64)
+    parser.add_argument("--lfads-factor-dim", type=int, default=20)
+    parser.add_argument("--lfads-inferred-input-dim", type=int, default=2)
+    parser.add_argument("--lfads-encoder-dim", type=int, default=64)
+    parser.add_argument("--lfads-controller-dim", type=int, default=64)
+    parser.add_argument("--lfads-lr", type=float, default=1e-3)
+    parser.add_argument("--lfads-keep-prob", type=float, default=0.95)
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -166,7 +179,8 @@ def run_case(
     model_config = build_model_config(args, model_name, n_neurons)
     model = model_config.build(n_neurons=n_neurons, n_time=n_time)
     strategy = build_strategy(model_config.optimization)
-    trainer = Trainer(TrainerConfig(epochs=args.epochs, device=args.device))
+    epochs = epochs_for_model(args, model_name)
+    trainer = Trainer(TrainerConfig(epochs=epochs, device=args.device))
 
     started = time.perf_counter()
     try:
@@ -174,19 +188,23 @@ def run_case(
         wall_seconds = time.perf_counter() - started
         optimizer_seconds = sum(report.seconds for report in history)
         final = history[-1]
-        rate_mse = evaluate_rate_mse(model, valid_loader, args.device)
+        metrics = evaluate_model(model, valid_loader, args.device).metrics
         return {
             "status": "ok",
             "model": model_name,
             "neurons": neurons,
             "seed": seed,
-            "epochs": args.epochs,
+            "epochs": epochs,
             "seconds": optimizer_seconds,
-            "seconds_per_epoch": optimizer_seconds / max(args.epochs, 1),
+            "seconds_per_epoch": optimizer_seconds / max(epochs, 1),
             "wall_seconds": wall_seconds,
             "train_loss": final.train.loss,
             "valid_loss": np.nan if final.valid is None else final.valid.loss,
-            "rate_mse": rate_mse,
+            "rate_mse": metrics.get("rate_mse", np.nan),
+            "rate_r2": metrics.get("rate_r2", np.nan),
+            "co_bps": metrics.get("co_bps", np.nan),
+            "poisson_nll": metrics.get("poisson_nll", np.nan),
+            "latent_linear_r2": metrics.get("latent_linear_r2", np.nan),
             "error": "",
         }
     except Exception as exc:
@@ -197,13 +215,17 @@ def run_case(
             "model": model_name,
             "neurons": neurons,
             "seed": seed,
-            "epochs": args.epochs,
+            "epochs": epochs,
             "seconds": elapsed,
-            "seconds_per_epoch": elapsed / max(args.epochs, 1),
+            "seconds_per_epoch": elapsed / max(epochs, 1),
             "wall_seconds": elapsed,
             "train_loss": np.nan,
             "valid_loss": np.nan,
             "rate_mse": np.nan,
+            "rate_r2": np.nan,
+            "co_bps": np.nan,
+            "poisson_nll": np.nan,
+            "latent_linear_r2": np.nan,
             "error": str(exc),
         }
 
@@ -228,7 +250,30 @@ def build_model_config(
         return GPFAConfig(latent_dim=args.gpfa_latent_dim)
     if model_name == "kalman":
         return KalmanConfig()
+    if model_name == "lfads":
+        return LFADSConfig(
+            generator_dim=args.lfads_generator_dim,
+            factor_dim=args.lfads_factor_dim,
+            inferred_input_dim=args.lfads_inferred_input_dim,
+            g0_encoder_dim=args.lfads_encoder_dim,
+            controller_encoder_dim=args.lfads_encoder_dim,
+            controller_dim=args.lfads_controller_dim,
+            keep_prob=args.lfads_keep_prob,
+            optimization={
+                "name": "gradient",
+                "optimizer": "Adam",
+                "lr": args.lfads_lr,
+                "weight_decay": 0.0,
+                "gradient_clip": 200.0,
+            },
+        )
     raise KeyError(model_name)
+
+
+def epochs_for_model(args: argparse.Namespace, model_name: str) -> int:
+    if model_name == "lfads" and args.lfads_epochs is not None:
+        return int(args.lfads_epochs)
+    return int(args.epochs)
 
 
 def build_preprocessing_config(
@@ -244,24 +289,6 @@ def build_preprocessing_config(
         return PreprocessingConfig()
     data = load_yaml(path)
     return PreprocessingConfig.model_validate(data.get("preprocessing", {}))
-
-
-def evaluate_rate_mse(model, loader: Iterable, device: str) -> float:
-    model.eval()
-    losses = []
-    weights = []
-    torch_device = torch.device(device)
-    with torch.no_grad():
-        for batch in loader:
-            spikes = batch["spikes"].to(torch_device)
-            rates = batch["rates"].to(torch_device)
-            pred = model.predict_rates(spikes)
-            loss = torch.mean((pred - rates) ** 2)
-            losses.append(float(loss.detach().cpu()))
-            weights.append(int(spikes.shape[0]))
-    if not losses:
-        return float("nan")
-    return float(np.average(losses, weights=weights))
 
 
 def plot_results(rows: list[dict], path: Path) -> None:
@@ -323,10 +350,14 @@ def _write_csv(path: Path, rows: list[dict]) -> None:
         "train_loss",
         "valid_loss",
         "rate_mse",
+        "rate_r2",
+        "co_bps",
+        "poisson_nll",
+        "latent_linear_r2",
         "error",
     ]
     with path.open("w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
@@ -345,6 +376,10 @@ def _write_numpy(path: Path, rows: list[dict]) -> None:
         ("train_loss", "f8"),
         ("valid_loss", "f8"),
         ("rate_mse", "f8"),
+        ("rate_r2", "f8"),
+        ("co_bps", "f8"),
+        ("poisson_nll", "f8"),
+        ("latent_linear_r2", "f8"),
         ("error", "U256"),
     ]
     arr = np.empty(len(rows), dtype=dtype)
