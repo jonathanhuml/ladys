@@ -10,11 +10,13 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Iterable
 
+import numpy as np
 import torch
 from torch import Tensor
+from torch.optim.lr_scheduler import LambdaLR
 
 from ladys.models.base import BaseDynamicsModel, OptimizationConfig
-from ladys.types import StepResult, move_batch_to_device, observations_from_batch
+from ladys.types import LossOutput, StepResult, move_batch_to_device, observations_from_batch
 
 
 class OptimizationStrategy(ABC):
@@ -179,6 +181,166 @@ class FullBatchGradientStrategy(OptimizationStrategy):
         return StepResult.from_loss(loss, batch_size=int(x.shape[0]))
 
 
+class MgplvmFullBatchGradientStrategy(OptimizationStrategy):
+    """Full-batch gradient strategy matching mgplvm's SVGP optimizer loop."""
+
+    name = "mgplvm_full_batch_gradient"
+
+    def __init__(
+        self,
+        optimizer: str = "Adam",
+        lr: float = 1e-1,
+        steps_per_epoch: int = 1,
+        burnin: int = 150,
+        n_mc: int = 3,
+        batch_mc: int | None = None,
+        prior_m: int | None = None,
+        analytic_kl: bool = True,
+        weight_decay: float = 0.0,
+        gradient_clip: float | None = None,
+    ) -> None:
+        self.optimizer_name = optimizer
+        self.lr = float(lr)
+        if int(steps_per_epoch) < 1:
+            raise ValueError("steps_per_epoch must be >= 1.")
+        self.steps_per_epoch = int(steps_per_epoch)
+        self.burnin = int(burnin)
+        self.n_mc = int(n_mc)
+        self.batch_mc = batch_mc
+        self.prior_m = prior_m
+        self.analytic_kl = bool(analytic_kl)
+        self.weight_decay = float(weight_decay)
+        self.gradient_clip = gradient_clip
+        self.optimizer: torch.optim.Optimizer | None = None
+        self.scheduler: LambdaLR | None = None
+        self._hooks = []
+        self._step_index = 0
+
+    def setup(self, model: BaseDynamicsModel) -> None:
+        self.optimizer = None
+        self.scheduler = None
+        self._hooks = []
+        self._step_index = 0
+
+    def train_epoch(
+        self,
+        model: BaseDynamicsModel,
+        loader: Iterable,
+        epoch: int,
+        device: torch.device | str,
+    ) -> list[StepResult]:
+        batches = [move_batch_to_device(batch, device) for batch in loader]
+        if not batches:
+            return []
+        batch = _concat_batches(batches)
+        result = None
+        for _ in range(self.steps_per_epoch):
+            result = self.step(model, batch, epoch)
+        if result is None:
+            return []
+        return [result]
+
+    def step(
+        self,
+        model: BaseDynamicsModel,
+        batch: Tensor | dict[str, Tensor],
+        epoch: int,
+    ) -> StepResult:
+        if not hasattr(model, "mgplvm_training_model") or not hasattr(
+            model, "mgplvm_observations"
+        ):
+            raise TypeError(
+                f"{type(model).__name__} does not expose mgplvm training hooks."
+            )
+
+        model.train()
+        x = observations_from_batch(batch)
+        mod = model.mgplvm_training_model(x)
+        y = model.mgplvm_observations(x)
+
+        if self.optimizer is None:
+            self._setup_optimizer(mod)
+
+        if self.optimizer is None:
+            raise RuntimeError("MgplvmFullBatchGradientStrategy optimizer was not initialized.")
+
+        self.optimizer.zero_grad(set_to_none=True)
+        ramp = self._kl_ramp()
+        mc_batches = self._mc_batches()
+        loss_values = []
+        kl_values = []
+        elbo_values = []
+
+        for mc in mc_batches:
+            mc_weight = mc / self.n_mc
+            svgp_elbo, latent_kl = mod(
+                y,
+                mc,
+                m=self.prior_m,
+                analytic_kl=self.analytic_kl,
+            )
+            loss = -svgp_elbo + ramp * latent_kl
+            loss_values.append(float(loss.detach().cpu()) * mc_weight)
+            kl_values.append(float(latent_kl.detach().cpu()) * mc_weight)
+            elbo_values.append(float(svgp_elbo.detach().cpu()) * mc_weight)
+            (loss * mc_weight).backward()
+
+        if self.gradient_clip is not None:
+            torch.nn.utils.clip_grad_norm_(mod.parameters(), self.gradient_clip)
+        self.optimizer.step()
+        self.optimizer.zero_grad(set_to_none=True)
+        if self.scheduler is not None:
+            self.scheduler.step()
+        self._step_index += 1
+
+        normalizer = max(int(mod.n) * int(mod.m) * int(mod.n_samples), 1)
+        reported = y.new_tensor(float(np.sum(loss_values)) / normalizer)
+        loss = LossOutput(
+            total=reported,
+            named_terms={
+                "negative_elbo": reported,
+                "svgp_elbo": y.new_tensor(float(np.sum(elbo_values))),
+                "latent_kl": y.new_tensor(float(np.sum(kl_values))),
+                "kl_weight": ramp,
+                "optimizer_step": float(self._step_index),
+            },
+            objective=getattr(model, "objective", "negative_elbo"),
+        )
+        return StepResult.from_loss(loss, batch_size=int(x.shape[0]))
+
+    def _setup_optimizer(self, mod: torch.nn.Module) -> None:
+        from mgplvm.optimisers.svgp import sort_params
+
+        def no_op_hook(grad):
+            return grad
+
+        params, self._hooks = sort_params(mod, no_op_hook)
+        optimizer_cls = getattr(torch.optim, self.optimizer_name)
+        self.optimizer = optimizer_cls(
+            params,
+            lr=self.lr,
+            weight_decay=self.weight_decay,
+        )
+
+        def fburn(step):
+            return 1.0 - np.exp(-step / (3.0 * max(self.burnin, 1)))
+
+        self.scheduler = LambdaLR(self.optimizer, lr_lambda=[lambda step: 1.0, fburn])
+
+    def _kl_ramp(self) -> float:
+        return float(1.0 - np.exp(-self._step_index / max(self.burnin, 1)))
+
+    def _mc_batches(self) -> list[int]:
+        batch_mc = self.n_mc if self.batch_mc is None else int(self.batch_mc)
+        batches = [batch_mc for _ in range(self.n_mc // batch_mc)]
+        remainder = self.n_mc % batch_mc
+        if remainder > 0:
+            batches.append(remainder)
+        if not batches:
+            raise ValueError("n_mc must be positive.")
+        return batches
+
+
 class EMStrategy(OptimizationStrategy):
     """Full-dataset EM strategy.
 
@@ -223,6 +385,8 @@ def build_strategy(config: OptimizationConfig) -> OptimizationStrategy:
         return GradientStrategy(**kwargs)
     if config.name == "full_batch_gradient":
         return FullBatchGradientStrategy(**kwargs)
+    if config.name == "mgplvm_full_batch_gradient":
+        return MgplvmFullBatchGradientStrategy(**kwargs)
     if config.name == "em":
         return EMStrategy(**kwargs)
     raise KeyError(f"Unknown optimization strategy '{config.name}'.")

@@ -23,7 +23,10 @@ negative ELBO with standard PyTorch backpropagation.
 Observations are passed as `(batch, time, neurons)` tensors and internally
 transposed to mgplvm's `(trials, neurons, time)` convention. The latent
 posterior has per-trial variational parameters, so the default optimization
-strategy is `full_batch_gradient`.
+strategy is `mgplvm_full_batch_gradient`. One LaDyS epoch can run multiple
+mgplvm optimizer updates via `optimization.steps_per_epoch`; this is useful
+when matching reference bGPFA scripts that report fixed optimizer-step
+budgets.
 
 ## Outputs
 
@@ -51,7 +54,8 @@ Config for variational Bayesian GPFA.
 | `likelihood` | `Literal['gaussian', 'poisson']` | `'gaussian'` |
 | `learn_scale` | `bool` | `False` |
 | `ard` | `bool` | `True` |
-| `optimization` | `OptimizationConfig` | `OptimizationConfig(name='full_batch_gradient', optimizer='Adam', lr=0.1, weight_decay=0.0, gradient_clip=300.0)` |
+| `dtype` | `Literal['float64', 'float32']` | `'float64'` |
+| `optimization` | `OptimizationConfig` | `OptimizationConfig(name='mgplvm_full_batch_gradient', optimizer='Adam', lr=0.1, steps_per_epoch=1, burnin=150, n_mc=3, weight_decay=0.0)` |
 
 ## Contracts
 

@@ -11,9 +11,12 @@ latent_scale_init: 1.0
 likelihood: gaussian
 learn_scale: false
 ard: true
+dtype: float64
 optimization:
-  name: full_batch_gradient
+  name: mgplvm_full_batch_gradient
   optimizer: Adam
   lr: 1.0e-1
+  steps_per_epoch: 1
+  burnin: 150
+  n_mc: 3
   weight_decay: 0.0
-  gradient_clip: 300.0

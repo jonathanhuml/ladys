@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import math
+import numpy as np
 from typing import Any, Literal, Optional
 
 import torch
@@ -31,13 +32,16 @@ class BGPFAConfig(BaseModelConfig):
     likelihood: Literal["gaussian", "poisson"] = "gaussian"
     learn_scale: bool = False
     ard: bool = True
+    dtype: Literal["float64", "float32"] = "float64"
     optimization: OptimizationConfig = Field(
         default_factory=lambda: OptimizationConfig(
-            name="full_batch_gradient",
+            name="mgplvm_full_batch_gradient",
             optimizer="Adam",
             lr=1e-1,
+            steps_per_epoch=1,
+            burnin=150,
+            n_mc=3,
             weight_decay=0.0,
-            gradient_clip=300.0,
         )
     )
 
@@ -65,6 +69,7 @@ class BGPFAConfig(BaseModelConfig):
             likelihood=self.likelihood,
             learn_scale=self.learn_scale,
             ard=self.ard,
+            dtype=self.dtype,
             objective=self.objective,
         )
 
@@ -84,7 +89,10 @@ class BGPFA(BaseDynamicsModel):
     Observations are passed as `(batch, time, neurons)` tensors and internally
     transposed to mgplvm's `(trials, neurons, time)` convention. The latent
     posterior has per-trial variational parameters, so the default optimization
-    strategy is `full_batch_gradient`.
+    strategy is `mgplvm_full_batch_gradient`. One LaDyS epoch can run multiple
+    mgplvm optimizer updates via `optimization.steps_per_epoch`; this is useful
+    when matching reference bGPFA scripts that report fixed optimizer-step
+    budgets.
 
     ## Outputs
 
@@ -109,6 +117,7 @@ class BGPFA(BaseDynamicsModel):
         likelihood: Literal["gaussian", "poisson"] = "gaussian",
         learn_scale: bool = False,
         ard: bool = True,
+        dtype: Literal["float64", "float32"] = "float64",
         objective: str = "negative_elbo",
     ) -> None:
         super().__init__()
@@ -125,16 +134,17 @@ class BGPFA(BaseDynamicsModel):
         self.likelihood = likelihood
         self.learn_scale = bool(learn_scale)
         self.ard = bool(ard)
+        self.dtype = dtype
         self.objective = objective
 
-        fit_ts = torch.arange(self.n_time, dtype=torch.get_default_dtype())[None, None, :]
+        fit_ts = torch.arange(self.n_time, dtype=self._torch_dtype())[None, None, :]
         self.register_buffer("fit_ts", fit_ts)
         self._train_n_trials: int | None = None
         self._train_mod: torch.nn.Module | None = None
         self._eval_cache: dict[int, torch.nn.Module] = {}
 
     def forward(self, x: Tensor) -> ModelOutput:
-        x = x.float()
+        x = self._coerce_observations(x)
         self._validate_input(x)
         mod = self._model_for(x)
         y = self._to_mgplvm_observations(x)
@@ -183,6 +193,7 @@ class BGPFA(BaseDynamicsModel):
         )
 
     def _model_for(self, x: Tensor) -> torch.nn.Module:
+        x = self._coerce_observations(x)
         if self.training:
             if self._train_mod is None:
                 self._train_n_trials = int(x.shape[0])
@@ -203,6 +214,56 @@ class BGPFA(BaseDynamicsModel):
                 self._copy_observation_state(target=mod, source=self._train_mod)
             self._eval_cache[n_trials] = mod
         return self._eval_cache[n_trials]
+
+    def mgplvm_training_model(self, x: Tensor) -> torch.nn.Module:
+        x = self._coerce_observations(x)
+        self._validate_input(x)
+        if self._train_mod is None:
+            self._train_n_trials = int(x.shape[0])
+            self._train_mod = self._build_mgplvm_model(x)
+        elif int(x.shape[0]) != self._train_n_trials:
+            raise ValueError(
+                "BGPFA training requires a stable full-batch trial count. "
+                f"Expected {self._train_n_trials}, got {int(x.shape[0])}."
+            )
+        return self._train_mod
+
+    def mgplvm_observations(self, x: Tensor) -> Tensor:
+        return self._to_mgplvm_observations(self._coerce_observations(x))
+
+    def infer_latents(
+        self,
+        x: Tensor,
+        max_steps: int = 300,
+        n_mc: int = 20,
+        lrate: float = 1e-1,
+        burnin: int = 1,
+    ) -> torch.nn.Module:
+        if self._train_mod is None:
+            raise RuntimeError("BGPFA must be trained before held-out latent inference.")
+
+        mgp = _require_mgplvm()
+        x = self._coerce_observations(x)
+        self._validate_input(x)
+        mod = self._build_mgplvm_model(x)
+        self._copy_observation_state(target=mod, source=self._train_mod)
+        for param in mod.parameters():
+            param.requires_grad = False
+        for param in mod.lat_dist.parameters():
+            if param.is_floating_point() or param.is_complex():
+                param.requires_grad = True
+
+        params = mgp.crossval.training_params(
+            max_steps=max_steps,
+            n_mc=n_mc,
+            lrate=lrate,
+            print_every=np.nan,
+            burnin=burnin,
+            mask_Ts=lambda value: value * 1,
+        )
+        mgp.crossval.train_model(mod, self._to_mgplvm_observations(x), params)
+        self._eval_cache[int(x.shape[0])] = mod
+        return mod
 
     def _build_mgplvm_model(self, x: Tensor) -> torch.nn.Module:
         mgp = _require_mgplvm()
@@ -273,6 +334,16 @@ class BGPFA(BaseDynamicsModel):
 
     def _to_mgplvm_observations(self, x: Tensor) -> Tensor:
         return x.permute(0, 2, 1).contiguous()
+
+    def _coerce_observations(self, x: Tensor) -> Tensor:
+        return x.to(dtype=self._torch_dtype())
+
+    def _torch_dtype(self) -> torch.dtype:
+        if self.dtype == "float64":
+            return torch.float64
+        if self.dtype == "float32":
+            return torch.float32
+        raise ValueError(f"Unsupported BGPFA dtype '{self.dtype}'.")
 
     def _validate_input(self, x: Tensor) -> None:
         if x.ndim != 3:

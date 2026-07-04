@@ -116,8 +116,20 @@ def test_model_contracts_smoke():
 
 def test_bgpfa_config_uses_differentiable_full_batch_strategy():
     config = BGPFAConfig(latent_dim=2, n_mc_train=1, n_mc_eval=1)
-    assert config.optimization.name == "full_batch_gradient"
-    assert build_strategy(config.optimization).name == "full_batch_gradient"
+    assert config.optimization.name == "mgplvm_full_batch_gradient"
+    strategy = build_strategy(config.optimization)
+    assert strategy.name == "mgplvm_full_batch_gradient"
+    assert strategy.steps_per_epoch == 1
+
+    multi_step_strategy = build_strategy(
+        BGPFAConfig(
+            optimization={
+                "name": "mgplvm_full_batch_gradient",
+                "steps_per_epoch": 4,
+            }
+        ).optimization
+    )
+    assert multi_step_strategy.steps_per_epoch == 4
 
     with pytest.raises(ValueError, match="does not support optimization.name='em'"):
         BGPFAConfig(optimization={"name": "em"})

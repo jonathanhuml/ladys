@@ -42,7 +42,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from ladys.datasets import LorenzDataset, LorenzDatasetConfig
-from ladys.models import CASSMConfig, GPFAConfig, KalmanConfig
+from ladys.models import BGPFAConfig, CASSMConfig, GPFAConfig, KalmanConfig
 from ladys.models.base import BaseModelConfig
 from ladys.preprocessing import PreprocessedDataset, PreprocessingConfig
 from ladys.training import Trainer, TrainerConfig
@@ -51,6 +51,7 @@ from ladys.utils.yaml import load_yaml
 
 
 MODEL_CONFIGS = {
+    "bgpfa": BGPFAConfig,
     "cassm": CASSMConfig,
     "gpfa": GPFAConfig,
     "kalman": KalmanConfig,
@@ -67,7 +68,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-trials", type=int, default=10)
     parser.add_argument("--num-steps", type=int, default=100)
     parser.add_argument("--burn-steps", type=int, default=1000)
-    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--output-dir", default="artifacts/lorenz_loss_curves")
     parser.add_argument("--num-rate-traces", type=int, default=10)
@@ -94,6 +95,24 @@ def parse_args() -> argparse.Namespace:
         default=3,
         help="GPFA latent dimensionality.",
     )
+    parser.add_argument(
+        "--bgpfa-infer-steps",
+        type=int,
+        default=300,
+        help="Held-out latent inference steps for BGPFA evaluation.",
+    )
+    parser.add_argument(
+        "--bgpfa-infer-mc",
+        type=int,
+        default=20,
+        help="Monte Carlo samples for BGPFA held-out latent inference.",
+    )
+    parser.add_argument(
+        "--bgpfa-infer-lr",
+        type=float,
+        default=1e-1,
+        help="Learning rate for BGPFA held-out latent inference.",
+    )
     return parser.parse_args()
 
 
@@ -114,15 +133,18 @@ def main() -> None:
         rows.extend(run_case(args, model_name, output_dir))
         write_history(output_dir / "lorenz_loss_history.csv", rows)
         plot_test_rate_mse(rows, output_dir / "test_rate_mse_curves.png")
+        plot_test_rate_mse(rows, output_dir / "test_rate_mse_curves_log.png", log_y=True)
         plot_test_objective(rows, output_dir / "test_objective_curves.png")
         plot_train_test_objective(rows, output_dir / "train_test_objective_curves.png")
 
     write_history(output_dir / "lorenz_loss_history.csv", rows)
     plot_test_rate_mse(rows, output_dir / "test_rate_mse_curves.png")
+    plot_test_rate_mse(rows, output_dir / "test_rate_mse_curves_log.png", log_y=True)
     plot_test_objective(rows, output_dir / "test_objective_curves.png")
     plot_train_test_objective(rows, output_dir / "train_test_objective_curves.png")
     print(f"Wrote {output_dir / 'lorenz_loss_history.csv'}")
     print(f"Wrote {output_dir / 'test_rate_mse_curves.png'}")
+    print(f"Wrote {output_dir / 'test_rate_mse_curves_log.png'}")
     print(f"Wrote {output_dir / 'test_objective_curves.png'}")
     print(f"Wrote {output_dir / 'train_test_objective_curves.png'}")
 
@@ -164,12 +186,16 @@ def run_case(
             current_model,
             test_loader,
             args.device,
+            bgpfa_infer_steps=args.bgpfa_infer_steps,
+            bgpfa_infer_mc=args.bgpfa_infer_mc,
+            bgpfa_infer_lr=args.bgpfa_infer_lr,
         )
     }
 
     started = time.perf_counter()
     try:
-        history = trainer.fit(model, strategy, train_loader, test_loader, metric_fns)
+        valid_loader = None if model_name == "bgpfa" else test_loader
+        history = trainer.fit(model, strategy, train_loader, valid_loader, metric_fns)
     except Exception as exc:
         elapsed = time.perf_counter() - started
         print(f"Error for model={model_name}: {exc}")
@@ -197,6 +223,9 @@ def run_case(
         model_name=model_name,
         num_neurons=args.num_rate_traces,
         sample_index=args.trace_sample_index,
+        bgpfa_infer_steps=args.bgpfa_infer_steps,
+        bgpfa_infer_mc=args.bgpfa_infer_mc,
+        bgpfa_infer_lr=args.bgpfa_infer_lr,
     )
     write_rate_traces(output_dir / f"{model_name}_rate_traces.csv", trace_rows)
     plot_rate_traces(
@@ -250,6 +279,12 @@ def build_model_config(
         return GPFAConfig(latent_dim=args.gpfa_latent_dim)
     if model_name == "kalman":
         return KalmanConfig()
+    if model_name == "bgpfa":
+        path = Path(args.experiment_config_dir) / "bgpfa_lorenz.yaml"
+        if path.exists():
+            data = load_yaml(path)
+            return BaseModelConfig.from_dict(data["model"])
+        return BGPFAConfig()
     raise KeyError(model_name)
 
 
@@ -268,8 +303,25 @@ def build_preprocessing_config(
     return PreprocessingConfig.model_validate(data.get("preprocessing", {}))
 
 
-def evaluate_rate_mse(model, loader: DataLoader, device: str) -> float:
+def evaluate_rate_mse(
+    model,
+    loader: DataLoader,
+    device: str,
+    bgpfa_infer_steps: int = 300,
+    bgpfa_infer_mc: int = 20,
+    bgpfa_infer_lr: float = 1e-1,
+) -> float:
     model.eval()
+    if hasattr(model, "infer_latents"):
+        return evaluate_bgpfa_rate_mse(
+            model,
+            loader,
+            device,
+            bgpfa_infer_steps=bgpfa_infer_steps,
+            bgpfa_infer_mc=bgpfa_infer_mc,
+            bgpfa_infer_lr=bgpfa_infer_lr,
+        )
+
     losses = []
     weights = []
     torch_device = torch.device(device)
@@ -286,6 +338,38 @@ def evaluate_rate_mse(model, loader: DataLoader, device: str) -> float:
     return float(np.average(losses, weights=weights))
 
 
+def evaluate_bgpfa_rate_mse(
+    model,
+    loader: DataLoader,
+    device: str,
+    bgpfa_infer_steps: int,
+    bgpfa_infer_mc: int,
+    bgpfa_infer_lr: float,
+) -> float:
+    torch_device = torch.device(device)
+    batches = []
+    rates = []
+    for batch in loader:
+        batches.append(batch["spikes"].to(torch_device))
+        rates.append(batch["rates"].to(torch_device))
+    if not batches:
+        return float("nan")
+
+    spikes = torch.cat(batches, dim=0)
+    true_rates = torch.cat(rates, dim=0)
+    model.infer_latents(
+        spikes,
+        max_steps=bgpfa_infer_steps,
+        n_mc=bgpfa_infer_mc,
+        lrate=bgpfa_infer_lr,
+        burnin=1,
+    )
+    with torch.no_grad():
+        pred = model.predict_rates(spikes)
+        loss = torch.mean((pred - true_rates.to(pred.device, pred.dtype)) ** 2)
+    return float(loss.detach().cpu())
+
+
 def collect_rate_trace_rows(
     model,
     dataset: LorenzDataset,
@@ -293,6 +377,9 @@ def collect_rate_trace_rows(
     model_name: str,
     num_neurons: int,
     sample_index: int,
+    bgpfa_infer_steps: int = 300,
+    bgpfa_infer_mc: int = 20,
+    bgpfa_infer_lr: float = 1e-1,
 ) -> list[dict[str, str | int | float]]:
     if len(dataset) == 0:
         return []
@@ -305,6 +392,14 @@ def collect_rate_trace_rows(
     observed = sample.get("raw_spikes", sample["spikes"]).cpu()
 
     model.eval()
+    if hasattr(model, "infer_latents"):
+        model.infer_latents(
+            spikes,
+            max_steps=bgpfa_infer_steps,
+            n_mc=bgpfa_infer_mc,
+            lrate=bgpfa_infer_lr,
+            burnin=1,
+        )
     with torch.no_grad():
         pred_rates = model.predict_rates(spikes).squeeze(0).detach().cpu()
 
@@ -413,34 +508,30 @@ def write_history(path: Path, rows: list[dict]) -> None:
             writer.writerow(row)
 
 
-def plot_test_rate_mse(rows: list[dict], path: Path) -> None:
+def plot_test_rate_mse(rows: list[dict], path: Path, log_y: bool = False) -> None:
     ok_rows = [row for row in rows if row.get("status") == "ok"]
     if not ok_rows:
         return
 
     models = sorted({str(row["model"]) for row in ok_rows})
-    fig, axes = plt.subplots(
-        len(models),
-        1,
-        figsize=(7, max(3, 2.8 * len(models))),
-        sharex=True,
-        squeeze=False,
-    )
+    fig, ax = plt.subplots(figsize=(8, 5))
 
-    for ax, model in zip(axes[:, 0], models):
+    for model in models:
         model_rows = sorted(
             [row for row in ok_rows if row["model"] == model],
             key=lambda row: int(row["epoch"]),
         )
         epochs = [int(row["epoch"]) for row in model_rows]
         test_rate_mse = [float(row["test_rate_mse"]) for row in model_rows]
-        ax.plot(epochs, test_rate_mse, marker="o", markersize=3, label="rate MSE")
-        ax.set_ylabel("MSE")
-        ax.set_title(f"{model} held-out firing-rate MSE")
-        ax.grid(True, alpha=0.25)
-        ax.legend()
+        ax.plot(epochs, test_rate_mse, marker="o", markersize=3, label=model)
 
-    axes[-1, 0].set_xlabel("Epoch")
+    if log_y:
+        ax.set_yscale("log")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Held-out firing-rate MSE")
+    ax.set_title("Held-out firing-rate MSE by epoch")
+    ax.grid(True, alpha=0.25)
+    ax.legend()
     fig.tight_layout()
     fig.savefig(path, dpi=200)
     plt.close(fig)
