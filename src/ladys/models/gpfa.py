@@ -1,11 +1,12 @@
-"""Gaussian Process Factor Analysis with an EM training adapter.
+"""Gaussian Process Factor Analysis with gradient and EM training adapters.
 
 This ports the core shape of the local GPFA-MATLAB implementation:
 
 - `gpfaEngine.m` initializes observation parameters using factor analysis.
 - `exactInferenceWithLL.m` performs posterior inference and data likelihood.
 - `em.m` alternates posterior inference with closed-form updates for `C`, `d`,
-  and diagonal `R`.
+  and diagonal `R`; this remains available through the `em` optimization
+  strategy.
 - `learnGPparams.m` updates RBF GP timescales from E-step sufficient statistics.
 """
 
@@ -14,9 +15,10 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from typing import Literal
+import warnings
 
 import torch
-from pydantic import Field
+from pydantic import Field, model_validator
 from torch import Tensor
 
 from ladys.models.base import BaseDynamicsModel, BaseModelConfig, OptimizationConfig
@@ -41,8 +43,26 @@ class GPFAConfig(BaseModelConfig):
     kernel_param_lr: float = 1.0
     jitter: float = 1e-5
     optimization: OptimizationConfig = Field(
-        default_factory=lambda: OptimizationConfig(name="em")
+        default_factory=lambda: OptimizationConfig(
+            name="gradient",
+            optimizer="Adam",
+            lr=1e-2,
+            weight_decay=0.0,
+            gradient_clip=100.0,
+        )
     )
+
+    @model_validator(mode="after")
+    def warn_on_em_optimization(self) -> "GPFAConfig":
+        if self.optimization.name == "em":
+            warnings.warn(
+                "GPFAConfig was configured with optimization.name='em'. "
+                "This uses the legacy full-dataset EM adapter instead of the "
+                "default PyTorch gradient negative-log-likelihood path.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        return self
 
     def build(self, n_neurons: int, n_time: int) -> "GPFA":
         return GPFA(
@@ -78,8 +98,10 @@ class GPFA(BaseDynamicsModel):
     ## When to use
 
     Use GPFA as a classical latent-variable baseline for neural population
-    activity with smooth low-dimensional trajectories. It is useful for
-    comparing neural dynamics methods against a likelihood-based EM estimator.
+    activity with smooth low-dimensional trajectories. The default LaDyS
+    adapter optimizes the exact marginal negative log likelihood with standard
+    PyTorch backpropagation. The original EM-style update remains available by
+    setting `optimization.name` to `em`.
 
     ## Assumptions
 
@@ -91,7 +113,7 @@ class GPFA(BaseDynamicsModel):
 
     `forward` returns posterior latents, observation-space reconstructions,
     nonnegative rate estimates, orthonormalized latent diagnostics, and the
-    marginal log likelihood used by the loss.
+    differentiable marginal log likelihood used by the loss.
     """
 
     def __init__(
@@ -126,11 +148,14 @@ class GPFA(BaseDynamicsModel):
         self.objective = objective
 
         gamma = (bin_width / start_tau) ** 2
-        self.register_buffer("gamma", torch.full((latent_dim,), float(gamma)))
-        self.register_buffer("eps", torch.full((latent_dim,), float(start_eps)))
-        self.register_buffer("C", torch.zeros(n_neurons, latent_dim))
-        self.register_buffer("d", torch.zeros(n_neurons))
-        self.register_buffer("R_diag", torch.ones(n_neurons))
+        self.C = torch.nn.Parameter(torch.zeros(n_neurons, latent_dim))
+        self.d = torch.nn.Parameter(torch.zeros(n_neurons))
+        self.log_R_diag = torch.nn.Parameter(torch.zeros(n_neurons))
+        self.log_gamma = torch.nn.Parameter(
+            torch.full((latent_dim,), math.log(float(gamma))),
+            requires_grad=bool(learn_kernel_params),
+        )
+        self.register_buffer("log_eps", torch.full((latent_dim,), math.log(float(start_eps))))
         self.register_buffer("_initialized", torch.tensor(False))
 
     @property
@@ -164,7 +189,10 @@ class GPFA(BaseDynamicsModel):
         total = -output.extras["log_likelihood"] / x.numel()
         return LossOutput(
             total=total,
-            named_terms={"log_likelihood": output.extras["log_likelihood"]},
+            named_terms={
+                "negative_log_likelihood": total,
+                "log_likelihood": output.extras["log_likelihood"],
+            },
             objective=self.objective,
         )
 
@@ -271,7 +299,7 @@ class GPFA(BaseDynamicsModel):
 
         self.C.copy_(loadings)
         self.d.copy_(mean)
-        self.R_diag.copy_(private_var + self.jitter)
+        self.log_R_diag.copy_(torch.log(torch.clamp(private_var + self.jitter, min=self.jitter)))
         self._initialized.copy_(torch.tensor(True, device=x.device))
 
     def _decode(self, latents: Tensor) -> Tensor:
@@ -297,7 +325,8 @@ class GPFA(BaseDynamicsModel):
             raise ValueError(f"Expected {self.n_neurons} neurons, got {n_neurons}.")
 
         k_big, k_inv, logdet_k = self._make_k_big(n_time, x.device, x.dtype)
-        r_inv = 1.0 / torch.clamp(self.R_diag.to(x.device, x.dtype), min=self.jitter)
+        r_diag = self._r_diag().to(x.device, x.dtype)
+        r_inv = 1.0 / r_diag
         c = self.C.to(x.device, x.dtype)
         d = self.d.to(x.device, x.dtype)
 
@@ -344,9 +373,7 @@ class GPFA(BaseDynamicsModel):
             cov_gp[dim] = cov_big[idx[:, None], idx[None, :]]
 
         if get_ll:
-            logdet_r = torch.log(torch.clamp(self.R_diag, min=self.jitter)).sum().to(
-                x.device, x.dtype
-            )
+            logdet_r = torch.log(r_diag).sum()
             val = (
                 -n_time * logdet_r
                 - logdet_k
@@ -412,20 +439,20 @@ class GPFA(BaseDynamicsModel):
 
         self.C.copy_(C_new)
         self.d.copy_(d_new)
-        self.R_diag.copy_(r + self.jitter)
+        self.log_R_diag.copy_(torch.log(torch.clamp(r + self.jitter, min=self.jitter)))
 
     def _learn_gp_params(self, posterior: GPFAPosterior) -> None:
         """Port of learnGPparams.m for RBF gamma with fixed GP noise."""
 
         batch_size, n_time, _ = posterior.latents.shape
-        new_gamma = self.gamma.detach().clone()
+        new_gamma = self._gamma().detach().clone()
 
         for dim in range(self.latent_dim):
             x_dim = posterior.latents[:, :, dim]
             pauto_sum = batch_size * posterior.cov_gp[dim] + x_dim.T @ x_dim
             pauto_sum = pauto_sum.detach()
             log_gamma = torch.nn.Parameter(
-                torch.log(torch.clamp(self.gamma[dim].detach(), min=self.jitter))
+                torch.log(torch.clamp(self._gamma()[dim].detach(), min=self.jitter))
                 .to(device=pauto_sum.device, dtype=pauto_sum.dtype)
                 .clone()
             )
@@ -442,7 +469,7 @@ class GPFA(BaseDynamicsModel):
                     log_gamma=log_gamma,
                     pauto_sum=pauto_sum,
                     n_trials=batch_size,
-                    eps=self.eps[dim].to(pauto_sum.device, pauto_sum.dtype),
+                    eps=self._eps()[dim].to(pauto_sum.device, pauto_sum.dtype),
                     jitter=self.jitter,
                 )
                 objective.backward()
@@ -456,7 +483,8 @@ class GPFA(BaseDynamicsModel):
             updated = torch.exp(log_gamma.detach()).clamp(min=self.jitter, max=1e6)
             new_gamma[dim] = updated.to(new_gamma.device, new_gamma.dtype)
 
-        self.gamma.copy_(new_gamma)
+        with torch.no_grad():
+            self.log_gamma.copy_(torch.log(torch.clamp(new_gamma, min=self.jitter)))
 
     def _make_k_big(
         self,
@@ -472,8 +500,8 @@ class GPFA(BaseDynamicsModel):
         eye_t = torch.eye(n_time, device=device, dtype=dtype)
         logdet_k = torch.tensor(0.0, device=device, dtype=dtype)
 
-        gamma = self.gamma.to(device=device, dtype=dtype)
-        eps = self.eps.to(device=device, dtype=dtype)
+        gamma = self._gamma().to(device=device, dtype=dtype)
+        eps = self._eps().to(device=device, dtype=dtype)
         for dim in range(self.latent_dim):
             k = (1.0 - eps[dim]) * torch.exp(-0.5 * gamma[dim] * time_dif.pow(2))
             k = k + eps[dim] * eye_t + self.jitter * eye_t
@@ -486,6 +514,15 @@ class GPFA(BaseDynamicsModel):
             k_inv[idx[:, None], idx[None, :]] = k_dim_inv
 
         return k_big, k_inv, logdet_k
+
+    def _gamma(self) -> Tensor:
+        return torch.exp(self.log_gamma).clamp(min=self.jitter, max=1e6)
+
+    def _eps(self) -> Tensor:
+        return torch.exp(self.log_eps).clamp(min=self.jitter, max=0.5)
+
+    def _r_diag(self) -> Tensor:
+        return torch.exp(self.log_R_diag).clamp(min=self.jitter, max=1e8)
 
     def _factor_analysis_scale(self, covariance: Tensor) -> float:
         eye = torch.eye(covariance.shape[0], device=covariance.device, dtype=covariance.dtype)

@@ -78,7 +78,11 @@ model:
   kernel_param_lr: 1.0
   jitter: 1.0e-5
   optimization:
-    name: em
+    name: gradient
+    optimizer: Adam
+    lr: 1.0e-2
+    weight_decay: 0.0
+    gradient_clip: 100.0
 
 preprocessing:
   observations: null

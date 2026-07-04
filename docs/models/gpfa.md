@@ -14,8 +14,10 @@ Gaussian Process Factor Analysis with diagonal observation noise.
 ## When to use
 
 Use GPFA as a classical latent-variable baseline for neural population
-activity with smooth low-dimensional trajectories. It is useful for
-comparing neural dynamics methods against a likelihood-based EM estimator.
+activity with smooth low-dimensional trajectories. The default LaDyS
+adapter optimizes the exact marginal negative log likelihood with standard
+PyTorch backpropagation. The original EM-style update remains available by
+setting `optimization.name` to `em`.
 
 ## Assumptions
 
@@ -27,7 +29,7 @@ over latent trajectories.
 
 `forward` returns posterior latents, observation-space reconstructions,
 nonnegative rate estimates, orthonormalized latent diagnostics, and the
-marginal log likelihood used by the loss.
+differentiable marginal log likelihood used by the loss.
 
 ## Configuration
 
@@ -48,7 +50,7 @@ Config for Gaussian-observation GPFA.
 | `kernel_param_max_iters` | `int` | `8` |
 | `kernel_param_lr` | `float` | `1.0` |
 | `jitter` | `float` | `1e-05` |
-| `optimization` | `OptimizationConfig` | `OptimizationConfig(name='em')` |
+| `optimization` | `OptimizationConfig` | `OptimizationConfig(name='gradient', optimizer='Adam', lr=0.01, weight_decay=0.0, gradient_clip=100.0)` |
 
 ## Contracts
 

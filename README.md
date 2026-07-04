@@ -14,9 +14,10 @@ and a Lorenz synthetic dataset. Models accept `(batch, time, neurons)` tensors i
 
 - `ladys.models.cassm`: thin adapter around the compact sparse CASSM
   filtering core in `ladys.models`.
-- `ladys.models.gpfa`: Gaussian-observation GPFA with FA initialization,
-  EM updates, and RBF GP timescale learning. One full-dataset E/M update is
-  treated as one benchmark epoch.
+- `ladys.models.gpfa`: Gaussian-observation GPFA with FA initialization and a
+  differentiable exact marginal negative log likelihood. It trains with the
+  standard PyTorch gradient strategy by default; the older EM adapter remains
+  available through config.
 - `ladys.models.kalman`: dense Kalman filter baseline adapted from the CASSM
   filtering code, exposed with per-trial rate predictions for benchmark metrics.
 

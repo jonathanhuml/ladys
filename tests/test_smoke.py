@@ -1,3 +1,5 @@
+import pytest
+
 from torch.utils.data import DataLoader
 
 from ladys.datasets import LorenzDataset, LorenzDatasetConfig
@@ -53,11 +55,16 @@ def test_model_contracts_smoke():
 
     gpfa_config = GPFAConfig(latent_dim=2)
     gpfa = gpfa_config.build(n_neurons=x.shape[-1], n_time=x.shape[1])
-    em = build_strategy(gpfa_config.optimization)
-    em.setup(gpfa)
-    result = em.step(gpfa, batch, epoch=0)
+    gpfa_out = gpfa(x)
+    gpfa_loss = gpfa.loss(batch, gpfa_out)
+    assert gpfa_out.latents.shape[:2] == x.shape[:2]
+    assert gpfa_loss.total.ndim == 0
+    _assert_all_trainable_parameters_receive_gradients(gpfa, gpfa_loss.total)
+
+    gradient = build_strategy(gpfa_config.optimization)
+    gradient.setup(gpfa)
+    result = gradient.step(gpfa, batch, epoch=0)
     assert result.batch_size == x.shape[0]
-    assert gpfa(x).latents.shape[:2] == x.shape[:2]
 
     lfads = LFADSConfig(
         generator_dim=8,
@@ -75,3 +82,8 @@ def test_model_contracts_smoke():
     assert lfads.predict_rates(x).shape == x.shape
     assert lfads_loss.total.ndim == 0
     _assert_all_trainable_parameters_receive_gradients(lfads, lfads_loss.total)
+
+
+def test_gpfa_warns_when_configured_for_em():
+    with pytest.warns(RuntimeWarning, match="legacy full-dataset EM adapter"):
+        GPFAConfig(optimization={"name": "em"})
