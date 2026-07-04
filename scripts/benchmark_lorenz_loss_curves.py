@@ -96,6 +96,18 @@ def parse_args() -> argparse.Namespace:
         help="GPFA latent dimensionality.",
     )
     parser.add_argument(
+        "--gpfa-init-method",
+        choices=["fa", "normal", "kaiming", "kaiming_normal", "kaiming_uniform"],
+        default="kaiming_normal",
+        help="GPFA observation loading initialization.",
+    )
+    parser.add_argument(
+        "--gpfa-init-seed",
+        type=int,
+        default=None,
+        help="GPFA initialization seed. Defaults to --seed when omitted.",
+    )
+    parser.add_argument(
         "--bgpfa-infer-steps",
         type=int,
         default=300,
@@ -276,7 +288,12 @@ def build_model_config(
             )
         return CASSMConfig(projection_dim=projection_dim)
     if model_name == "gpfa":
-        return GPFAConfig(latent_dim=args.gpfa_latent_dim)
+        init_seed = args.seed if args.gpfa_init_seed is None else args.gpfa_init_seed
+        return GPFAConfig(
+            latent_dim=args.gpfa_latent_dim,
+            init_method=args.gpfa_init_method,
+            init_seed=init_seed,
+        )
     if model_name == "kalman":
         return KalmanConfig()
     if model_name == "bgpfa":

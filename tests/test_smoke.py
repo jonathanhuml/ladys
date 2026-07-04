@@ -1,6 +1,7 @@
 import importlib.util
 
 import pytest
+import torch
 from torch.utils.data import DataLoader
 
 from ladys.datasets import (
@@ -190,3 +191,56 @@ def test_chaotic_rnn_dataset_contract():
 def test_gpfa_warns_when_configured_for_em():
     with pytest.warns(RuntimeWarning, match="legacy full-dataset EM adapter"):
         GPFAConfig(optimization={"name": "em"})
+
+
+def test_gpfa_initialization_methods_are_configurable():
+    config = LorenzDatasetConfig(
+        neurons=5,
+        num_inits=2,
+        num_trials=3,
+        num_steps=8,
+        burn_steps=5,
+        seed=0,
+    )
+    train_ds, _ = LorenzDataset.make_splits(config)
+    x = next(iter(DataLoader(train_ds, batch_size=2)))["spikes"]
+
+    normal = GPFAConfig(
+        latent_dim=2,
+        init_method="normal",
+        init_seed=123,
+        learn_kernel_params=False,
+    ).build(n_neurons=x.shape[-1], n_time=x.shape[1])
+    kaiming = GPFAConfig(
+        latent_dim=2,
+        init_method="kaiming_normal",
+        init_seed=123,
+        learn_kernel_params=False,
+    ).build(n_neurons=x.shape[-1], n_time=x.shape[1])
+    fa = GPFAConfig(
+        latent_dim=2,
+        init_method="fa",
+        init_seed=123,
+        fa_max_iters=2,
+        learn_kernel_params=False,
+    ).build(n_neurons=x.shape[-1], n_time=x.shape[1])
+
+    normal.initialize(x)
+    kaiming.initialize(x)
+    fa.initialize(x)
+
+    assert normal.initialized
+    assert kaiming.initialized
+    assert fa.initialized
+    assert normal.C.isfinite().all()
+    assert kaiming.C.isfinite().all()
+    assert fa.C.isfinite().all()
+    assert normal._r_diag().isfinite().all()
+    assert kaiming._r_diag().isfinite().all()
+    assert fa._r_diag().isfinite().all()
+    assert not torch.allclose(normal.C, kaiming.C)
+
+    c_before = kaiming.C.detach().clone()
+    out = kaiming(x)
+    assert "Corth" in out.extras
+    assert torch.allclose(kaiming.C, c_before)

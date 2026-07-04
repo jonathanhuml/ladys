@@ -8,13 +8,17 @@ This ports the core shape of the local GPFA-MATLAB implementation:
   and diagonal `R`; this remains available through the `em` optimization
   strategy.
 - `learnGPparams.m` updates RBF GP timescales from E-step sufficient statistics.
+
+The PyTorch gradient path defaults to a random Kaiming loading initialization so
+loss curves show the optimizer's work instead of starting after a full FA solve.
+Set `init_method="fa"` to recover the MATLAB-style factor-analysis initializer.
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Optional
 import warnings
 
 import torch
@@ -36,6 +40,14 @@ class GPFAConfig(BaseModelConfig):
     start_tau: float = 100.0
     start_eps: float = 1e-3
     min_var_frac: float = 0.01
+    init_method: Literal[
+        "fa",
+        "normal",
+        "kaiming",
+        "kaiming_normal",
+        "kaiming_uniform",
+    ] = "kaiming_normal"
+    init_seed: Optional[int] = None
     learn_kernel_params: bool = True
     fa_max_iters: int = 500
     fa_tol: float = 1e-8
@@ -73,6 +85,8 @@ class GPFAConfig(BaseModelConfig):
             start_tau=self.start_tau,
             start_eps=self.start_eps,
             min_var_frac=self.min_var_frac,
+            init_method=self.init_method,
+            init_seed=self.init_seed,
             learn_kernel_params=self.learn_kernel_params,
             fa_max_iters=self.fa_max_iters,
             fa_tol=self.fa_tol,
@@ -114,6 +128,14 @@ class GPFA(BaseDynamicsModel):
     `forward` returns posterior latents, observation-space reconstructions,
     nonnegative rate estimates, orthonormalized latent diagnostics, and the
     differentiable marginal log likelihood used by the loss.
+
+    ## Initialization
+
+    Trainable observation parameters are `torch.nn.Parameter`s: `C`, `d`,
+    `log_R_diag`, and optionally `log_gamma`. `init_method` controls the initial
+    `C` loading matrix. Orthonormalization is only returned in `extras` for
+    diagnostics and plotting; it is not copied back into the trainable
+    parameters.
     """
 
     def __init__(
@@ -125,6 +147,8 @@ class GPFA(BaseDynamicsModel):
         start_tau: float = 100.0,
         start_eps: float = 1e-3,
         min_var_frac: float = 0.01,
+        init_method: str = "kaiming_normal",
+        init_seed: Optional[int] = None,
         learn_kernel_params: bool = True,
         fa_max_iters: int = 500,
         fa_tol: float = 1e-8,
@@ -139,6 +163,8 @@ class GPFA(BaseDynamicsModel):
         self.latent_dim = latent_dim
         self.bin_width = float(bin_width)
         self.min_var_frac = float(min_var_frac)
+        self.init_method = init_method
+        self.init_seed = init_seed
         self.learn_kernel_params = learn_kernel_params
         self.fa_max_iters = int(fa_max_iters)
         self.fa_tol = float(fa_tol)
@@ -219,7 +245,7 @@ class GPFA(BaseDynamicsModel):
 
     @torch.no_grad()
     def initialize(self, x: Tensor) -> None:
-        """Initialize observation parameters with GPFA-MATLAB's fast FA EM."""
+        """Initialize observation parameters from data moments."""
 
         x = x.float()
         flat = x.reshape(-1, self.n_neurons)
@@ -232,15 +258,23 @@ class GPFA(BaseDynamicsModel):
         var_floor = torch.clamp(self.min_var_frac * diag_cx, min=self.jitter)
 
         scale = self._factor_analysis_scale(c_x)
-        generator = torch.Generator(device="cpu")
-        generator.manual_seed(0)
-        loadings = torch.randn(
-            self.n_neurons,
-            self.latent_dim,
-            generator=generator,
+        loadings = self._initialize_loadings(
+            method=self.init_method,
+            scale=scale,
+            device=x.device,
             dtype=x.dtype,
-        ).to(x.device)
-        loadings = loadings * math.sqrt(scale / max(self.latent_dim, 1))
+        )
+        private_var = self._initial_private_var(diag_cx, loadings, var_floor)
+
+        if self.init_method != "fa":
+            self.C.copy_(loadings)
+            self.d.copy_(mean)
+            self.log_R_diag.copy_(
+                torch.log(torch.clamp(private_var + self.jitter, min=self.jitter))
+            )
+            self._initialized.copy_(torch.tensor(True, device=x.device))
+            return
+
         private_var = diag_cx.clone()
 
         eye_z = torch.eye(self.latent_dim, device=x.device, dtype=x.dtype)
@@ -299,8 +333,64 @@ class GPFA(BaseDynamicsModel):
 
         self.C.copy_(loadings)
         self.d.copy_(mean)
-        self.log_R_diag.copy_(torch.log(torch.clamp(private_var + self.jitter, min=self.jitter)))
+        self.log_R_diag.copy_(
+            torch.log(torch.clamp(private_var + self.jitter, min=self.jitter))
+        )
         self._initialized.copy_(torch.tensor(True, device=x.device))
+
+    def _initialize_loadings(
+        self,
+        method: str,
+        scale: float,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Tensor:
+        """Create a data-scaled random loading matrix."""
+
+        target_device = torch.device("cpu") if self.init_seed is not None else device
+        generator = None
+        if self.init_seed is not None:
+            generator = torch.Generator(device=target_device)
+            generator.manual_seed(int(self.init_seed))
+
+        loadings = torch.empty(
+            self.n_neurons,
+            self.latent_dim,
+            device=target_device,
+            dtype=dtype,
+        )
+        fan_in = max(self.latent_dim, 1)
+        data_scale = math.sqrt(max(float(scale), self.jitter))
+
+        if method in {"fa", "normal"}:
+            std = data_scale / math.sqrt(fan_in)
+            loadings.normal_(mean=0.0, std=std, generator=generator)
+        elif method in {"kaiming", "kaiming_normal"}:
+            std = data_scale * math.sqrt(2.0 / fan_in)
+            loadings.normal_(mean=0.0, std=std, generator=generator)
+        elif method == "kaiming_uniform":
+            std = data_scale * math.sqrt(2.0 / fan_in)
+            bound = math.sqrt(3.0) * std
+            loadings.uniform_(-bound, bound, generator=generator)
+        else:
+            raise ValueError(
+                "init_method must be one of 'fa', 'normal', 'kaiming', "
+                "'kaiming_normal', or 'kaiming_uniform'."
+            )
+
+        return loadings.to(device=device)
+
+    def _initial_private_var(
+        self,
+        diag_cx: Tensor,
+        loadings: Tensor,
+        var_floor: Tensor,
+    ) -> Tensor:
+        signal_var = loadings.pow(2).sum(dim=1).to(
+            device=diag_cx.device,
+            dtype=diag_cx.dtype,
+        )
+        return torch.maximum(var_floor, diag_cx - signal_var)
 
     def _decode(self, latents: Tensor) -> Tensor:
         return torch.einsum("btd,nd->btn", latents, self.C) + self.d

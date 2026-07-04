@@ -19,6 +19,8 @@ model:
   start_tau: 100.0
   start_eps: 1.0e-3
   min_var_frac: 0.01
+  init_method: kaiming_normal
+  init_seed: 0
   learn_kernel_params: true
   fa_max_iters: 500
   fa_tol: 1.0e-8

@@ -31,6 +31,14 @@ over latent trajectories.
 nonnegative rate estimates, orthonormalized latent diagnostics, and the
 differentiable marginal log likelihood used by the loss.
 
+## Initialization
+
+Trainable observation parameters are `torch.nn.Parameter`s: `C`, `d`,
+`log_R_diag`, and optionally `log_gamma`. `init_method` controls the initial
+`C` loading matrix. Orthonormalization is only returned in `extras` for
+diagnostics and plotting; it is not copied back into the trainable
+parameters.
+
 ## Configuration
 
 Config for Gaussian-observation GPFA.
@@ -44,6 +52,8 @@ Config for Gaussian-observation GPFA.
 | `start_tau` | `float` | `100.0` |
 | `start_eps` | `float` | `0.001` |
 | `min_var_frac` | `float` | `0.01` |
+| `init_method` | `Literal['fa', 'normal', 'kaiming', 'kaiming_normal', 'kaiming_uniform']` | `'kaiming_normal'` |
+| `init_seed` | `Optional[int]` | `None` |
 | `learn_kernel_params` | `bool` | `True` |
 | `fa_max_iters` | `int` | `500` |
 | `fa_tol` | `float` | `1e-08` |
