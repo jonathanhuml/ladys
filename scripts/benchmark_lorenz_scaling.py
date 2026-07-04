@@ -40,7 +40,13 @@ from torch.utils.data import DataLoader
 
 from ladys.datasets import LorenzDataset, LorenzDatasetConfig
 from ladys.metrics import evaluate_model
-from ladys.models import CASSMConfig, GPFAConfig, KalmanConfig, LFADSConfig
+from ladys.models import (
+    CASSMConfig,
+    GPFAConfig,
+    KalmanConfig,
+    LFADSConfig,
+    NeuralDataTransformerConfig,
+)
 from ladys.models.base import BaseModelConfig
 from ladys.preprocessing import PreprocessedDataset, PreprocessingConfig
 from ladys.training import Trainer, TrainerConfig
@@ -53,12 +59,18 @@ MODEL_CONFIGS = {
     "gpfa": GPFAConfig,
     "kalman": KalmanConfig,
     "lfads": LFADSConfig,
+    "neural_data_transformer": NeuralDataTransformerConfig,
+    "ndt": NeuralDataTransformerConfig,
 }
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--models", nargs="+", default=["cassm", "gpfa", "kalman", "lfads"])
+    parser.add_argument(
+        "--models",
+        nargs="+",
+        default=["cassm", "gpfa", "kalman", "lfads", "neural_data_transformer"],
+    )
     parser.add_argument("--neurons", nargs="+", type=int, default=[10, 100, 1000])
     parser.add_argument("--seeds", nargs="+", type=int, default=[1])
     parser.add_argument("--epochs", type=int, default=1)
@@ -104,6 +116,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lfads-controller-dim", type=int, default=64)
     parser.add_argument("--lfads-lr", type=float, default=1e-3)
     parser.add_argument("--lfads-keep-prob", type=float, default=0.95)
+    parser.add_argument("--ndt-hidden-size", type=int, default=128)
+    parser.add_argument("--ndt-num-layers", type=int, default=6)
+    parser.add_argument("--ndt-num-heads", type=int, default=2)
+    parser.add_argument("--ndt-embed-dim", type=int, default=2)
+    parser.add_argument("--ndt-mask-ratio", type=float, default=0.25)
+    parser.add_argument("--ndt-lr", type=float, default=1e-3)
+    parser.add_argument("--ndt-weight-decay", type=float, default=0.0)
+    parser.add_argument("--ndt-dropout", type=float, default=0.1)
+    parser.add_argument("--ndt-dropout-rates", type=float, default=0.2)
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -122,7 +143,9 @@ def main() -> None:
     }
     rows = list(existing)
 
-    for model_name in args.models:
+    model_names = [canonical_model_name(model_name) for model_name in args.models]
+
+    for model_name in model_names:
         if model_name not in MODEL_CONFIGS:
             raise KeyError(f"Unknown model '{model_name}'. Choices: {sorted(MODEL_CONFIGS)}")
 
@@ -235,6 +258,7 @@ def build_model_config(
     model_name: str,
     n_neurons: int,
 ) -> BaseModelConfig:
+    model_name = canonical_model_name(model_name)
     if model_name == "cassm":
         projection_dim = args.cassm_projection_dim
         if projection_dim is None:
@@ -267,10 +291,28 @@ def build_model_config(
                 "gradient_clip": 200.0,
             },
         )
+    if model_name == "neural_data_transformer":
+        return NeuralDataTransformerConfig(
+            hidden_size=getattr(args, "ndt_hidden_size", 128),
+            num_layers=getattr(args, "ndt_num_layers", 6),
+            num_heads=getattr(args, "ndt_num_heads", 2),
+            embed_dim=getattr(args, "ndt_embed_dim", 2),
+            mask_ratio=getattr(args, "ndt_mask_ratio", 0.25),
+            dropout=getattr(args, "ndt_dropout", 0.1),
+            dropout_rates=getattr(args, "ndt_dropout_rates", 0.2),
+            optimization={
+                "name": "gradient",
+                "optimizer": "Adam",
+                "lr": getattr(args, "ndt_lr", 1e-3),
+                "weight_decay": getattr(args, "ndt_weight_decay", 0.0),
+                "gradient_clip": 200.0,
+            },
+        )
     raise KeyError(model_name)
 
 
 def epochs_for_model(args: argparse.Namespace, model_name: str) -> int:
+    model_name = canonical_model_name(model_name)
     if model_name == "lfads" and args.lfads_epochs is not None:
         return int(args.lfads_epochs)
     return int(args.epochs)
@@ -284,11 +326,17 @@ def build_preprocessing_config(
     if preprocessing_mode == "none":
         return PreprocessingConfig()
 
-    path = Path(config_dir) / f"{model_name}_lorenz.yaml"
+    path = Path(config_dir) / f"{canonical_model_name(model_name)}_lorenz.yaml"
     if not path.exists():
         return PreprocessingConfig()
     data = load_yaml(path)
     return PreprocessingConfig.model_validate(data.get("preprocessing", {}))
+
+
+def canonical_model_name(model_name: str) -> str:
+    if model_name == "ndt":
+        return "neural_data_transformer"
+    return model_name
 
 
 def plot_results(rows: list[dict], path: Path) -> None:

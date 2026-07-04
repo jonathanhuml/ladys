@@ -17,6 +17,9 @@ Run a full LaDyS experiment with:
 ladys run -d lorenz -m cassm
 ```
 
+The package also includes `neural_data_transformer` and `chaotic_rnn` entries in
+the public model/dataset registries.
+
 This builds the dataset, model, trainer, evaluation metrics, and a self-contained
 run folder through the public `ladys.Experiment` orchestration API.
 

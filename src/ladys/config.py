@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ladys.datasets import LorenzDatasetConfig
+from pydantic import BaseModel
+
+from ladys.data import build_dataset_config
 from ladys.models.base import BaseModelConfig
 from ladys.preprocessing import PreprocessingConfig
 from ladys.training import TrainerConfig
@@ -13,7 +15,7 @@ from ladys.utils.yaml import load_yaml
 
 @dataclass
 class ExperimentConfig:
-    dataset: LorenzDatasetConfig
+    dataset: BaseModel
     model: BaseModelConfig
     trainer: TrainerConfig
     preprocessing: PreprocessingConfig
@@ -30,14 +32,12 @@ def load_experiment_config(path: str) -> ExperimentConfig:
 
     data = load_yaml(path)
     dataset_name = data["dataset"].get("name")
-    if dataset_name != "lorenz":
-        raise KeyError(f"Unsupported dataset config '{dataset_name}'.")
 
     trainer_data = dict(data.get("trainer", {}))
     batch_size = int(trainer_data.pop("batch_size", 32))
     experiment_data = data.get("experiment", {})
     return ExperimentConfig(
-        dataset=LorenzDatasetConfig.model_validate(data["dataset"]),
+        dataset=build_dataset_config(dataset_name, data["dataset"]),
         model=BaseModelConfig.from_dict(data["model"]),
         trainer=TrainerConfig(**trainer_data),
         preprocessing=PreprocessingConfig.model_validate(data.get("preprocessing", {})),

@@ -2,8 +2,19 @@ import pytest
 
 from torch.utils.data import DataLoader
 
-from ladys.datasets import LorenzDataset, LorenzDatasetConfig
-from ladys.models import CASSMConfig, GPFAConfig, KalmanConfig, LFADSConfig
+from ladys.datasets import (
+    ChaoticRNNDataset,
+    ChaoticRNNDatasetConfig,
+    LorenzDataset,
+    LorenzDatasetConfig,
+)
+from ladys.models import (
+    CASSMConfig,
+    GPFAConfig,
+    KalmanConfig,
+    LFADSConfig,
+    NeuralDataTransformerConfig,
+)
 from ladys.training.strategies import build_strategy
 
 
@@ -82,6 +93,43 @@ def test_model_contracts_smoke():
     assert lfads.predict_rates(x).shape == x.shape
     assert lfads_loss.total.ndim == 0
     _assert_all_trainable_parameters_receive_gradients(lfads, lfads_loss.total)
+
+    ndt = NeuralDataTransformerConfig(
+        hidden_size=16,
+        num_layers=1,
+        embed_dim=2,
+        num_heads=2,
+        dropout=0.0,
+        dropout_rates=0.0,
+        dropout_embedding=0.0,
+    ).build(n_neurons=x.shape[-1], n_time=x.shape[1])
+    ndt_out = ndt(x)
+    ndt_loss = ndt.loss(batch, ndt_out)
+    assert ndt_out.rates.shape == x.shape
+    assert ndt_out.latents.shape[:2] == x.shape[:2]
+    assert ndt.predict_rates(x).shape == x.shape
+    assert ndt_loss.total.ndim == 0
+    _assert_all_trainable_parameters_receive_gradients(ndt, ndt_loss.total)
+
+
+def test_chaotic_rnn_dataset_contract():
+    config = ChaoticRNNDatasetConfig(
+        neurons=5,
+        hidden_units=8,
+        num_conditions=3,
+        num_trials=4,
+        num_steps=12,
+        seed=0,
+    )
+    train_ds, valid_ds = ChaoticRNNDataset.make_splits(config)
+
+    assert train_ds.spikes.shape == (9, 12, 5)
+    assert valid_ds.spikes.shape == (3, 12, 5)
+    assert train_ds.rates.shape == train_ds.spikes.shape
+    assert train_ds.latents.shape == (9, 12, 8)
+
+    sample = train_ds[0]
+    assert set(sample) == {"spikes", "rates", "latents", "dt"}
 
 
 def test_gpfa_warns_when_configured_for_em():

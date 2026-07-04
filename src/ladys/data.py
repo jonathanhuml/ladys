@@ -8,11 +8,17 @@ from typing import Any
 from pydantic import BaseModel
 from torch.utils.data import DataLoader, Dataset
 
-from ladys.datasets import LorenzDataset, LorenzDatasetConfig
+from ladys.datasets import (
+    ChaoticRNNDataset,
+    ChaoticRNNDatasetConfig,
+    LorenzDataset,
+    LorenzDatasetConfig,
+)
 from ladys.preprocessing import PreprocessedDataset, PreprocessingConfig
 
 
 DATASET_CONFIGS: dict[str, type[BaseModel]] = {
+    "chaotic_rnn": ChaoticRNNDatasetConfig,
     "lorenz": LorenzDatasetConfig,
 }
 
@@ -38,6 +44,8 @@ def build_dataset_config(name: str, data: dict[str, Any] | None = None) -> BaseM
 def make_dataset_splits(config: BaseModel) -> tuple[Dataset, Dataset]:
     """Instantiate train/validation PyTorch datasets from a dataset config."""
 
+    if isinstance(config, ChaoticRNNDatasetConfig):
+        return ChaoticRNNDataset.make_splits(config)
     if isinstance(config, LorenzDatasetConfig):
         return LorenzDataset.make_splits(config)
     raise TypeError(f"Unsupported dataset config type {type(config).__name__}.")

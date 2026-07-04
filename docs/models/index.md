@@ -16,3 +16,4 @@ python scripts/generate_model_docs.py
 | [GPFA](gpfa.md) | `gpfa` | Gaussian Process Factor Analysis with diagonal observation noise. |
 | [Kalman](kalman.md) | `kalman` | Dense Kalman filter baseline adapted from the CASSM source. |
 | [LFADS](lfads.md) | `lfads` | Latent Factor Analysis via Dynamical Systems for binned spike counts. |
+| [NeuralDataTransformer](neural_data_transformer.md) | `neural_data_transformer` | Transformer encoder trained with a masked Poisson spike objective. |

@@ -116,3 +116,11 @@ def test_cli_lists_models(capsys):
     assert "gpfa" in output
     assert "kalman" in output
     assert "lfads" in output
+    assert "neural_data_transformer" in output
+
+
+def test_cli_lists_datasets(capsys):
+    assert main(["list", "datasets"]) == 0
+    output = capsys.readouterr().out
+    assert "chaotic_rnn" in output
+    assert "lorenz" in output

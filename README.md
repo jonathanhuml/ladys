@@ -7,8 +7,8 @@
 PyTorch benchmark scaffolding for latent variable models of neural dynamics.
 
 The first API pass standardizes model construction, training/reporting contracts,
-and a Lorenz synthetic dataset. Models accept `(batch, time, neurons)` tensors in
-`forward`.
+and synthetic Lorenz/chaotic-RNN datasets. Models accept `(batch, time, neurons)`
+tensors in `forward`.
 
 ## Initial Examples
 
@@ -20,6 +20,8 @@ and a Lorenz synthetic dataset. Models accept `(batch, time, neurons)` tensors i
   available through config.
 - `ladys.models.kalman`: dense Kalman filter baseline adapted from the CASSM
   filtering code, exposed with per-trial rate predictions for benchmark metrics.
+- `ladys.models.neural_data_transformer`: masked-count Neural Data Transformer
+  adapter with native LaDyS config, training, prediction, and metrics contracts.
 
 
 ## Public Experiment API
@@ -45,6 +47,7 @@ experiment configs:
 
 ```bash
 ladys run -c configs/experiment/gpfa_lorenz.yaml
+ladys run -c configs/experiment/neural_data_transformer_lorenz.yaml
 ladys list datasets
 ladys list models
 ```
@@ -60,7 +63,7 @@ pip install -e ".[benchmarks]"
 
 ```bash
 PYTHONPATH=src python3 scripts/benchmark_lorenz_scaling.py \
-  --models cassm gpfa kalman \
+  --models cassm gpfa kalman neural_data_transformer \
   --neurons 10 100 1000 \
   --seeds 1
 ```

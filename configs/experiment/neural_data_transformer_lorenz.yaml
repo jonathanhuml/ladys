@@ -1,0 +1,62 @@
+dataset:
+  name: lorenz
+  neurons: 32
+  num_inits: 4
+  num_trials: 8
+  num_steps: 100
+  burn_steps: 1000
+  train_fraction: 0.8
+  seed: 0
+  latent_dt: 0.015
+  spike_bin_size: 1.0
+  base_rate: 1.0
+
+model:
+  name: neural_data_transformer
+  objective: masked_poisson_nll
+  context_forward: 4
+  context_backward: 8
+  context_wrap_initial: false
+  full_context: false
+  hidden_size: 128
+  dropout: 0.1
+  dropout_rates: 0.2
+  dropout_embedding: 0.2
+  num_heads: 2
+  num_layers: 6
+  activation: relu
+  linear_embedder: false
+  embed_dim: 2
+  learnable_position: true
+  max_spike_count: 20
+  lograte: true
+  log_rate_min: -8.0
+  log_rate_max: 8.0
+  spike_log_init: false
+  fixup_init: true
+  pre_norm: true
+  scale_norm: false
+  decoder_layers: 1
+  position_offset: true
+  mask_ratio: 0.25
+  mask_mode: timestep
+  mask_token_ratio: 1.0
+  mask_random_ratio: 0.5
+  mask_max_span: 1
+  mask_span_expand_prob: 0.0
+  use_zero_mask: true
+  topk_loss_fraction: 1.0
+  optimization:
+    name: gradient
+    optimizer: Adam
+    lr: 1.0e-3
+    weight_decay: 0.0
+    gradient_clip: 200.0
+
+preprocessing:
+  observations: null
+
+trainer:
+  epochs: 5
+  batch_size: 4
+  device: cpu
