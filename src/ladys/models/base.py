@@ -84,6 +84,12 @@ class BaseDynamicsModel(nn.Module, ABC):
             return output.reconstruction
         raise RuntimeError(f"{type(self).__name__} did not return rates or reconstruction.")
 
+    def evaluation_adapter(self, task: str) -> Any | None:
+        """Return a model-specific evaluation adapter for a task, if needed."""
+
+        del task
+        return None
+
     @property
     def device(self) -> torch.device:
         try:
@@ -103,4 +109,3 @@ def load_model_config(path: str) -> BaseModelConfig:
     data = load_yaml(path)
     model_data = data["model"] if "model" in data else data
     return BaseModelConfig.from_dict(model_data)
-

@@ -76,6 +76,10 @@ class ILQRVAE(torch.nn.Module):
         self._register_model_tensor("c", _tensor(params.c))
         self._register_model_tensor("bias", _tensor(params.bias))
         self._register_model_tensor("gain", _tensor(params.gain))
+        self._register_model_tensor("space_cov_d", _tensor(params.space_cov_d.reshape(-1)))
+        self._register_model_tensor("space_cov_t", _tensor(params.space_cov_t))
+        self._register_model_tensor("time_cov_d", _tensor(params.time_cov_d.reshape(-1)))
+        self._register_model_tensor("time_cov_t", _tensor(params.time_cov_t))
         self.register_buffer("beg_bs", self._make_initial_condition_maps())
 
     @property
@@ -87,6 +91,37 @@ class ILQRVAE(torch.nn.Module):
             self.register_parameter(name, torch.nn.Parameter(value.clone()))
         else:
             self.register_buffer(name, value)
+
+    @staticmethod
+    def _positive(value: torch.Tensor, *, lower: float = 1e-6) -> torch.Tensor:
+        return value.clamp_min(lower)
+
+    def _cov_chol(self, d: torch.Tensor, t: torch.Tensor, size: int) -> torch.Tensor:
+        if d.shape[0] < size or t.shape[0] < size or t.shape[1] < size:
+            raise ValueError(
+                f"covariance parameters are too short for size {size}: "
+                f"d={tuple(d.shape)}, t={tuple(t.shape)}"
+            )
+        diag = self._positive(d[:size])
+        triangle = torch.triu(t[:size, :size], diagonal=1)
+        return triangle + torch.diag(diag)
+
+    def project_parameters(self) -> None:
+        """Project bounded original parameters back into their valid domain."""
+
+        with torch.no_grad():
+            for name in (
+                "spatial_stds",
+                "nu",
+                "first_step",
+                "gain",
+                "space_cov_d",
+                "time_cov_d",
+            ):
+                value = getattr(self, name, None)
+                if isinstance(value, torch.nn.Parameter):
+                    lower = 2.0 + 1e-6 if name == "nu" else 1e-6
+                    value.clamp_(min=lower)
 
     def infer_controls(
         self,
@@ -263,10 +298,43 @@ class ILQRVAE(torch.nn.Module):
             latents.append(x)
         return torch.cat(latents, dim=0)
 
+    def integrate_samples(self, controls: torch.Tensor) -> torch.Tensor:
+        """Propagate sampled controls with shape samples x time x inputs."""
+
+        if controls.ndim != 3 or controls.shape[2] != self.n_input:
+            raise ValueError(
+                "expected sampled controls with shape "
+                f"samples x time x {self.n_input}, got {tuple(controls.shape)}"
+            )
+
+        x = torch.zeros(
+            controls.shape[0],
+            self.n_latent,
+            dtype=controls.dtype,
+            device=controls.device,
+        )
+        latents = []
+        for k in range(controls.shape[1]):
+            u = controls[:, k, :]
+            x = self._dynamics_step(k, x, u)
+            latents.append(x.unsqueeze(1))
+        return torch.cat(latents, dim=1)
+
     def observation_latents(self, latents: torch.Tensor, *, n_observed_steps: int | None = None) -> torch.Tensor:
         observed = latents[self.n_beg - 1 :]
         if n_observed_steps is not None:
             observed = observed[:n_observed_steps]
+        return observed
+
+    def observation_latents_samples(
+        self,
+        latents: torch.Tensor,
+        *,
+        n_observed_steps: int | None = None,
+    ) -> torch.Tensor:
+        observed = latents[:, self.n_beg - 1 :]
+        if n_observed_steps is not None:
+            observed = observed[:, :n_observed_steps]
         return observed
 
     def firing_rates(self, latents: torch.Tensor, *, mode: RateMode = "likelihood") -> torch.Tensor:
@@ -276,7 +344,7 @@ class ILQRVAE(torch.nn.Module):
         if mode == "pre_sample":
             return torch.exp(linear)
         if mode == "likelihood":
-            return self.gain * (1e-3 + torch.exp(linear))
+            return self._positive(self.gain) * (1e-3 + torch.exp(linear))
         raise ValueError(f"unknown rate mode {mode!r}")
 
     def poisson_nll(
@@ -294,15 +362,159 @@ class ILQRVAE(torch.nn.Module):
             nll = nll + torch.sum(torch.lgamma(spikes + 1.0))
         return nll
 
+    def posterior_cov_sample(
+        self,
+        *,
+        n_controls: int,
+        n_samples: int,
+        dtype: torch.dtype | None = None,
+        device: torch.device | None = None,
+    ) -> torch.Tensor:
+        """Sample the shared Kronecker posterior covariance."""
+
+        dtype = dtype or self.c.dtype
+        device = device or self.c.device
+        chol_space = self._cov_chol(self.space_cov_d, self.space_cov_t, self.n_input).to(
+            dtype=dtype,
+            device=device,
+        )
+        chol_time = self._cov_chol(self.time_cov_d, self.time_cov_t, n_controls).to(
+            dtype=dtype,
+            device=device,
+        )
+        xi = torch.randn(
+            n_samples * n_controls,
+            self.n_input,
+            dtype=dtype,
+            device=device,
+        )
+        v = xi @ chol_space
+        v = v.reshape(n_samples, n_controls, self.n_input)
+        v = v.transpose(0, 1).reshape(n_controls, n_samples * self.n_input)
+        v = chol_time.T @ v
+        return v.reshape(n_controls, n_samples, self.n_input).transpose(0, 1)
+
+    def posterior_entropy(self, *, n_controls: int) -> torch.Tensor:
+        """Entropy of the shared Gaussian posterior covariance."""
+
+        d_space = self._positive(self.space_cov_d[: self.n_input])
+        d_time = self._positive(self.time_cov_d[:n_controls])
+        dim = float(self.n_input * n_controls)
+        log_det = 2.0 * (
+            float(self.n_input) * torch.sum(torch.log(d_time))
+            + float(n_controls) * torch.sum(torch.log(d_space))
+        )
+        return 0.5 * (log_det + dim * (1.0 + math.log(2.0 * math.pi)))
+
+    def student_prior_log_prob_samples(
+        self,
+        controls: torch.Tensor,
+        *,
+        include_constants: bool = True,
+    ) -> torch.Tensor:
+        """Student input prior log probability for samples x time x inputs."""
+
+        if controls.ndim != 3 or controls.shape[-1] != self.n_input:
+            raise ValueError(f"expected controls samples x time x {self.n_input}")
+        n_samples = int(controls.shape[0])
+        u0 = controls[:, : self.n_beg, :].reshape(-1, self.n_input)
+        u_rest = controls[:, self.n_beg :, :].reshape(-1, self.n_input)
+
+        sigma0 = self._positive(self.first_step).reshape(1, -1)
+        nll = 0.5 * torch.sum((u0 / sigma0) ** 2)
+
+        nu = self._positive(self.nu, lower=2.0 + 1e-6)
+        sigma = torch.sqrt((nu - 2.0) / nu) * self._positive(self.spatial_stds).reshape(1, -1)
+        if u_rest.numel() > 0:
+            tau = 1.0 + torch.sum((u_rest / sigma) ** 2, dim=1) / nu
+            nll = nll + 0.5 * (nu + self.n_input) * torch.sum(torch.log(tau))
+
+        if include_constants:
+            nll = nll + n_samples * self.n_beg * 0.5 * (
+                self.n_input * math.log(2.0 * math.pi) + 2.0 * torch.sum(torch.log(sigma0))
+            )
+            n_rest = u_rest.shape[0]
+            if n_rest > 0:
+                student_const = (
+                    torch.lgamma(0.5 * nu)
+                    - torch.lgamma(0.5 * (nu + self.n_input))
+                    + 0.5 * self.n_input * torch.log(math.pi * nu)
+                    + torch.sum(torch.log(sigma))
+                )
+                nll = nll + n_rest * student_const
+        return -nll
+
+    def poisson_log_likelihood_samples(
+        self,
+        latents: torch.Tensor,
+        spikes: torch.Tensor,
+        *,
+        held_in_neurons: int,
+        include_constants: bool = True,
+    ) -> torch.Tensor:
+        """Poisson observation log-likelihood for sampled latent trajectories."""
+
+        if latents.ndim != 3:
+            raise ValueError("expected latents with shape samples x time x latent_dim")
+        if spikes.ndim != 2:
+            raise ValueError("expected spikes with shape time x neurons")
+        c = self.c[:held_in_neurons]
+        bias = self.bias[:, :held_in_neurons]
+        gain = self._positive(self.gain[:, :held_in_neurons])
+        linear = latents @ c.T + bias
+        rates = (self.dt * gain * (1e-3 + torch.exp(linear))).clamp_min(1e-12)
+        obs = spikes[: latents.shape[1], :held_in_neurons].unsqueeze(0).to(rates.dtype)
+        logp = torch.sum(obs * torch.log(rates) - rates)
+        if include_constants:
+            logp = logp - float(latents.shape[0]) * torch.sum(torch.lgamma(obs + 1.0))
+        return logp
+
+    def elbo_from_controls(
+        self,
+        controls: torch.Tensor,
+        spikes: torch.Tensor,
+        *,
+        held_in_neurons: int,
+        n_posterior_samples: int = 1,
+        include_constants: bool = True,
+    ) -> torch.Tensor:
+        """Original iLQR-VAE ELBO using detached posterior-mean controls."""
+
+        if controls.ndim != 2:
+            raise ValueError("expected posterior mean controls with shape time x input_dim")
+        cov = self.posterior_cov_sample(
+            n_controls=int(controls.shape[0]),
+            n_samples=int(n_posterior_samples),
+            dtype=controls.dtype,
+            device=controls.device,
+        )
+        samples = controls.unsqueeze(0) + cov
+        latents = self.integrate_samples(samples)
+        observed_latents = self.observation_latents_samples(
+            latents,
+            n_observed_steps=int(spikes.shape[0]),
+        )
+        log_prior = self.student_prior_log_prob_samples(samples, include_constants=include_constants)
+        log_likelihood = self.poisson_log_likelihood_samples(
+            observed_latents,
+            spikes,
+            held_in_neurons=held_in_neurons,
+            include_constants=include_constants,
+        )
+        norm_const = 1.0 / float(n_posterior_samples)
+        return self.posterior_entropy(n_controls=int(controls.shape[0])) + norm_const * (
+            log_prior + log_likelihood
+        )
+
     def student_prior_nll(self, controls: torch.Tensor, *, include_constants: bool = False) -> torch.Tensor:
         u0 = controls[: self.n_beg]
         u_rest = controls[self.n_beg :]
 
-        sigma0 = self.first_step.reshape(1, -1)
+        sigma0 = self._positive(self.first_step).reshape(1, -1)
         nll = 0.5 * torch.sum((u0 / sigma0) ** 2)
 
-        nu = self.nu
-        sigma = torch.sqrt((nu - 2.0) / nu) * self.spatial_stds.reshape(1, -1)
+        nu = self._positive(self.nu, lower=2.0 + 1e-6)
+        sigma = torch.sqrt((nu - 2.0) / nu) * self._positive(self.spatial_stds).reshape(1, -1)
         tau = 1.0 + torch.sum((u_rest / sigma) ** 2, dim=1) / nu
         nll = nll + 0.5 * (nu + self.n_input) * torch.sum(torch.log(tau))
 
@@ -358,7 +570,7 @@ class ILQRVAE(torch.nn.Module):
 
     def _prior_nll_t(self, k: int, control: torch.Tensor, *, include_constants: bool = False) -> torch.Tensor:
         if k < self.n_beg:
-            sigma0 = self.first_step.reshape(1, -1)
+            sigma0 = self._positive(self.first_step).reshape(1, -1)
             nll = 0.5 * torch.sum((control / sigma0) ** 2)
             if include_constants:
                 nll = nll + 0.5 * (
@@ -366,8 +578,8 @@ class ILQRVAE(torch.nn.Module):
                 )
             return nll
 
-        nu = self.nu
-        sigma = torch.sqrt((nu - 2.0) / nu) * self.spatial_stds.reshape(1, -1)
+        nu = self._positive(self.nu, lower=2.0 + 1e-6)
+        sigma = torch.sqrt((nu - 2.0) / nu) * self._positive(self.spatial_stds).reshape(1, -1)
         tau = 1.0 + torch.sum((control / sigma) ** 2) / nu
         nll = 0.5 * (nu + self.n_input) * torch.log(tau)
         if include_constants:
@@ -381,11 +593,11 @@ class ILQRVAE(torch.nn.Module):
 
     def _prior_grad_hess_t(self, k: int, control: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if k < self.n_beg:
-            var0 = self.first_step.reshape(-1) ** 2
+            var0 = self._positive(self.first_step).reshape(-1) ** 2
             return control / var0, torch.diag(1.0 / var0)
 
-        nu = self.nu
-        sigma = torch.sqrt((nu - 2.0) / nu) * self.spatial_stds.reshape(1, -1)
+        nu = self._positive(self.nu, lower=2.0 + 1e-6)
+        sigma = torch.sqrt((nu - 2.0) / nu) * self._positive(self.spatial_stds).reshape(1, -1)
         sigma2 = sigma.reshape(-1) ** 2
         u = control.reshape(-1)
         u_over_s = u / sigma.reshape(-1)
@@ -407,7 +619,7 @@ class ILQRVAE(torch.nn.Module):
     ) -> torch.Tensor:
         c = self.c[:held_in_neurons]
         bias = self.bias[:, :held_in_neurons]
-        gain = self.gain[:, :held_in_neurons]
+        gain = self._positive(self.gain[:, :held_in_neurons])
         linear = state @ c.T + bias
         rates = (self.dt * gain * (1e-3 + torch.exp(linear))).clamp_min(1e-12)
         nll = torch.sum(rates - spikes_t * torch.log(rates))
@@ -424,7 +636,7 @@ class ILQRVAE(torch.nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         c = self.c[:held_in_neurons]
         bias = self.bias[:, :held_in_neurons]
-        gain = self.gain[:, :held_in_neurons]
+        gain = self._positive(self.gain[:, :held_in_neurons])
         linear = state @ c.T + bias
         exp_linear = torch.exp(linear)
         link = 1e-3 + exp_linear
@@ -644,15 +856,25 @@ class ILQRVAE(torch.nn.Module):
                 quu = step.rluu + step.b @ vxx @ bt
                 quu = 0.5 * (quu + quu.T)
                 qtuu = quu + mu * (step.b @ bt)
-                min_eval = float(torch.linalg.eigvalsh(qtuu).min().detach().cpu())
+                try:
+                    min_eval = float(torch.linalg.eigvalsh(qtuu).min().detach().cpu())
+                except RuntimeError:
+                    delta, mu = _increase_regularization(delta, mu)
+                    restart = True
+                    break
                 if not min_eval > 1e-8:
                     delta, mu = _increase_regularization(delta, mu)
                     restart = True
                     break
 
                 qux = step.rlux + step.b @ vxx @ at
-                feedback = -torch.linalg.solve(qtuu, qux).T
-                feedforward = -torch.linalg.solve(qtuu, qu.T).T
+                try:
+                    feedback = -torch.linalg.solve(qtuu, qux).T
+                    feedforward = -torch.linalg.solve(qtuu, qu.T).T
+                except RuntimeError:
+                    delta, mu = _increase_regularization(delta, mu)
+                    restart = True
+                    break
                 vxx = qxx + (feedback @ qux).T
                 vxx = 0.5 * (vxx + vxx.T)
                 vx = qx + qu @ feedback.T
@@ -694,6 +916,9 @@ class ILQRVAE(torch.nn.Module):
                 .detach()
                 .cpu()
             )
+            if not math.isfinite(candidate_loss):
+                alpha *= tau
+                continue
             predicted_decrease = alpha * df1 + 0.5 * alpha * alpha * df2
             if not (f0 <= candidate_loss + beta * predicted_decrease):
                 return candidate

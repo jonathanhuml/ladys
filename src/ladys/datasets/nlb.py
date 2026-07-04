@@ -92,8 +92,10 @@ class NLBDatasetConfig(BaseModel):
 class NLBArrays:
     """Loaded held-in input and held-out target arrays."""
 
-    heldin_spikes: Tensor
-    heldout_spikes: Tensor
+    train_heldin_spikes: Tensor
+    train_heldout_spikes: Tensor
+    eval_heldin_spikes: Tensor
+    eval_heldout_spikes: Tensor
     dt: float
 
 
@@ -123,21 +125,33 @@ def load_nlb_h5(config: NLBDatasetConfig) -> NLBArrays:
 
     with h5py.File(path, "r") as handle:
         group = _select_h5_group(handle, config.resolved_group)
-        heldin = np.asarray(group[config.input_key])
-        heldout = np.asarray(group[config.target_key])
+        eval_heldin = np.asarray(group[config.input_key])
+        eval_heldout = np.asarray(group[config.target_key])
+        train_heldin = np.asarray(group.get("train_spikes_heldin", eval_heldin))
+        train_heldout = np.asarray(group.get("train_spikes_heldout", eval_heldout))
 
-    if heldin.shape[:2] != heldout.shape[:2]:
+    if eval_heldin.shape[:2] != eval_heldout.shape[:2]:
         raise ValueError(
-            f"{path}: held-in shape {heldin.shape} is incompatible with held-out {heldout.shape}."
+            f"{path}: eval held-in shape {eval_heldin.shape} is incompatible with "
+            f"held-out {eval_heldout.shape}."
+        )
+    if train_heldin.shape[:2] != train_heldout.shape[:2]:
+        raise ValueError(
+            f"{path}: train held-in shape {train_heldin.shape} is incompatible with "
+            f"held-out {train_heldout.shape}."
         )
 
     if config.max_trials is not None:
-        heldin = heldin[: config.max_trials]
-        heldout = heldout[: config.max_trials]
+        eval_heldin = eval_heldin[: config.max_trials]
+        eval_heldout = eval_heldout[: config.max_trials]
+        train_heldin = train_heldin[: config.max_trials]
+        train_heldout = train_heldout[: config.max_trials]
 
     return NLBArrays(
-        heldin_spikes=torch.from_numpy(heldin.copy()).float(),
-        heldout_spikes=torch.from_numpy(heldout.copy()).float(),
+        train_heldin_spikes=torch.from_numpy(train_heldin.copy()).float(),
+        train_heldout_spikes=torch.from_numpy(train_heldout.copy()).float(),
+        eval_heldin_spikes=torch.from_numpy(eval_heldin.copy()).float(),
+        eval_heldout_spikes=torch.from_numpy(eval_heldout.copy()).float(),
         dt=float(config.bin_size_ms) / 1000.0,
     )
 
@@ -154,8 +168,14 @@ class NLBDataset(Dataset):
         self.config = config or NLBDatasetConfig()
         self.split = split
         self.arrays = arrays or load_nlb_h5(self.config)
-        self.spikes = self.arrays.heldin_spikes
-        self.raw_spikes = self.arrays.heldout_spikes
+        if split == "train":
+            self.spikes = self.arrays.train_heldin_spikes
+            self.raw_spikes = self.arrays.train_heldout_spikes
+        elif split == "valid":
+            self.spikes = self.arrays.eval_heldin_spikes
+            self.raw_spikes = self.arrays.eval_heldout_spikes
+        else:
+            raise ValueError("split must be 'train' or 'valid'.")
 
     @classmethod
     def make_splits(
@@ -319,8 +339,17 @@ def _prepare_test_h5(
         search_roots=search_roots,
         download=download,
     )
+    train_dict = _build_train_tensors(
+        dataset=dataset,
+        trial_split=["train", "val"],
+        bin_size_ms=bin_size_ms,
+        nwb_root=nwb_root,
+        search_roots=search_roots,
+        download=download,
+    )
     group_name = nlb_group_name(dataset, bin_size_ms)
     target_dict = _read_group_dict(target_h5, group_name)
+    target_dict.update(train_dict)
     target_dict["eval_spikes_heldin"] = heldin.astype(np.float32, copy=False)
     _write_flat_h5(output, target_dict)
     return _validate_prepared_h5(output, dataset, "test", bin_size_ms)
@@ -341,9 +370,11 @@ def _prepare_validation_h5(
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
         input_h5 = tmp_dir / "eval_input.h5"
+        train_h5 = tmp_dir / "train_input.h5"
         target_h5 = tmp_dir / "target.h5"
         try:
             from nlb_tools.make_tensors import (
+                make_train_input_tensors,
                 make_eval_input_tensors,
                 make_eval_target_tensors,
             )
@@ -353,6 +384,13 @@ def _prepare_validation_h5(
 
         dataset_obj = NWBDataset(nwb_path)
         dataset_obj.resample(bin_size_ms)
+        make_train_input_tensors(
+            dataset_obj,
+            dataset_name=dataset,
+            trial_split=train_trial_split,
+            save_file=True,
+            save_path=str(train_h5),
+        )
         make_eval_input_tensors(
             dataset_obj,
             dataset_name=dataset,
@@ -370,10 +408,40 @@ def _prepare_validation_h5(
             save_path=str(target_h5),
         )
 
-        data = _read_group_or_root_dict(input_h5, nlb_group_name(dataset, bin_size_ms))
+        data = _read_group_or_root_dict(train_h5, nlb_group_name(dataset, bin_size_ms))
+        data.update(_read_group_or_root_dict(input_h5, nlb_group_name(dataset, bin_size_ms)))
         data.update(_read_group_dict(target_h5, nlb_group_name(dataset, bin_size_ms)))
         _write_flat_h5(output, data)
     return _validate_prepared_h5(output, dataset, "val", bin_size_ms)
+
+
+def _build_train_tensors(
+    dataset: str,
+    trial_split: str | list[str],
+    bin_size_ms: int,
+    nwb_root: Path,
+    search_roots: list[Path],
+    download: bool,
+) -> dict[str, np.ndarray]:
+    nwb_path = _resolve_nwb_path(dataset, "train", nwb_root, search_roots, download)
+    with tempfile.TemporaryDirectory() as tmp:
+        train_h5 = Path(tmp) / "train_input.h5"
+        try:
+            from nlb_tools.make_tensors import make_train_input_tensors
+            from nlb_tools.nwb_interface import NWBDataset
+        except ImportError as exc:
+            raise RuntimeError("nlb_tools is required to build NLB tensors from NWB.") from exc
+
+        dataset_obj = NWBDataset(nwb_path)
+        dataset_obj.resample(bin_size_ms)
+        make_train_input_tensors(
+            dataset_obj,
+            dataset_name=dataset,
+            trial_split=trial_split,
+            save_file=True,
+            save_path=str(train_h5),
+        )
+        return _read_group_or_root_dict(train_h5, nlb_group_name(dataset, bin_size_ms))
 
 
 def _build_eval_heldin(

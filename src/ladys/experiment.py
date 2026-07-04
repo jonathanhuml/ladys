@@ -75,16 +75,19 @@ class Experiment:
         self.data.setup()
         model = self.build_model()
         strategy = build_strategy(self.config.model.optimization)
+        train_loader = self.data.train_loader()
+        valid_loader = self.data.valid_loader()
         history = self.trainer.fit(
             model=model,
             strategy=strategy,
-            train_loader=self.data.train_loader(),
-            valid_loader=self.data.valid_loader(),
+            train_loader=train_loader,
+            valid_loader=valid_loader,
         )
         evaluation = evaluate_model(
             model=model,
-            loader=self.data.valid_loader(),
+            loader=valid_loader,
             device=self.config.trainer.device,
+            train_loader=self.data.train_loader(shuffle=False),
         )
 
         run_dir = self._make_run_dir()

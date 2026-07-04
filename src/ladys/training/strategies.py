@@ -109,6 +109,8 @@ class GradientStrategy(OptimizationStrategy):
         if self.gradient_clip is not None:
             torch.nn.utils.clip_grad_norm_(model.parameters(), self.gradient_clip)
         self.optimizer.step()
+        if hasattr(model, "project_parameters"):
+            model.project_parameters()
 
         return StepResult.from_loss(loss, batch_size=int(x.shape[0]))
 
@@ -177,6 +179,8 @@ class FullBatchGradientStrategy(OptimizationStrategy):
         if self.gradient_clip is not None:
             torch.nn.utils.clip_grad_norm_(model.parameters(), self.gradient_clip)
         self.optimizer.step()
+        if hasattr(model, "project_parameters"):
+            model.project_parameters()
 
         return StepResult.from_loss(loss, batch_size=int(x.shape[0]))
 

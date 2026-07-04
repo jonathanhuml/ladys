@@ -16,6 +16,7 @@ from ladys.datasets import (
     NLBDatasetConfig,
 )
 from ladys.metrics import compute_available_metrics
+from ladys.metrics import evaluate_model
 from ladys.models import (
     BGPFAConfig,
     CASSMConfig,
@@ -216,6 +217,59 @@ def test_nlb_dataset_loads_grouped_20ms_h5(tmp_path: Path):
         "heldout_spikes",
         "dt",
     }
+
+
+def test_nlb_dataset_uses_train_tensors_when_available(tmp_path: Path):
+    path = tmp_path / "nlb_train_eval.h5"
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset("train_spikes_heldin", data=np.ones((3, 4, 2), dtype=np.float32))
+        handle.create_dataset("train_spikes_heldout", data=np.ones((3, 4, 1), dtype=np.float32) * 2)
+        handle.create_dataset("eval_spikes_heldin", data=np.ones((2, 4, 2), dtype=np.float32) * 3)
+        handle.create_dataset("eval_spikes_heldout", data=np.ones((2, 4, 1), dtype=np.float32) * 4)
+
+    config = NLBDatasetConfig(name="mc_maze", data_path=str(path), bin_size_ms=5)
+    train_ds, valid_ds = NLBDataset.make_splits(config)
+
+    assert train_ds.spikes.shape == (3, 4, 2)
+    assert train_ds.raw_spikes.shape == (3, 4, 1)
+    assert valid_ds.spikes.shape == (2, 4, 2)
+    assert valid_ds.raw_spikes.shape == (2, 4, 1)
+    assert train_ds[0]["spikes"].mean().item() == pytest.approx(1.0)
+    assert valid_ds[0]["spikes"].mean().item() == pytest.approx(3.0)
+
+
+def test_gpfa_nlb_adapter_fits_heldout_decoder(tmp_path: Path):
+    path = tmp_path / "gpfa_nlb.h5"
+    rng = np.random.default_rng(0)
+    train_heldin = rng.poisson(0.5, size=(5, 6, 3)).astype(np.float32)
+    train_heldout = (train_heldin[..., :1] + 0.1).astype(np.float32)
+    eval_heldin = rng.poisson(0.5, size=(2, 6, 3)).astype(np.float32)
+    eval_heldout = (eval_heldin[..., :1] + 0.1).astype(np.float32)
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset("train_spikes_heldin", data=train_heldin)
+        handle.create_dataset("train_spikes_heldout", data=train_heldout)
+        handle.create_dataset("eval_spikes_heldin", data=eval_heldin)
+        handle.create_dataset("eval_spikes_heldout", data=eval_heldout)
+
+    config = NLBDatasetConfig(name="mc_maze", data_path=str(path), bin_size_ms=5)
+    train_ds, valid_ds = NLBDataset.make_splits(config)
+    model = GPFAConfig(
+        latent_dim=1,
+        init_method="normal",
+        init_seed=0,
+        learn_kernel_params=False,
+    ).build(n_neurons=train_ds.spikes.shape[-1], n_time=train_ds.spikes.shape[1])
+
+    result = evaluate_model(
+        model,
+        DataLoader(valid_ds, batch_size=2),
+        train_loader=DataLoader(train_ds, batch_size=5),
+    )
+
+    assert result.predictions["rates"].shape == eval_heldout.shape
+    assert result.targets["spikes"].shape == eval_heldout.shape
+    assert "co_bps" in result.metrics
+    assert np.isfinite(result.metrics["co_bps"])
 
 
 def test_metrics_skip_incompatible_nlb_shapes():

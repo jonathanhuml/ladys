@@ -30,3 +30,19 @@ such as CASSM can override it to call their native prediction path.
 Future benchmark tasks may add metrics that use `latents` for recovery of the
 known Lorenz state, `distribution` for calibration/log-likelihood, and `extras`
 for method-specific diagnostics. The forward signature should not change.
+
+## Task Evaluation Adapters
+
+Training-time `forward` outputs should stay model-native. Dataset/task-specific
+evaluation lives in adapters selected by `model.evaluation_adapter(task)`:
+
+- synthetic tasks use `SyntheticEvaluationAdapter`, which compares predicted
+  rates/latents against dataset-provided ground truth.
+- real NLB tasks use `NLBCoSmoothingAdapter`, which produces held-out expected
+  spike counts for co-smoothing metrics. If a model directly returns held-out
+  counts, as iLQR-VAE does, no extra readout is fitted. If it exposes latent
+  features only, as GPFA does, the adapter can fit a PyTorch ridge or Poisson
+  readout from training held-in features to training held-out targets.
+
+This keeps a model's scientific output stable while allowing each benchmark
+task to define the prediction target and metric surface it needs.

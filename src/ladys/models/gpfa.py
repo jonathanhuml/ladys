@@ -222,6 +222,18 @@ class GPFA(BaseDynamicsModel):
             objective=self.objective,
         )
 
+    def evaluation_adapter(self, task: str):
+        if task == "nlb":
+            from ladys.metrics import NLBCoSmoothingAdapter
+
+            return NLBCoSmoothingAdapter(
+                feature_source="latents",
+                decoder="poisson",
+                ridge_alpha=1e-2,
+                poisson_max_iter=80,
+            )
+        return None
+
     def fit_em_epoch(self, x: Tensor, epoch: int = 0) -> LossOutput:
         """Run one full E/M update and report normalized negative LL."""
 

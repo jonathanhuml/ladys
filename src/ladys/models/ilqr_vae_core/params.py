@@ -84,6 +84,50 @@ def load_tutorial_params(path: str | Path) -> TutorialParams:
     )
 
 
+def make_random_params(
+    *,
+    latent_dim: int,
+    input_dim: int,
+    n_neurons: int,
+    n_time: int,
+    seed: int = 0,
+    spatial_std: float = 1.0,
+    nu: float = 20.0,
+) -> TutorialParams:
+    """Initialize iLQR-VAE parameters for a new dataset.
+
+    The defaults mirror the original Lorenz example's dimensions and Student
+    prior initialization, while using the tutorial Poisson likelihood expected
+    by the LaDyS spike-count datasets.
+    """
+
+    if latent_dim % input_dim != 0:
+        raise ValueError("latent_dim must be divisible by input_dim.")
+    rng = np.random.default_rng(seed)
+    n_beg = latent_dim // input_dim
+    n_controls = n_time + n_beg - 1
+    dyn_sigma = 0.1 / np.sqrt(float(latent_dim))
+    input_sigma = 1.0 / np.sqrt(float(input_dim))
+    readout_sigma = 1.0 / np.sqrt(float(latent_dim))
+    return TutorialParams(
+        spatial_stds=np.full((1, input_dim), spatial_std, dtype=np.float64),
+        nu=float(nu),
+        first_step=np.full((1, input_dim), spatial_std, dtype=np.float64),
+        uf=np.zeros((latent_dim, latent_dim), dtype=np.float64),
+        wh=rng.normal(scale=dyn_sigma, size=(latent_dim, latent_dim)).astype(np.float64),
+        uh=rng.normal(scale=dyn_sigma, size=(latent_dim, latent_dim)).astype(np.float64),
+        bh=np.zeros((1, latent_dim), dtype=np.float64),
+        b=rng.normal(scale=input_sigma, size=(input_dim, latent_dim)).astype(np.float64),
+        c=rng.normal(scale=readout_sigma, size=(n_neurons, latent_dim)).astype(np.float64),
+        bias=np.zeros((1, n_neurons), dtype=np.float64),
+        gain=np.ones((1, n_neurons), dtype=np.float64),
+        space_cov_d=np.ones((input_dim, 1), dtype=np.float64),
+        space_cov_t=np.zeros((input_dim, input_dim), dtype=np.float64),
+        time_cov_d=np.ones((n_controls, 1), dtype=np.float64),
+        time_cov_t=np.zeros((n_controls, n_controls), dtype=np.float64),
+    )
+
+
 def _param_array(value: Any, label: str) -> np.ndarray:
     """Extract an ``Owl_parameters.tag`` value."""
 

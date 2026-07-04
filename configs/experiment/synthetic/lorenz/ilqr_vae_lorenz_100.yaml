@@ -1,0 +1,52 @@
+dataset:
+  name: lorenz
+  neurons: 100
+  num_inits: 4
+  num_trials: 8
+  num_steps: 100
+  burn_steps: 1000
+  train_fraction: 0.8
+  seed: 0
+  latent_dt: 0.015
+  spike_bin_size: 1.0
+  base_rate: 1.0
+
+model:
+  name: ilqr_vae
+  objective: ilqr_vae_elbo
+  params_path: null
+  initialization: random
+  latent_dim: 20
+  input_dim: 5
+  init_seed: 0
+  solver: ilqr
+  max_iter: 5
+  lr: null
+  trainable_parameters: true
+  n_posterior_samples: 1
+  include_elbo_constants: true
+  dynamics_regularizer: 1.0e-5
+  held_in_neurons: 100
+  output_neuron_start: 0
+  output_neurons: 100
+  rate_mode: likelihood
+  dt: 1.0
+  optimization:
+    name: gradient
+    optimizer: Adam
+    lr: 4.0e-3
+    weight_decay: 0.0
+    gradient_clip: 200.0
+
+preprocessing:
+  observations: null
+
+trainer:
+  epochs: 50
+  batch_size: 2
+  device: cpu
+
+experiment:
+  output_dir: runs
+  run_name: ilqr_vae_lorenz_100
+  save_predictions: true

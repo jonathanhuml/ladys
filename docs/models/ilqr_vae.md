@@ -23,12 +23,19 @@ Config for the tutorial iLQR-VAE posterior-inference adapter.
 | Field | Type | Default |
 | --- | --- | --- |
 | `name` | `Literal['ilqr_vae']` | `'ilqr_vae'` |
-| `objective` | `str` | `'posterior_control'` |
-| `params_path` | `str` | `'data/real/ilqr_vae/final_params.bin'` |
+| `objective` | `Literal['posterior_control', 'ilqr_vae_elbo']` | `'posterior_control'` |
+| `params_path` | `Optional[str]` | `'data/real/ilqr_vae/final_params.bin'` |
+| `initialization` | `Literal['pretrained', 'random']` | `'pretrained'` |
+| `latent_dim` | `int` | `20` |
+| `input_dim` | `int` | `5` |
+| `init_seed` | `int` | `0` |
 | `solver` | `Literal['ilqr', 'lbfgs', 'adam']` | `'ilqr'` |
 | `max_iter` | `int` | `100` |
 | `lr` | `Optional[float]` | `None` |
 | `trainable_parameters` | `bool` | `False` |
+| `n_posterior_samples` | `int` | `1` |
+| `include_elbo_constants` | `bool` | `True` |
+| `dynamics_regularizer` | `float` | `0.0` |
 | `held_in_neurons` | `Optional[int]` | `None` |
 | `output_neuron_start` | `Optional[int]` | `None` |
 | `output_neurons` | `Optional[int]` | `None` |

@@ -13,6 +13,13 @@ from ladys.data import available_datasets, build_dataset_config
 from ladys.datasets.nlb import NLB_BIN_SIZES_MS, NLB_DATASETS, prepare_nlb_data
 from ladys.experiment import Experiment
 from ladys.models.base import BaseModelConfig, load_model_config
+from ladys.nlb_eval import (
+    evaluate_nlb_submission,
+    read_submission_co_bps,
+    score_ladys_predictions,
+    score_run_dir,
+    score_to_json,
+)
 from ladys.preprocessing import PreprocessingConfig
 from ladys.training import TrainerConfig
 from ladys.utils.yaml import load_yaml
@@ -97,6 +104,30 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_nlb_parser.add_argument("--include-psth", action="store_true", help="include PSTHs for val targets")
     prepare_nlb_parser.set_defaults(handler=prepare_nlb_command)
 
+    score_nlb_parser = subparsers.add_parser(
+        "score-nlb",
+        help="score NLB held-out predictions",
+        description=(
+            "Score LaDyS predictions.npz artifacts with NLB co-bps, or run the "
+            "full nlb_tools evaluator on an EvalAI-style H5 submission."
+        ),
+    )
+    source = score_nlb_parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--run-dir", help="LaDyS run directory containing predictions.npz")
+    source.add_argument("--predictions", help="LaDyS predictions.npz artifact")
+    source.add_argument("--submission-h5", help="EvalAI-style NLB submission H5")
+    score_nlb_parser.add_argument("--target-h5", help="NLB target H5 for --submission-h5")
+    score_nlb_parser.add_argument("--dataset", choices=list(NLB_DATASETS), help="dataset for H5 co-bps-only scoring")
+    score_nlb_parser.add_argument(
+        "--bin-size-ms",
+        type=int,
+        default=5,
+        choices=list(NLB_BIN_SIZES_MS),
+        help="bin size for H5 co-bps-only scoring",
+    )
+    score_nlb_parser.add_argument("--output-json", help="optional path to write JSON metrics")
+    score_nlb_parser.set_defaults(handler=score_nlb_command)
+
     return parser
 
 
@@ -145,6 +176,31 @@ def prepare_nlb_command(args: argparse.Namespace) -> int:
             f"{item.dataset} {item.split} {item.bin_size_ms}ms: "
             f"{item.path} heldin={item.heldin_shape} heldout={item.heldout_shape}"
         )
+    return 0
+
+
+def score_nlb_command(args: argparse.Namespace) -> int:
+    if args.run_dir:
+        score = score_run_dir(Path(args.run_dir))
+    elif args.predictions:
+        score = score_ladys_predictions(Path(args.predictions))
+    else:
+        if not args.target_h5:
+            raise ValueError("--target-h5 is required with --submission-h5.")
+        if args.dataset:
+            score = read_submission_co_bps(
+                Path(args.target_h5),
+                Path(args.submission_h5),
+                dataset=args.dataset,
+                bin_size_ms=args.bin_size_ms,
+            )
+        else:
+            score = evaluate_nlb_submission(Path(args.target_h5), Path(args.submission_h5))
+
+    text = score_to_json(score)
+    print(text)
+    if args.output_json:
+        Path(args.output_json).write_text(text + "\n")
     return 0
 
 

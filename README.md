@@ -49,12 +49,21 @@ The run folder includes `config.json`, `history.csv`, `metrics.json`,
 experiment configs:
 
 ```bash
-ladys run -c configs/experiment/bgpfa_lorenz.yaml
-ladys run -c configs/experiment/gpfa_lorenz.yaml
-ladys run -c configs/experiment/ndt_lorenz.yaml
+ladys run -c configs/experiment/synthetic/lorenz/bgpfa_lorenz.yaml
+ladys run -c configs/experiment/synthetic/lorenz/gpfa_lorenz.yaml
+ladys run -c configs/experiment/synthetic/lorenz/ndt_lorenz.yaml
 ladys list datasets
 ladys list models
 ```
+
+Synthetic and real-data tasks share the same CLI, but use task-specific
+evaluation adapters under the hood. Synthetic datasets such as Lorenz and
+chaotic RNN expose true rates and latents, so the default adapter reports
+ground-truth rate and latent metrics. NLB datasets expose held-in spikes and
+held-out targets, so the NLB co-smoothing adapter reports held-out bits/spike;
+models can override `evaluation_adapter(task)` when they need a method-specific
+readout, such as GPFA fitting a PyTorch linear or Poisson readout from inferred
+features to held-out neurons.
 
 ## Neural Latents Benchmark Data
 
@@ -76,6 +85,29 @@ PYTHONPATH=src python3 scripts/prepare_nlb_data.py \
 If NWB files are already present in a DANDI-style directory, omit `--download`
 and pass `--nwb-root` or repeated `--search-root` values. Dataset configs for
 the 5 ms and 20 ms NLB test files live under `configs/dataset/`.
+
+After a LaDyS run writes `predictions.npz`, score held-out count predictions
+with the NLB co-smoothing bits/spike metric:
+
+```bash
+ladys run -c configs/experiment/real/mc_maze/ilqr_vae_mc_maze_nlb_5ms.yaml
+ladys score-nlb --run-dir runs/ilqr_vae_mc_maze_nlb_5ms
+```
+
+GPFA uses the same real-data path with its NLB adapter:
+
+```bash
+ladys run -c configs/experiment/real/mc_maze/gpfa_mc_maze_nlb_5ms.yaml
+ladys score-nlb --run-dir runs/gpfa_mc_maze_nlb_5ms
+```
+
+For methods that emit a full EvalAI-style submission H5, the same command can
+delegate to the `nlb_tools` evaluator:
+
+```bash
+ladys score-nlb --submission-h5 path/to/submission.h5 \
+  --target-h5 data/real/nlb/eval_data_test.h5
+```
 
 ## Scaling Benchmark
 
@@ -124,9 +156,10 @@ preprocessing:
     kern_sd_ms: 50.0
 ```
 
-`configs/experiment/cassm_lorenz.yaml` and
-`configs/experiment/kalman_lorenz.yaml` enable this CASSM-style spike
-smoothing. `configs/experiment/gpfa_lorenz.yaml` leaves observations raw.
+`configs/experiment/synthetic/lorenz/cassm_lorenz.yaml` and
+`configs/experiment/synthetic/lorenz/kalman_lorenz.yaml` enable this CASSM-style
+spike smoothing. `configs/experiment/synthetic/lorenz/gpfa_lorenz.yaml` leaves
+observations raw.
 
 See `docs/model_output_contract.md` for the forward-output convention.
 See `docs/optimizer_contract.md` for the benchmark epoch definition.
