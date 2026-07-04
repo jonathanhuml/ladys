@@ -10,6 +10,7 @@ nav:
   - Home: index.md
   - Models:
       - Overview: models/index.md
+      - BGPFA: models/bgpfa.md
       - CASSM: models/cassm.md
       - GPFA: models/gpfa.md
       - Kalman: models/kalman.md

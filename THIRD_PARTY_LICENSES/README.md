@@ -19,3 +19,10 @@ is not vendored.
 
 The `chaotic_rnn` dataset follows the random-RNN synthetic data recipe used by
 LFADS/NDT examples, implemented here directly against the LaDyS dataset API.
+
+LaDyS vendors the `mgplvm-pytorch` package under `src/mgplvm` for Bayesian
+GPFA support.
+
+- Source package: `mGPLVM`
+- Source URL: https://github.com/tachukao/mgplvm-pytorch
+- License: MIT, see `MGPLVM-PYTORCH-MIT.txt`

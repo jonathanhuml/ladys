@@ -12,6 +12,9 @@ tensors in `forward`.
 
 ## Initial Examples
 
+- `ladys.models.bgpfa`: Bayesian GPFA using the vendored `mgplvm-pytorch`
+  implementation with a differentiable variational ELBO and full-batch
+  gradient strategy.
 - `ladys.models.cassm`: thin adapter around the compact sparse CASSM
   filtering core in `ladys.models`.
 - `ladys.models.gpfa`: Gaussian-observation GPFA with FA initialization and a
@@ -46,6 +49,7 @@ The run folder includes `config.json`, `history.csv`, `metrics.json`,
 experiment configs:
 
 ```bash
+ladys run -c configs/experiment/bgpfa_lorenz.yaml
 ladys run -c configs/experiment/gpfa_lorenz.yaml
 ladys run -c configs/experiment/ndt_lorenz.yaml
 ladys list datasets

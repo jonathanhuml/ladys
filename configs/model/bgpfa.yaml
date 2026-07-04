@@ -1,0 +1,19 @@
+name: bgpfa
+objective: negative_elbo
+latent_dim: 3
+binsize: 25.0
+ell0: null
+rho: 2.0
+n_mc_train: 3
+n_mc_eval: 5
+kl_burnin_epochs: 1
+latent_scale_init: 1.0
+likelihood: gaussian
+learn_scale: false
+ard: true
+optimization:
+  name: full_batch_gradient
+  optimizer: Adam
+  lr: 1.0e-1
+  weight_decay: 0.0
+  gradient_clip: 300.0

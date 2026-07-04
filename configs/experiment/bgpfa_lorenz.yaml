@@ -1,0 +1,41 @@
+dataset:
+  name: lorenz
+  neurons: 32
+  num_inits: 4
+  num_trials: 8
+  num_steps: 100
+  burn_steps: 1000
+  train_fraction: 0.8
+  seed: 0
+  latent_dt: 0.015
+  spike_bin_size: 1.0
+  base_rate: 1.0
+
+model:
+  name: bgpfa
+  objective: negative_elbo
+  latent_dim: 3
+  binsize: 25.0
+  ell0: null
+  rho: 2.0
+  n_mc_train: 3
+  n_mc_eval: 5
+  kl_burnin_epochs: 1
+  latent_scale_init: 1.0
+  likelihood: gaussian
+  learn_scale: false
+  ard: true
+  optimization:
+    name: full_batch_gradient
+    optimizer: Adam
+    lr: 1.0e-1
+    weight_decay: 0.0
+    gradient_clip: 300.0
+
+preprocessing:
+  observations: null
+
+trainer:
+  epochs: 5
+  batch_size: 26
+  device: cpu

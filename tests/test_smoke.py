@@ -1,5 +1,6 @@
-import pytest
+import importlib.util
 
+import pytest
 from torch.utils.data import DataLoader
 
 from ladys.datasets import (
@@ -9,6 +10,7 @@ from ladys.datasets import (
     LorenzDatasetConfig,
 )
 from ladys.models import (
+    BGPFAConfig,
     CASSMConfig,
     GPFAConfig,
     KalmanConfig,
@@ -110,6 +112,47 @@ def test_model_contracts_smoke():
     assert ndt.predict_rates(x).shape == x.shape
     assert ndt_loss.total.ndim == 0
     _assert_all_trainable_parameters_receive_gradients(ndt, ndt_loss.total)
+
+
+def test_bgpfa_config_uses_differentiable_full_batch_strategy():
+    config = BGPFAConfig(latent_dim=2, n_mc_train=1, n_mc_eval=1)
+    assert config.optimization.name == "full_batch_gradient"
+    assert build_strategy(config.optimization).name == "full_batch_gradient"
+
+    with pytest.raises(ValueError, match="does not support optimization.name='em'"):
+        BGPFAConfig(optimization={"name": "em"})
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("sklearn") is None,
+    reason="BGPFA vendored mgplvm smoke test requires scikit-learn",
+)
+def test_bgpfa_vendored_mgplvm_smoke():
+    config = LorenzDatasetConfig(
+        neurons=4,
+        num_inits=1,
+        num_trials=2,
+        num_steps=6,
+        burn_steps=5,
+        seed=0,
+    )
+    train_ds, _ = LorenzDataset.make_splits(config)
+    batch = next(iter(DataLoader(train_ds, batch_size=len(train_ds))))
+    x = batch["spikes"]
+
+    bgpfa = BGPFAConfig(
+        latent_dim=1,
+        n_mc_train=1,
+        n_mc_eval=1,
+        kl_burnin_epochs=0,
+    ).build(n_neurons=x.shape[-1], n_time=x.shape[1])
+    strategy = build_strategy(BGPFAConfig().optimization)
+    strategy.setup(bgpfa)
+    result = strategy.step(bgpfa, batch, epoch=0)
+
+    assert result.batch_size == x.shape[0]
+    assert result.objective == "negative_elbo"
+    assert bgpfa.predict_rates(x).shape == x.shape
 
 
 def test_chaotic_rnn_dataset_contract():

@@ -113,6 +113,7 @@ trainer:
 def test_cli_lists_models(capsys):
     assert main(["list", "models"]) == 0
     output = capsys.readouterr().out
+    assert "bgpfa" in output
     assert "gpfa" in output
     assert "kalman" in output
     assert "lfads" in output
