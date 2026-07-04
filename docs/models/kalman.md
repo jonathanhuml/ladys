@@ -39,7 +39,7 @@ Config for the bundled dense Kalman filter baseline.
 | `dt` | `float` | `0.01` |
 | `dataset_name` | `Optional[str]` | `None` |
 | `save_model` | `bool` | `False` |
-| `optimization` | `OptimizationConfig` | `OptimizationConfig(name='gradient', optimizer='Adam', lr=0.05, weight_decay=0.0, gradient_clip=300.0)` |
+| `optimization` | `OptimizationConfig` | `OptimizationConfig(name='gradient', optimizer='Adam', lr=0.01, weight_decay=0.0, gradient_clip=300.0)` |
 
 ## Contracts
 

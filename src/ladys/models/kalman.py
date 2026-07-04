@@ -26,7 +26,7 @@ class KalmanConfig(BaseModelConfig):
         default_factory=lambda: OptimizationConfig(
             name="gradient",
             optimizer="Adam",
-            lr=5e-2,
+            lr=1e-2,
             weight_decay=0.0,
             gradient_clip=300.0,
         )

@@ -1,0 +1,4 @@
+name: mc_maze
+data_path: data/real/mc_maze_val.h5
+max_trials: null
+bin_size: 0.005

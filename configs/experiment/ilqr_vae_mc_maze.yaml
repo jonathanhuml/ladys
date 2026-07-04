@@ -1,0 +1,33 @@
+dataset:
+  name: mc_maze
+  data_path: data/real/mc_maze_val.h5
+  max_trials: null
+  bin_size: 0.005
+
+model:
+  name: ilqr_vae
+  objective: posterior_control
+  params_path: data/real/ilqr_vae/final_params.bin
+  solver: ilqr
+  max_iter: 100
+  lr: null
+  held_in_neurons: 137
+  output_neuron_start: 137
+  output_neurons: 45
+  rate_mode: likelihood
+  dt: 0.005
+  optimization:
+    name: inference_only
+
+preprocessing:
+  observations: null
+
+trainer:
+  epochs: 0
+  batch_size: 16
+  device: cpu
+
+experiment:
+  output_dir: runs
+  run_name: ilqr_vae_mc_maze
+  save_predictions: true

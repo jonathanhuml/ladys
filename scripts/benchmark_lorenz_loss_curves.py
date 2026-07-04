@@ -42,7 +42,14 @@ import torch
 from torch.utils.data import DataLoader
 
 from ladys.datasets import LorenzDataset, LorenzDatasetConfig
-from ladys.models import BGPFAConfig, CASSMConfig, GPFAConfig, KalmanConfig
+from ladys.models import (
+    BGPFAConfig,
+    CASSMConfig,
+    GPFAConfig,
+    KalmanConfig,
+    LFADSConfig,
+    NDTConfig,
+)
 from ladys.models.base import BaseModelConfig
 from ladys.preprocessing import PreprocessedDataset, PreprocessingConfig
 from ladys.training import Trainer, TrainerConfig
@@ -55,6 +62,8 @@ MODEL_CONFIGS = {
     "cassm": CASSMConfig,
     "gpfa": GPFAConfig,
     "kalman": KalmanConfig,
+    "lfads": LFADSConfig,
+    "ndt": NDTConfig,
 }
 
 
@@ -276,32 +285,54 @@ def build_model_config(
     model_name: str,
     n_neurons: int,
 ) -> BaseModelConfig:
+    path = Path(args.experiment_config_dir) / f"{model_name}_lorenz.yaml"
+    model_data = None
+    if path.exists():
+        model_data = dict(load_yaml(path)["model"])
+
     if model_name == "cassm":
         projection_dim = args.cassm_projection_dim
         if projection_dim is None:
-            projection_dim = min(20, n_neurons)
+            configured_projection_dim = 20
+            if model_data is not None:
+                configured_projection_dim = int(
+                    model_data.get("projection_dim", configured_projection_dim)
+                )
+            projection_dim = min(configured_projection_dim, n_neurons)
         if n_neurons % projection_dim != 0:
             raise ValueError(
                 "CASSM sparse projection requires neurons to be divisible by "
                 f"projection_dim; got neurons={n_neurons}, "
                 f"projection_dim={projection_dim}."
             )
-        return CASSMConfig(projection_dim=projection_dim)
+        if model_data is None:
+            return CASSMConfig(projection_dim=projection_dim)
+        model_data["projection_dim"] = projection_dim
+        return BaseModelConfig.from_dict(model_data)
     if model_name == "gpfa":
         init_seed = args.seed if args.gpfa_init_seed is None else args.gpfa_init_seed
-        return GPFAConfig(
-            latent_dim=args.gpfa_latent_dim,
-            init_method=args.gpfa_init_method,
-            init_seed=init_seed,
-        )
+        if model_data is None:
+            return GPFAConfig(
+                latent_dim=args.gpfa_latent_dim,
+                init_method=args.gpfa_init_method,
+                init_seed=init_seed,
+            )
+        model_data["latent_dim"] = args.gpfa_latent_dim
+        model_data["init_method"] = args.gpfa_init_method
+        model_data["init_seed"] = init_seed
+        return BaseModelConfig.from_dict(model_data)
     if model_name == "kalman":
+        if model_data is not None:
+            return BaseModelConfig.from_dict(model_data)
         return KalmanConfig()
     if model_name == "bgpfa":
-        path = Path(args.experiment_config_dir) / "bgpfa_lorenz.yaml"
-        if path.exists():
-            data = load_yaml(path)
-            return BaseModelConfig.from_dict(data["model"])
+        if model_data is not None:
+            return BaseModelConfig.from_dict(model_data)
         return BGPFAConfig()
+    if model_name in {"lfads", "ndt"}:
+        if model_data is not None:
+            return BaseModelConfig.from_dict(model_data)
+        return MODEL_CONFIGS[model_name]()
     raise KeyError(model_name)
 
 

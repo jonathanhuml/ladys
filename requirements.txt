@@ -1,0 +1,11 @@
+gpytorch
+linear-operator
+numpy>=1.24
+pydantic>=2
+scikit-learn>=1.0
+scipy>=1.10
+torch>=2.1.2
+PyYAML>=6.0
+h5py>=3.8
+nlb-tools
+dandi

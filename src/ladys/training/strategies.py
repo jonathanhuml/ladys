@@ -379,6 +379,35 @@ class EMStrategy(OptimizationStrategy):
         return StepResult.from_loss(loss, batch_size=int(x.shape[0]))
 
 
+class InferenceOnlyStrategy(OptimizationStrategy):
+    """No-op strategy for fixed-parameter inference-only models."""
+
+    name = "inference_only"
+
+    def setup(self, model: BaseDynamicsModel) -> None:
+        return None
+
+    def train_epoch(
+        self,
+        model: BaseDynamicsModel,
+        loader: Iterable,
+        epoch: int,
+        device: torch.device | str,
+    ) -> list[StepResult]:
+        return []
+
+    def step(
+        self,
+        model: BaseDynamicsModel,
+        batch: Tensor | dict[str, Tensor],
+        epoch: int,
+    ) -> StepResult:
+        x = observations_from_batch(batch)
+        output = model(x)
+        loss = model.loss(batch, output, epoch=epoch)
+        return StepResult.from_loss(loss, batch_size=int(x.shape[0]))
+
+
 def build_strategy(config: OptimizationConfig) -> OptimizationStrategy:
     kwargs = config.kwargs()
     if config.name == "gradient":
@@ -389,6 +418,8 @@ def build_strategy(config: OptimizationConfig) -> OptimizationStrategy:
         return MgplvmFullBatchGradientStrategy(**kwargs)
     if config.name == "em":
         return EMStrategy(**kwargs)
+    if config.name == "inference_only":
+        return InferenceOnlyStrategy(**kwargs)
     raise KeyError(f"Unknown optimization strategy '{config.name}'.")
 
 

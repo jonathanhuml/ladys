@@ -9,7 +9,12 @@ venv/
 dist/
 build/
 artifacts/
+runs/
 *.npy
 *.npz
+*.h5
+*.hdf5
+*.nwb
+*.mat
+*.bin
 .DS_Store
-

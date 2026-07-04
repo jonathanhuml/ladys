@@ -20,7 +20,7 @@ model:
   optimization:
     name: gradient
     optimizer: Adam
-    lr: 5.0e-2
+    lr: 1.0e-2
     weight_decay: 0.0
     gradient_clip: 300.0
 
