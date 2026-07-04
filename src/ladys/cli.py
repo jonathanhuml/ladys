@@ -12,6 +12,7 @@ from ladys.config import ExperimentConfig, load_experiment_config
 from ladys.data import available_datasets, build_dataset_config
 from ladys.datasets.nlb import NLB_BIN_SIZES_MS, NLB_DATASETS, prepare_nlb_data
 from ladys.experiment import Experiment
+from ladys.mint_nlb import run_mint_nlb_config
 from ladys.models.base import BaseModelConfig, load_model_config
 from ladys.nlb_eval import (
     evaluate_nlb_submission,
@@ -128,6 +129,20 @@ def build_parser() -> argparse.ArgumentParser:
     score_nlb_parser.add_argument("--output-json", help="optional path to write JSON metrics")
     score_nlb_parser.set_defaults(handler=score_nlb_command)
 
+    mint_nlb_parser = subparsers.add_parser(
+        "mint-nlb",
+        help="run MINT on an NLB hidden-test config",
+        description=(
+            "Run the PyTorch MINT port using a LaDyS experiment YAML and write "
+            "LaDyS-style predictions plus EvalAI-style H5 rates."
+        ),
+    )
+    mint_nlb_parser.add_argument("-c", "--config", required=True, help="MINT experiment YAML config")
+    mint_nlb_parser.add_argument("--output-dir", help="override experiment output directory")
+    mint_nlb_parser.add_argument("--run-name", help="override run folder name")
+    mint_nlb_parser.add_argument("--device", help="override PyTorch device")
+    mint_nlb_parser.set_defaults(handler=mint_nlb_command)
+
     return parser
 
 
@@ -201,6 +216,20 @@ def score_nlb_command(args: argparse.Namespace) -> int:
     print(text)
     if args.output_json:
         Path(args.output_json).write_text(text + "\n")
+    return 0
+
+
+def mint_nlb_command(args: argparse.Namespace) -> int:
+    result = run_mint_nlb_config(
+        Path(args.config),
+        output_dir=Path(args.output_dir) if args.output_dir else None,
+        run_name=args.run_name,
+        device=args.device,
+    )
+    print(f"Wrote LaDyS MINT run: {result.run_dir}")
+    print(f"co_bps: {result.co_bps:.12g}")
+    print(f"predictions: {result.predictions_path}")
+    print(f"submission_h5: {result.submission_path}")
     return 0
 
 

@@ -21,6 +21,9 @@ tensors in `forward`.
   differentiable exact marginal negative log likelihood. It trains with the
   standard PyTorch gradient strategy by default; the older EM adapter remains
   available through config.
+- `ladys.models.ilqr_vae`: PyTorch iLQR-VAE adapter with posterior-control
+  inference for pretrained MC_Maze checkpoints and ELBO training for new
+  spike-count datasets.
 - `ladys.models.kalman`: dense Kalman filter baseline adapted from the CASSM
   filtering code, exposed with per-trial rate predictions for benchmark metrics.
 - `ladys.models.ndt`: masked-count NeuralDataTransformer (NDT)

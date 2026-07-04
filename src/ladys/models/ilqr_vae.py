@@ -1,4 +1,4 @@
-"""iLQR-VAE adapter for fixed-parameter posterior inference."""
+"""iLQR-VAE adapter for posterior-control inference and ELBO training."""
 
 from __future__ import annotations
 
@@ -19,7 +19,22 @@ from ladys.types import LossOutput, ModelOutput, observations_from_batch
 
 @BaseModelConfig.register
 class ILQRVAEConfig(BaseModelConfig):
-    """Config for the tutorial iLQR-VAE posterior-inference adapter."""
+    """Config for the PyTorch iLQR-VAE adapter.
+
+    Use `objective="posterior_control"` with `initialization="pretrained"` and
+    `optimization.name="inference_only"` to reproduce a fixed checkpoint, such
+    as the MC_Maze tutorial model. Use `objective="ilqr_vae_elbo"`,
+    `initialization="random"`, `trainable_parameters=true`, and a gradient
+    optimizer to train a new model from scratch.
+
+    `latent_dim` is the recurrent latent state dimension and `input_dim` is the
+    dimensionality of the inferred control input. The current trainable LaDyS
+    path uses the translated Student prior, Mini-GRU-IO dynamics, Poisson
+    likelihood, and shared Kronecker posterior covariance. For co-smoothing
+    datasets, `held_in_neurons` selects the neurons used by the inner posterior
+    solve, while `output_neuron_start` and `output_neurons` select the decoded
+    prediction slice returned to the benchmark metrics.
+    """
 
     name: Literal["ilqr_vae"] = "ilqr_vae"
     objective: Literal["posterior_control", "ilqr_vae_elbo"] = "posterior_control"
@@ -70,12 +85,66 @@ class ILQRVAEConfig(BaseModelConfig):
 
 
 class ILQRVAE(BaseDynamicsModel):
-    """Fixed-parameter iLQR-VAE posterior inference.
+    """Optimization-based iLQR-VAE with posterior-control inference and ELBO training.
 
-    This adapter wraps the PyTorch port of the iLQR-VAE tutorial model. It does
-    not train generative parameters inside LaDyS; each forward pass solves for
-    posterior controls from the input spikes and decodes held-out expected spike
-    counts for benchmark metrics.
+    ## Method
+
+    iLQR-VAE is a latent dynamical model with no amortized recognition network
+    for the posterior mean. For each trial and current generative parameter
+    setting, the model solves an inner optimal-control problem over a sequence
+    of latent inputs `u`. Those inputs drive a recurrent dynamical system to
+    produce latent states `z`, and a likelihood readout decodes observations
+    from `z`.
+
+    The LaDyS implementation ports the tutorial Student input prior,
+    Mini-GRU-IO dynamics, Poisson spike likelihood, and iLQR posterior-control
+    solver into PyTorch. The posterior covariance is shared across trials as a
+    Kronecker product of learned time and input-space factors, matching the
+    structure used by the original tutorial code.
+
+    ## Inference-only checkpoint mode
+
+    With `objective="posterior_control"` and `initialization="pretrained"`, the
+    model loads `final_params.bin` and uses iLQR only to infer posterior
+    controls for each evaluation trial. This is the mode used to reproduce the
+    MC_Maze tutorial result. It can register the checkpoint tensors either as
+    buffers (`trainable_parameters=false`) or as `nn.Parameter`s
+    (`trainable_parameters=true`) for regression checks; with zero training
+    epochs both paths are numerically identical.
+
+    For NLB-style co-smoothing, the inner solve can be restricted to held-in
+    neurons by setting `held_in_neurons`, and the returned rates can be sliced to
+    held-out neurons with `output_neuron_start` and `output_neurons`. Returned
+    rates are expected spike counts per bin, not Hz, so they can be consumed
+    directly by LaDyS/NLB bits-per-spike metrics.
+
+    ## ELBO training mode
+
+    With `objective="ilqr_vae_elbo"` and a gradient optimizer, training follows
+    the original iLQR-VAE outer objective:
+
+    ```text
+    ELBO = H[q(u | o)] + E_q[log p(u) + log p(o | z(u))]
+    loss = -ELBO / num_observations + regularizer
+    ```
+
+    The inner iLQR solve provides the posterior mean controls and is treated as
+    an implicit inference step; the outer PyTorch backward pass differentiates
+    the sampled ELBO through the Student prior, dynamics, likelihood readout,
+    and shared posterior covariance parameters. Bounded parameters such as prior
+    scales, degrees of freedom, gains, and covariance diagonals are projected
+    back into their valid domains after optimizer steps.
+
+    ## Current scope
+
+    The trainable path is designed for spike-count datasets and currently uses
+    the Poisson/Mini-GRU-IO variant that was translated for MC_Maze. The
+    original repository's standalone Lorenz example uses MGU2 dynamics with a
+    3D Gaussian observation model; exact parity with that example would require
+    adding that dynamics/likelihood variant as a separate model option. The
+    provided `configs/experiment/synthetic/lorenz/ilqr_vae_lorenz_100.yaml`
+    trains the Poisson/Mini-GRU-IO variant on the LaDyS Lorenz-100 spike
+    population for comparison with LFADS and NDT.
     """
 
     def __init__(

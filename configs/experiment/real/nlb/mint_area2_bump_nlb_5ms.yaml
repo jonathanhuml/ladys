@@ -1,0 +1,39 @@
+dataset:
+  name: area2_bump
+  split: test
+  bin_size_ms: 5
+  data_path: data/real/nlb/area2_bump_test_5ms.h5
+  max_trials: null
+
+model:
+  name: mint
+  objective: mint_likelihood_recursion
+  dataset: area2_bump
+  train_source: nwb
+  train_split: trainval
+  nlb_neural_state_defaults: true
+  nwb_root: ../mint/data/dandi
+  mat_data_root: ../mint/data
+  target_h5: ../mint/data/eval_data_test.h5
+  eval_bin_size_ms: 5
+  n_candidates: null
+  window_length: null
+  delta: null
+  sigma: null
+  min_rate: null
+  causal: null
+  optimization:
+    name: inference_only
+
+preprocessing:
+  observations: null
+
+trainer:
+  epochs: 0
+  batch_size: 1
+  device: cpu
+
+experiment:
+  output_dir: runs
+  run_name: mint_area2_bump_nlb_5ms
+  save_predictions: true

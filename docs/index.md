@@ -17,8 +17,8 @@ Run a full LaDyS experiment with:
 ladys run -d lorenz -m cassm
 ```
 
-The package also includes `ndt` and `chaotic_rnn` entries in the public
-model/dataset registries.
+The public registries include synthetic datasets such as `lorenz` and
+`chaotic_rnn`, plus model entries such as `ilqr_vae`, `lfads`, and `ndt`.
 
 This builds the dataset, model, trainer, evaluation metrics, and a self-contained
 run folder through the public `ladys.Experiment` orchestration API.

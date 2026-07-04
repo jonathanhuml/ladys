@@ -13,8 +13,11 @@ nav:
       - BGPFA: models/bgpfa.md
       - CASSM: models/cassm.md
       - GPFA: models/gpfa.md
+      - ILQR-VAE: models/ilqr_vae.md
       - Kalman: models/kalman.md
       - LFADS: models/lfads.md
+      - MINT: models/mint.md
+      - NDT: models/ndt.md
   - Contracts:
       - Model Output: model_output_contract.md
       - Optimizer: optimizer_contract.md

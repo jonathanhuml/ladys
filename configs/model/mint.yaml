@@ -1,0 +1,18 @@
+name: mint
+objective: mint_likelihood_recursion
+dataset: mc_maze
+train_source: nwb
+train_split: trainval
+nlb_neural_state_defaults: true
+nwb_root: ../mint/data/dandi
+mat_data_root: ../mint/data
+target_h5: ../mint/data/eval_data_test.h5
+eval_bin_size_ms: 5
+n_candidates: null
+window_length: null
+delta: null
+sigma: null
+min_rate: null
+causal: null
+optimization:
+  name: inference_only

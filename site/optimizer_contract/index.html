@@ -42,13 +42,28 @@
   <a href="../models/" class="dropdown-item">Overview</a>
 </li>
 <li>
+  <a href="../models/bgpfa/" class="dropdown-item">BGPFA</a>
+</li>
+<li>
   <a href="../models/cassm/" class="dropdown-item">CASSM</a>
 </li>
 <li>
   <a href="../models/gpfa/" class="dropdown-item">GPFA</a>
 </li>
 <li>
+  <a href="../models/ilqr_vae/" class="dropdown-item">ILQR-VAE</a>
+</li>
+<li>
   <a href="../models/kalman/" class="dropdown-item">Kalman</a>
+</li>
+<li>
+  <a href="../models/lfads/" class="dropdown-item">LFADS</a>
+</li>
+<li>
+  <a href="../models/mint/" class="dropdown-item">MINT</a>
+</li>
+<li>
+  <a href="../models/ndt/" class="dropdown-item">NDT</a>
 </li>
     </ul>
   </li>
@@ -112,16 +127,16 @@ training dataset, regardless of the optimizer family.</p>
 <p>For gradient methods such as CASSM, <code>GradientStrategy.train_epoch</code> iterates the
 <code>DataLoader</code> once. Each minibatch runs <code>forward</code>, backpropagation, and one
 optimizer update.</p>
-<p>For EM methods such as GPFA, <code>EMStrategy.train_epoch</code> iterates the <code>DataLoader</code>
-once to assemble the observations for the method, then calls
-<code>model.fit_em_epoch(x)</code>. That method should perform one full E-step/M-step
-update using that full pass. Inner linear solves or hyperparameter optimizers
-inside the M-step are counted inside the same epoch if they reuse the sufficient
-statistics from that pass. A second full E-step over the dataset is a second
-benchmark epoch.</p>
-<p>For GPFA specifically, RBF GP timescale learning is part of <code>fit_em_epoch</code>.
-It uses posterior autocovariance sufficient statistics from the current E-step,
-so the L-BFGS iterations over <code>gamma</code> are included in the same optimizer epoch.</p>
+<p>For EM methods, <code>EMStrategy.train_epoch</code> iterates the <code>DataLoader</code> once to
+assemble the observations for the method, then calls <code>model.fit_em_epoch(x)</code>.
+That method should perform one full E-step/M-step update using that full pass.
+Inner linear solves or hyperparameter optimizers inside the M-step are counted
+inside the same epoch if they reuse the sufficient statistics from that pass. A
+second full E-step over the dataset is a second benchmark epoch.</p>
+<p>GPFA defaults to <code>GradientStrategy</code>: each minibatch computes the exact marginal
+negative log likelihood and runs one standard PyTorch backward/optimizer step.
+The older full-dataset EM adapter remains available by setting
+<code>optimization.name: em</code>.</p>
 <p>The reporting contract is shared across strategies: every epoch returns a
 <code>StepResult</code>, and benchmark plots use <code>seconds_per_epoch</code>. The benchmark
 records optimizer epoch time only; validation and downstream metric computation

@@ -7,6 +7,7 @@ from ladys.models.gpfa import GPFA, GPFAConfig
 from ladys.models.ilqr_vae import ILQRVAE, ILQRVAEConfig
 from ladys.models.kalman import Kalman, KalmanConfig
 from ladys.models.lfads import LFADS, LFADSConfig
+from ladys.models.mint import MINT, MINTConfig
 from ladys.models.ndt import NDT, NDTConfig
 
 __all__ = [
@@ -25,6 +26,8 @@ __all__ = [
     "KalmanConfig",
     "LFADS",
     "LFADSConfig",
+    "MINT",
+    "MINTConfig",
     "NDT",
     "NDTConfig",
 ]

@@ -31,6 +31,41 @@ over latent trajectories.
 nonnegative rate estimates, orthonormalized latent diagnostics, and the
 differentiable marginal log likelihood used by the loss.
 
+## Synthetic datasets
+
+On synthetic datasets, GPFA is evaluated through the default synthetic
+adapter. The model returns inferred rates and latents, and LaDyS compares
+them against dataset-provided ground-truth rates and latent states when
+those targets are available.
+
+```bash
+ladys run -c configs/experiment/synthetic/lorenz/gpfa_lorenz.yaml
+```
+
+The resulting run folder contains `metrics.json` with synthetic metrics
+such as rate reconstruction quality and latent linear R2 when the target
+tensors match the returned output shapes.
+
+## Real NLB datasets
+
+On real NLB datasets, GPFA keeps the same model-native `forward` output,
+but evaluation uses `GPFA.evaluation_adapter("nlb")`. The adapter fits a
+PyTorch Poisson readout from training-set GPFA latents to training held-out
+neurons, then scores eval held-out expected counts with the NLB
+co-smoothing bits/spike metric.
+
+Prepare the NLB H5 first, then run the real-data config:
+
+```bash
+ladys prepare-nlb --datasets mc_maze --splits test --bin-sizes-ms 5 --target-h5 ../mint/data/eval_data_test.h5 --nwb-root ../mint/data/dandi
+ladys run -c configs/experiment/real/mc_maze/gpfa_mc_maze_nlb_5ms.yaml
+ladys score-nlb --run-dir runs/gpfa_mc_maze_nlb_5ms
+```
+
+This real-data path reports held-out `co_bps` and writes held-out rate
+predictions in `predictions.npz`; it does not require GPFA itself to emit
+held-out-neuron rates directly.
+
 ## Initialization
 
 Trainable observation parameters are `torch.nn.Parameter`s: `C`, `d`,

@@ -42,13 +42,28 @@
   <a href="../models/" class="dropdown-item">Overview</a>
 </li>
 <li>
+  <a href="../models/bgpfa/" class="dropdown-item">BGPFA</a>
+</li>
+<li>
   <a href="../models/cassm/" class="dropdown-item">CASSM</a>
 </li>
 <li>
   <a href="../models/gpfa/" class="dropdown-item">GPFA</a>
 </li>
 <li>
+  <a href="../models/ilqr_vae/" class="dropdown-item">ILQR-VAE</a>
+</li>
+<li>
   <a href="../models/kalman/" class="dropdown-item">Kalman</a>
+</li>
+<li>
+  <a href="../models/lfads/" class="dropdown-item">LFADS</a>
+</li>
+<li>
+  <a href="../models/mint/" class="dropdown-item">MINT</a>
+</li>
+<li>
+  <a href="../models/ndt/" class="dropdown-item">NDT</a>
 </li>
     </ul>
   </li>
@@ -99,6 +114,10 @@
             
             <li class="nav-item" data-bs-level="1"><a href="#model-output-contract" class="nav-link">Model Output Contract</a>
               <ul class="nav flex-column">
+            <li class="nav-item" data-bs-level="2"><a href="#task-evaluation-adapters" class="nav-link">Task Evaluation Adapters</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
               </ul>
             </li>
         </ul>
@@ -132,7 +151,21 @@ stable output fields are:</p>
 such as CASSM can override it to call their native prediction path.</p>
 <p>Future benchmark tasks may add metrics that use <code>latents</code> for recovery of the
 known Lorenz state, <code>distribution</code> for calibration/log-likelihood, and <code>extras</code>
-for method-specific diagnostics. The forward signature should not change.</p></div>
+for method-specific diagnostics. The forward signature should not change.</p>
+<h2 id="task-evaluation-adapters">Task Evaluation Adapters</h2>
+<p>Training-time <code>forward</code> outputs should stay model-native. Dataset/task-specific
+evaluation lives in adapters selected by <code>model.evaluation_adapter(task)</code>:</p>
+<ul>
+<li>synthetic tasks use <code>SyntheticEvaluationAdapter</code>, which compares predicted
+  rates/latents against dataset-provided ground truth.</li>
+<li>real NLB tasks use <code>NLBCoSmoothingAdapter</code>, which produces held-out expected
+  spike counts for co-smoothing metrics. If a model directly returns held-out
+  counts, as iLQR-VAE does, no extra readout is fitted. If it exposes latent
+  features only, as GPFA does, the adapter can fit a PyTorch ridge or Poisson
+  readout from training held-in features to training held-out targets.</li>
+</ul>
+<p>This keeps a model's scientific output stable while allowing each benchmark
+task to define the prediction target and metric surface it needs.</p></div>
             </div>
         </div>
 
