@@ -1,0 +1,32 @@
+dataset:
+  name: mc_maze
+  data_path: data/real/nlb/mc_maze_test_5ms.h5
+  split: test
+  bin_size_ms: 5
+  max_trials: null
+
+model:
+  name: kalman
+  objective: negative_log_marginal_likelihood
+  dt: 0.005
+  dataset_name: mc_maze
+  save_model: false
+  nlb_ridge_alpha: 500.0
+  optimization:
+    name: inference_only
+
+preprocessing:
+  observations:
+    name: smooth_firing_rate
+    sampling_precision: 5.0
+    kern_sd_ms: 50.0
+
+trainer:
+  epochs: 0
+  batch_size: 64
+  device: cpu
+
+experiment:
+  output_dir: runs
+  run_name: kalman_mc_maze_nlb_5ms
+  save_predictions: true

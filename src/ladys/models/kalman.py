@@ -22,6 +22,7 @@ class KalmanConfig(BaseModelConfig):
     dt: float = 0.01
     dataset_name: Optional[str] = None
     save_model: bool = False
+    nlb_ridge_alpha: float = 500.0
     optimization: OptimizationConfig = Field(
         default_factory=lambda: OptimizationConfig(
             name="gradient",
@@ -39,6 +40,7 @@ class KalmanConfig(BaseModelConfig):
             dt=self.dt,
             dataset_name=self.dataset_name,
             save_model=self.save_model,
+            nlb_ridge_alpha=self.nlb_ridge_alpha,
             objective=self.objective,
         )
 
@@ -71,6 +73,7 @@ class Kalman(BaseDynamicsModel):
         dt: float = 0.01,
         dataset_name: Optional[str] = None,
         save_model: bool = False,
+        nlb_ridge_alpha: float = 500.0,
         objective: str = "negative_log_marginal_likelihood",
     ) -> None:
         super().__init__()
@@ -79,6 +82,7 @@ class Kalman(BaseDynamicsModel):
         self.dt = float(dt)
         self.dataset_name = dataset_name
         self.save_model = bool(save_model)
+        self.nlb_ridge_alpha = float(nlb_ridge_alpha)
         self.objective = objective
 
         self.core = DenseKalmanFilterSmoother(
@@ -113,6 +117,17 @@ class Kalman(BaseDynamicsModel):
             named_terms={"kalman_nll": total},
             objective=self.objective,
         )
+
+    def evaluation_adapter(self, task: str):
+        if task == "nlb":
+            from ladys.metrics import NLBCoSmoothingAdapter
+
+            return NLBCoSmoothingAdapter(
+                feature_source="predict_rates",
+                decoder="ridge",
+                ridge_alpha=self.nlb_ridge_alpha,
+            )
+        return None
 
     @torch.no_grad()
     def predict_rates(self, x: Tensor) -> Tensor:

@@ -2,7 +2,7 @@
 
 # MINT
 
-Thin LaDyS module wrapper around the validated PyTorch MINT core.
+MINT library model following the LaDyS ``BaseDynamicsModel`` API.
 
 ## Source
 

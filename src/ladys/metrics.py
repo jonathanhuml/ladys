@@ -119,7 +119,13 @@ class NLBCoSmoothingAdapter(EvaluationAdapter):
 
     def __init__(
         self,
-        feature_source: Literal["auto", "latents", "rates", "reconstruction"] = "auto",
+        feature_source: Literal[
+            "auto",
+            "latents",
+            "rates",
+            "reconstruction",
+            "predict_rates",
+        ] = "auto",
         decoder: Literal["ridge", "poisson"] = "ridge",
         ridge_alpha: float = 1e-4,
         poisson_max_iter: int = 100,
@@ -150,12 +156,12 @@ class NLBCoSmoothingAdapter(EvaluationAdapter):
             for batch in loader:
                 batch = move_batch_to_device(batch, device)
                 x = observations_from_batch(batch)
-                output = model(x)
+                output = None if self.feature_source == "predict_rates" else model(x)
                 target = _nlb_target_from_batch(batch)
-                if output.rates is not None and output.rates.shape == target.shape:
+                if output is not None and output.rates is not None and output.rates.shape == target.shape:
                     self.direct_prediction = True
                     return
-                feature = self._features_from_output(output)
+                feature = self._features_from_output(output, model=model, x=x)
                 features.append(feature.detach())
                 targets.append(target.detach())
 
@@ -233,12 +239,12 @@ class NLBCoSmoothingAdapter(EvaluationAdapter):
             for batch in loader:
                 batch = move_batch_to_device(batch, device)
                 x = observations_from_batch(batch)
-                output = model(x)
+                output = None if self.feature_source == "predict_rates" else model(x)
                 target = _nlb_target_from_batch(batch)
-                prediction = self._predict_from_output(output, target)
+                prediction = self._predict_from_output(output, target, model=model, x=x)
                 predictions.append(prediction.detach().cpu())
                 targets.append(target.detach().cpu())
-                if output.latents is not None:
+                if output is not None and output.latents is not None:
                     latents.append(output.latents.detach().cpu())
 
         pred_rates = torch.cat(predictions, dim=0)
@@ -254,14 +260,20 @@ class NLBCoSmoothingAdapter(EvaluationAdapter):
             targets={key: value.numpy() for key, value in target_dict.items()},
         )
 
-    def _predict_from_output(self, output, target: Tensor) -> Tensor:
-        if output.rates is not None and output.rates.shape == target.shape:
+    def _predict_from_output(
+        self,
+        output,
+        target: Tensor,
+        model: BaseDynamicsModel | None = None,
+        x: Tensor | None = None,
+    ) -> Tensor:
+        if output is not None and output.rates is not None and output.rates.shape == target.shape:
             return output.rates.clamp_min(self.prediction_floor)
         if self.decoder_weight is None:
             raise RuntimeError(
                 "NLB decoder was not fitted and the model did not directly return held-out rates."
             )
-        feature = self._features_from_output(output)
+        feature = self._features_from_output(output, model=model, x=x)
         flat = feature.reshape(-1, feature.shape[-1]).float()
         ones = torch.ones(flat.shape[0], 1, device=flat.device, dtype=flat.dtype)
         design = torch.cat([flat, ones], dim=1)
@@ -273,7 +285,18 @@ class NLBCoSmoothingAdapter(EvaluationAdapter):
             self.prediction_floor
         )
 
-    def _features_from_output(self, output) -> Tensor:
+    def _features_from_output(
+        self,
+        output,
+        model: BaseDynamicsModel | None = None,
+        x: Tensor | None = None,
+    ) -> Tensor:
+        if self.feature_source == "predict_rates":
+            if model is None or x is None:
+                raise RuntimeError("predict_rates features require the model and input batch.")
+            return model.predict_rates(x)
+        if output is None:
+            raise RuntimeError("Model output is required for this NLB feature source.")
         if self.feature_source == "latents":
             if output.latents is None:
                 raise RuntimeError("Model did not return latents for NLB decoder fitting.")
@@ -286,13 +309,14 @@ class NLBCoSmoothingAdapter(EvaluationAdapter):
             if output.reconstruction is None:
                 raise RuntimeError("Model did not return reconstruction for NLB decoder fitting.")
             return output.reconstruction
-
         if output.latents is not None:
             return output.latents
         if output.rates is not None:
             return output.rates
         if output.reconstruction is not None:
             return output.reconstruction
+        if model is not None and x is not None:
+            return model.predict_rates(x)
         raise RuntimeError("Model output has no usable NLB decoder features.")
 
 

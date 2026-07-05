@@ -17,11 +17,17 @@ import torch
 from ladys.config import ExperimentConfig, load_experiment_config
 from ladys.datasets.nlb import DATASET_TO_DANDISET, DATASET_TO_TEST_NWB
 from ladys.experiment import experiment_config_to_dict
-from ladys.models.mint import MINT, MINTConfig
-from ladys.models.mint_core.co_bps import heldout_count, observed_neuron_mask
-from ladys.models.mint_core.nwb_data import default_train_nwb_path, get_nwb_trial_data
-from ladys.models.mint_core.tasks import get_trial_data
-from ladys.models.mint_core.utils import TORCH_DTYPE, bin_data
+from ladys.models.mint import (
+    MINT,
+    MINTConfig,
+    TORCH_DTYPE,
+    bin_data,
+    default_train_nwb_path,
+    get_nwb_trial_data,
+    get_trial_data,
+    heldout_count,
+    observed_neuron_mask,
+)
 from ladys.nlb_eval import score_count_predictions
 
 
@@ -76,15 +82,14 @@ def run_mint_nlb(config: ExperimentConfig) -> MINTNLBResult:
         train_split = "trainval" if cfg.nlb_neural_state_defaults else ("train" if dataset == "mc_rtt" else "trainval")
 
     train_S, train_Z, condition = _load_training_data(model, train_split, cfg, device)
-    core = model.make_core().fit(train_S, train_Z, condition)
-    model.core = core
+    model.fit_library(train_S, train_Z, condition)
 
     test_nwb = _test_nwb_path(dataset, Path(cfg.nwb_root))
     heldin = _load_buffered_heldin(dataset, test_nwb, model.settings, model.hyperparams)
     _, keep = _buffered_alignment(model.settings, model.hyperparams)
     S = _heldin_to_mint_spikes(heldin, dataset, device)
     mask = observed_neuron_mask(dataset, S[0].shape[0], device)
-    x_hat, _ = core.predict(S, likelihood_neuron_mask=mask)
+    x_hat, _ = model.predict_spike_trials(S, likelihood_neuron_mask=mask)
     x_eval = [item[:, keep] for item in x_hat]
 
     n_heldout = heldout_count(dataset)
@@ -93,14 +98,14 @@ def run_mint_nlb(config: ExperimentConfig) -> MINTNLBResult:
         0,
         n_heldout,
         cfg.eval_bin_size_ms,
-        core.Delta,
+        model.Delta,
     )
     eval_rates_heldin = _binned_counts_from_state(
         x_eval,
         n_heldout,
         x_eval[0].shape[0],
         cfg.eval_bin_size_ms,
-        core.Delta,
+        model.Delta,
     )
     target = _read_target_spikes(_resolve_target_h5(cfg.target_h5), dataset)
     if eval_rates_heldout.shape != target.shape:
