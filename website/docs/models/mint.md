@@ -19,7 +19,7 @@ Config for the MINT NLB co-smoothing port.
 | --- | --- | --- |
 | `name` | `Literal['mint']` | `'mint'` |
 | `objective` | `str` | `'mint_likelihood_recursion'` |
-| `dataset` | `Literal['area2_bump', 'mc_maze', 'mc_rtt']` | `'mc_maze'` |
+| `dataset` | `Literal['area2_bump', 'mc_maze', 'mc_rtt', 'lorenz']` | `'mc_maze'` |
 | `train_source` | `Literal['mat', 'nwb']` | `'nwb'` |
 | `train_split` | `Literal['auto', 'train', 'trainval']` | `'trainval'` |
 | `nlb_neural_state_defaults` | `bool` | `True` |

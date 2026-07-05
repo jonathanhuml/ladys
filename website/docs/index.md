@@ -29,7 +29,7 @@ Model pages are generated from model class docstrings and config defaults:
 python scripts/generate_model_docs.py
 ```
 
-Images referenced from model docstrings should live under `docs/assets/`.
+Images referenced from model docstrings should live under `website/docs/assets/`.
 Use links like `![Diagram](assets/model-diagram.png)` in docstrings; generated
 model pages rewrite those links to the correct relative path.
 

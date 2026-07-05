@@ -1,7 +1,7 @@
 site_name: LaDyS
 site_url: https://zkunkworks.com/ladys/
-docs_dir: docs
-site_dir: site
+docs_dir: website/docs
+site_dir: website/site
 
 hooks:
   - scripts/mkdocs_favicon.py
@@ -25,7 +25,7 @@ nav:
 
 theme:
   name: mkdocs
-  custom_dir: overrides
+  custom_dir: website/overrides
 
 extra_css:
   - stylesheets/minimal.css

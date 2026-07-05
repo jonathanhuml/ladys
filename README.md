@@ -164,15 +164,19 @@ CASSM-style spike smoothing.
 `configs/experiment/synthetic/lorenz/gpfa/gpfa_lorenz.yaml` leaves observations
 raw.
 
-See `docs/model_output_contract.md` for the forward-output convention.
-See `docs/optimizer_contract.md` for the benchmark epoch definition.
+See `website/docs/model_output_contract.md` for the forward-output convention.
+See `website/docs/optimizer_contract.md` for the benchmark epoch definition.
 
 ## Documentation Site
 
-Docs source lives under `docs/` and is configured by `mkdocs.yml`. Model pages
-under `docs/models/` are generated from model class docstrings and config
-defaults. Images referenced from model docstrings should live under
-`docs/assets/` and can be linked as `assets/<filename>`:
+The website workspace lives under `website/`. LaDyS docs source lives under
+`website/docs/`, theme overrides live under `website/overrides/`, and MkDocs
+builds generated output into `website/site/`. The standalone zkunkworks
+homepage source lives under `website/home/`.
+
+Model pages under `website/docs/models/` are generated from model class
+docstrings and config defaults. Images referenced from model docstrings should
+live under `website/docs/assets/` and can be linked as `assets/<filename>`:
 
 ```bash
 python scripts/generate_model_docs.py
