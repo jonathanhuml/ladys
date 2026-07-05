@@ -1,0 +1,37 @@
+dataset:
+  name: lorenz
+  neurons: 100
+  num_inits: 10
+  num_trials: 10
+  num_steps: 100
+  burn_steps: 1000
+  train_fraction: 0.8
+  seed: 1
+  latent_dt: 0.015
+  spike_bin_size: 1.0
+  base_rate: 1.0
+
+model:
+  name: mint
+  objective: mint_likelihood_recursion
+  dataset: lorenz
+  n_candidates: 4
+  window_length: 6
+  delta: 1
+  min_rate: 0.0
+  causal: false
+  optimization:
+    name: inference_only
+
+preprocessing:
+  observations: null
+
+trainer:
+  epochs: 50
+  batch_size: 4
+  device: cpu
+
+experiment:
+  output_dir: runs
+  run_name: mint_lorenz_100
+  save_predictions: true

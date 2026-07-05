@@ -8,6 +8,8 @@ import shutil
 import subprocess
 import tempfile
 from typing import Iterable, Literal, Optional
+from urllib.error import URLError
+from urllib.request import urlretrieve
 
 import h5py
 import numpy as np
@@ -23,6 +25,9 @@ NLBBinSize = Literal[5, 20]
 
 NLB_DATASETS: tuple[str, ...] = ("area2_bump", "mc_maze", "mc_rtt", "dmfc_rsg")
 NLB_BIN_SIZES_MS: tuple[int, ...] = (5, 20)
+NLB_TARGET_H5_URL = (
+    "https://media.githubusercontent.com/media/neurallatents/nlb_tools/main/data/eval_data_test.h5"
+)
 
 DATASET_TO_DANDISET: dict[str, str] = {
     "area2_bump": "000127",
@@ -229,7 +234,16 @@ def prepare_nlb_data(
 
     output_dir = Path(output_dir)
     nwb_root = Path(nwb_root)
-    target_path = _resolve_target_h5(target_h5)
+    split_list = list(splits)
+    target_path = (
+        _resolve_target_h5(
+            target_h5,
+            download=download,
+            output_dir=output_dir,
+        )
+        if "test" in split_list
+        else None
+    )
     roots = _default_nwb_search_roots(nwb_root)
     if search_roots is not None:
         roots.extend(Path(p) for p in search_roots)
@@ -238,7 +252,7 @@ def prepare_nlb_data(
 
     for dataset in datasets:
         _validate_dataset(dataset)
-        for split in splits:
+        for split in split_list:
             if split not in {"val", "test"}:
                 raise ValueError(f"Unsupported NLB split '{split}'. Expected 'val' or 'test'.")
             for bin_size_ms in bin_sizes_ms:
@@ -250,6 +264,8 @@ def prepare_nlb_data(
                     continue
                 output.parent.mkdir(parents=True, exist_ok=True)
                 if split == "test":
+                    if target_path is None:
+                        raise RuntimeError("Internal error: test split requires an NLB target H5.")
                     result = _prepare_test_h5(
                         dataset=dataset,
                         bin_size_ms=int(bin_size_ms),
@@ -290,15 +306,28 @@ def _validate_dataset(dataset: str) -> None:
         raise ValueError(f"Unknown NLB dataset '{dataset}'. Expected one of: {known}.")
 
 
-def _resolve_target_h5(path: Path | str | None) -> Path:
+def _resolve_target_h5(
+    path: Path | str | None,
+    *,
+    download: bool = False,
+    output_dir: Path | str = Path("data/real/nlb"),
+) -> Path:
     if path is not None:
         target = Path(path)
         if target.exists():
             return target
+        if download:
+            return _download_target_h5(target)
         raise FileNotFoundError(f"NLB target H5 not found: {target}")
 
+    output_target = Path(output_dir) / "eval_data_test.h5"
+    if download:
+        if output_target.exists():
+            return output_target
+        return _download_target_h5(output_target)
+
     candidates = [
-        Path("data/real/nlb/eval_data_test.h5"),
+        output_target,
         Path("data/real/eval_data_test.h5"),
         Path("data/eval_data_test.h5"),
         Path("../mint/data/eval_data_test.h5"),
@@ -307,10 +336,30 @@ def _resolve_target_h5(path: Path | str | None) -> Path:
     for candidate in candidates:
         if candidate.exists():
             return candidate
+    if download:
+        return _download_target_h5(Path(output_dir) / "eval_data_test.h5")
     raise FileNotFoundError(
         "Could not find NLB public test target H5. Pass --target-h5 pointing to "
-        "nlb_tools/data/eval_data_test.h5."
+        "nlb_tools/data/eval_data_test.h5, or rerun with --download."
     )
+
+
+def _download_target_h5(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        urlretrieve(NLB_TARGET_H5_URL, path)
+    except (OSError, URLError) as exc:
+        raise RuntimeError(
+            "Could not download NLB public test target H5 from "
+            f"{NLB_TARGET_H5_URL}. Pass --target-h5 if you already have it locally."
+        ) from exc
+    if not h5py.is_hdf5(path):
+        path.unlink(missing_ok=True)
+        raise RuntimeError(
+            "Downloaded NLB public test target is not a valid HDF5 file. "
+            "Pass --target-h5 if you already have eval_data_test.h5 locally."
+        )
+    return path
 
 
 def _default_nwb_search_roots(nwb_root: Path) -> list[Path]:
@@ -512,7 +561,7 @@ def _download_dandiset(dataset: str, nwb_root: Path) -> None:
     nwb_root.mkdir(parents=True, exist_ok=True)
     if shutil.which("dandi") is None:
         raise RuntimeError(
-            "dandi CLI not found. Install with `pip install -e .[data]` or pass local NWB files."
+            "dandi CLI not found. Install LaDyS with its data dependencies or pass local NWB files."
         )
     subprocess.run(
         [

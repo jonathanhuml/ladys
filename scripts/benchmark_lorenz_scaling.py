@@ -85,7 +85,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--burn-steps", type=int, default=1000)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--output-dir", default="artifacts/lorenz_scaling")
+    parser.add_argument("--output-dir", default="runs/lorenz_scaling")
     parser.add_argument("--experiment-config-dir", default="configs/experiment")
     parser.add_argument(
         "--preprocessing-mode",
@@ -132,7 +132,9 @@ def main() -> None:
     args = parse_args()
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = output_dir / "lorenz_scaling_results.csv"
+    plots_dir = output_dir / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = output_dir / "summary.csv"
 
     existing = [] if args.overwrite else _read_existing(csv_path)
     completed = {
@@ -157,14 +159,16 @@ def main() -> None:
                 row = run_case(args, model_name, neurons, seed)
                 rows.append(row)
                 _write_csv(csv_path, rows)
-                _write_numpy(output_dir / "lorenz_scaling_results.npy", rows)
-                plot_results(rows, output_dir / "time_vs_neurons.png")
+                _write_numpy(output_dir / "summary.npy", rows)
+                plot_results(rows, plots_dir / "time_vs_neurons.png")
+                write_summary(rows, output_dir / "summary.md")
 
     _write_csv(csv_path, rows)
-    _write_numpy(output_dir / "lorenz_scaling_results.npy", rows)
-    plot_results(rows, output_dir / "time_vs_neurons.png")
+    _write_numpy(output_dir / "summary.npy", rows)
+    plot_results(rows, plots_dir / "time_vs_neurons.png")
+    write_summary(rows, output_dir / "summary.md")
     print(f"Wrote {csv_path}")
-    print(f"Wrote {output_dir / 'time_vs_neurons.png'}")
+    print(f"Wrote {plots_dir / 'time_vs_neurons.png'}")
 
 
 def run_case(
@@ -321,11 +325,24 @@ def build_preprocessing_config(
     if preprocessing_mode == "none":
         return PreprocessingConfig()
 
-    path = Path(config_dir) / f"{model_name}_lorenz.yaml"
+    path = _lorenz_experiment_config_path(config_dir, model_name)
     if not path.exists():
         return PreprocessingConfig()
     data = load_yaml(path)
     return PreprocessingConfig.model_validate(data.get("preprocessing", {}))
+
+
+def _lorenz_experiment_config_path(config_dir: str, model_name: str) -> Path:
+    root = Path(config_dir)
+    candidates = [
+        root / "synthetic" / "lorenz" / model_name / f"{model_name}_lorenz.yaml",
+        root / "lorenz" / model_name / f"{model_name}_lorenz.yaml",
+        root / f"{model_name}_lorenz.yaml",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]
 
 
 def plot_results(rows: list[dict], path: Path) -> None:
@@ -363,6 +380,33 @@ def plot_results(rows: list[dict], path: Path) -> None:
     fig.tight_layout()
     fig.savefig(path, dpi=200)
     plt.close(fig)
+
+
+def write_summary(rows: list[dict], path: Path) -> None:
+    if not rows:
+        return
+    models = sorted({str(row["model"]) for row in rows})
+    neurons = sorted({int(row["neurons"]) for row in rows})
+    by_key = {(str(row["model"]), int(row["neurons"]), int(row["seed"])): row for row in rows}
+    seeds = sorted({int(row["seed"]) for row in rows})
+    lines = [
+        "# Lorenz Neuron-Scaling Run Group",
+        "",
+        "| neurons | " + " | ".join(f"{model} s/epoch" for model in models) + " |",
+        "| ---: | " + " | ".join("---:" for _ in models) + " |",
+    ]
+    for n in neurons:
+        values = []
+        for model in models:
+            vals = [
+                float(by_key[(model, n, seed)]["seconds_per_epoch"])
+                for seed in seeds
+                if (model, n, seed) in by_key and by_key[(model, n, seed)].get("status") == "ok"
+            ]
+            values.append("" if not vals else f"{float(np.mean(vals)):.6g}")
+        lines.append(f"| {n} | " + " | ".join(values) + " |")
+    lines.extend(["", "## Plots", "", "- `plots/time_vs_neurons.png`"])
+    path.write_text("\n".join(lines) + "\n")
 
 
 def _read_existing(path: Path) -> list[dict]:

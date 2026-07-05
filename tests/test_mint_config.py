@@ -11,9 +11,9 @@ def test_mint_model_is_registered():
 
 def test_mint_nlb_experiment_configs_load():
     paths = [
-        Path("configs/experiment/real/nlb/mint_area2_bump_nlb_5ms.yaml"),
-        Path("configs/experiment/real/nlb/mint_mc_maze_nlb_5ms.yaml"),
-        Path("configs/experiment/real/nlb/mint_mc_rtt_nlb_5ms.yaml"),
+        Path("configs/experiment/real/area2_bump/mint/mint_area2_bump_nlb_5ms.yaml"),
+        Path("configs/experiment/real/mc_maze/mint/mint_mc_maze_nlb_5ms.yaml"),
+        Path("configs/experiment/real/mc_rtt/mint/mint_mc_rtt_nlb_5ms.yaml"),
     ]
 
     configs = [load_experiment_config(path) for path in paths]

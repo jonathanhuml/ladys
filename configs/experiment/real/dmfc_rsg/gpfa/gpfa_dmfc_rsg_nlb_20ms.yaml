@@ -1,0 +1,38 @@
+dataset:
+  name: dmfc_rsg
+  data_path: data/real/nlb/dmfc_rsg_test_20ms.h5
+  split: test
+  bin_size_ms: 20
+  max_trials: null
+
+model:
+  name: gpfa
+  objective: negative_log_marginal_likelihood
+  latent_dim: 32
+  bin_width: 20.0
+  start_tau: 100.0
+  start_eps: 1.0e-3
+  min_var_frac: 0.01
+  init_method: fa
+  init_seed: 0
+  learn_kernel_params: false
+  fa_max_iters: 500
+  fa_tol: 1.0e-8
+  kernel_param_max_iters: 8
+  kernel_param_lr: 1.0
+  jitter: 1.0e-5
+  optimization:
+    name: inference_only
+
+preprocessing:
+  observations: null
+
+trainer:
+  epochs: 0
+  batch_size: 4096
+  device: cpu
+
+experiment:
+  output_dir: runs
+  run_name: gpfa_dmfc_rsg_nlb_20ms
+  save_predictions: true

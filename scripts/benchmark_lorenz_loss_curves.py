@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 import time
 from pathlib import Path
@@ -46,8 +47,10 @@ from ladys.models import (
     BGPFAConfig,
     CASSMConfig,
     GPFAConfig,
+    ILQRVAEConfig,
     KalmanConfig,
     LFADSConfig,
+    MINTConfig,
     NDTConfig,
 )
 from ladys.models.base import BaseModelConfig
@@ -61,15 +64,21 @@ MODEL_CONFIGS = {
     "bgpfa": BGPFAConfig,
     "cassm": CASSMConfig,
     "gpfa": GPFAConfig,
+    "ilqr_vae": ILQRVAEConfig,
     "kalman": KalmanConfig,
     "lfads": LFADSConfig,
+    "mint": MINTConfig,
     "ndt": NDTConfig,
 }
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--models", nargs="+", default=["cassm", "gpfa", "kalman"])
+    parser.add_argument(
+        "--models",
+        nargs="+",
+        default=["bgpfa", "cassm", "gpfa", "ilqr_vae", "kalman", "lfads", "mint", "ndt"],
+    )
     parser.add_argument("--neurons", type=int, default=100)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--epochs", type=int, default=30)
@@ -79,7 +88,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--burn-steps", type=int, default=1000)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--output-dir", default="artifacts/lorenz_loss_curves")
+    parser.add_argument("--output-dir", default="runs/lorenz_loss_curves")
     parser.add_argument("--num-rate-traces", type=int, default=10)
     parser.add_argument("--trace-sample-index", type=int, default=0)
     parser.add_argument("--experiment-config-dir", default="configs/experiment")
@@ -134,6 +143,29 @@ def parse_args() -> argparse.Namespace:
         default=1e-1,
         help="Learning rate for BGPFA held-out latent inference.",
     )
+    parser.add_argument(
+        "--mint-n-candidates",
+        type=int,
+        default=None,
+        help="MINT interpolation candidates for the Lorenz library.",
+    )
+    parser.add_argument(
+        "--mint-window-length",
+        type=int,
+        default=None,
+        help="MINT likelihood window length in Lorenz time steps.",
+    )
+    parser.add_argument(
+        "--mint-delta",
+        type=int,
+        default=None,
+        help="MINT binning stride in Lorenz time steps.",
+    )
+    parser.add_argument(
+        "--mint-causal",
+        action="store_true",
+        help="Use causal MINT inference on Lorenz. The default Lorenz preset is acausal.",
+    )
     return parser.parse_args()
 
 
@@ -141,8 +173,11 @@ def main() -> None:
     args = parse_args()
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    plots_dir = output_dir / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
 
     rows = []
+    trace_rows = []
     for model_name in args.models:
         if model_name not in MODEL_CONFIGS:
             raise KeyError(f"Unknown model '{model_name}'. Choices: {sorted(MODEL_CONFIGS)}")
@@ -151,32 +186,29 @@ def main() -> None:
             f"Running model={model_name}, neurons={args.neurons}, "
             f"seed={args.seed}, epochs={args.epochs}"
         )
-        rows.extend(run_case(args, model_name, output_dir))
-        write_history(output_dir / "lorenz_loss_history.csv", rows)
-        plot_test_rate_mse(rows, output_dir / "test_rate_mse_curves.png")
-        plot_test_rate_mse(rows, output_dir / "test_rate_mse_curves_log.png", log_y=True)
-        plot_test_objective(rows, output_dir / "test_objective_curves.png")
-        plot_train_test_objective(rows, output_dir / "train_test_objective_curves.png")
+        case_rows, case_trace_rows = run_case(args, model_name, output_dir)
+        rows.extend(case_rows)
+        trace_rows.extend(case_trace_rows)
+        write_group_outputs(output_dir, rows, trace_rows)
 
-    write_history(output_dir / "lorenz_loss_history.csv", rows)
-    plot_test_rate_mse(rows, output_dir / "test_rate_mse_curves.png")
-    plot_test_rate_mse(rows, output_dir / "test_rate_mse_curves_log.png", log_y=True)
-    plot_test_objective(rows, output_dir / "test_objective_curves.png")
-    plot_train_test_objective(rows, output_dir / "train_test_objective_curves.png")
-    print(f"Wrote {output_dir / 'lorenz_loss_history.csv'}")
-    print(f"Wrote {output_dir / 'test_rate_mse_curves.png'}")
-    print(f"Wrote {output_dir / 'test_rate_mse_curves_log.png'}")
-    print(f"Wrote {output_dir / 'test_objective_curves.png'}")
-    print(f"Wrote {output_dir / 'train_test_objective_curves.png'}")
+    write_group_outputs(output_dir, rows, trace_rows)
+    print(f"Wrote {output_dir / 'summary.csv'}")
+    print(f"Wrote {plots_dir / 'test_rate_mse_curves.png'}")
+    print(f"Wrote {plots_dir / 'test_rate_mse_curves_log.png'}")
+    print(f"Wrote {plots_dir / 'test_objective_curves.png'}")
+    print(f"Wrote {plots_dir / 'train_test_objective_curves.png'}")
+    print(f"Wrote {plots_dir / 'rate_traces_all_models.png'}")
 
 
 def run_case(
     args: argparse.Namespace,
     model_name: str,
     output_dir: Path,
-) -> list[dict[str, str | int | float]]:
+) -> tuple[list[dict[str, str | int | float]], list[dict[str, str | int | float]]]:
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
+    model_dir = output_dir / "models" / model_name
+    model_dir.mkdir(parents=True, exist_ok=True)
 
     dataset_config = LorenzDatasetConfig(
         neurons=args.neurons,
@@ -191,6 +223,7 @@ def run_case(
         model_name,
         args.experiment_config_dir,
         args.preprocessing_mode,
+        args.neurons,
     )
     train_ds = PreprocessedDataset(train_ds, preprocessing)
     test_ds = PreprocessedDataset(test_ds, preprocessing)
@@ -200,6 +233,67 @@ def run_case(
 
     model_config = build_model_config(args, model_name, n_neurons)
     model = model_config.build(n_neurons=n_neurons, n_time=n_time)
+    if model_name == "mint":
+        started = time.perf_counter()
+        try:
+            fit_mint_lorenz_library(model, train_ds, dataset_config, args.device)
+            rows = rows_for_inference_only_model(
+                args=args,
+                model=model,
+                model_name=model_name,
+                test_loader=test_loader,
+                started=started,
+            )
+            trace_rows = collect_rate_trace_rows(
+                model=model,
+                dataset=test_ds,
+                device=args.device,
+                model_name=model_name,
+                num_neurons=args.num_rate_traces,
+                sample_index=args.trace_sample_index,
+                bgpfa_infer_steps=args.bgpfa_infer_steps,
+                bgpfa_infer_mc=args.bgpfa_infer_mc,
+                bgpfa_infer_lr=args.bgpfa_infer_lr,
+            )
+            write_rate_traces(model_dir / "rate_traces.csv", trace_rows)
+            plot_rate_traces(
+                trace_rows,
+                model_dir / "rate_traces.png",
+                title=f"{model_name} held-out firing-rate traces",
+            )
+            write_model_artifacts(
+                model_dir,
+                args,
+                model_name,
+                model_config,
+                dataset_config,
+                rows,
+                trace_rows,
+                model,
+            )
+            return rows, trace_rows
+        except Exception as exc:
+            elapsed = time.perf_counter() - started
+            print(f"Error for model={model_name}: {exc}")
+            rows = [
+                {
+                    "status": "error",
+                    "model": model_name,
+                    "neurons": args.neurons,
+                    "seed": args.seed,
+                    "epoch": -1,
+                    "optimizer_seconds": elapsed,
+                    "wall_seconds": elapsed,
+                    "train_loss": np.nan,
+                    "test_loss": np.nan,
+                    "test_rate_mse": np.nan,
+                    "objective": "",
+                    "error": str(exc),
+                }
+            ]
+            write_model_artifacts(model_dir, args, model_name, model_config, dataset_config, rows, [], None)
+            return rows, []
+
     strategy = build_strategy(model_config.optimization)
     trainer = Trainer(TrainerConfig(epochs=args.epochs, device=args.device))
     metric_fns = {
@@ -220,7 +314,7 @@ def run_case(
     except Exception as exc:
         elapsed = time.perf_counter() - started
         print(f"Error for model={model_name}: {exc}")
-        return [
+        rows = [
             {
                 "status": "error",
                 "model": model_name,
@@ -236,6 +330,8 @@ def run_case(
                 "error": str(exc),
             }
         ]
+        write_model_artifacts(model_dir, args, model_name, model_config, dataset_config, rows, [], None)
+        return rows, []
 
     trace_rows = collect_rate_trace_rows(
         model=model,
@@ -248,10 +344,10 @@ def run_case(
         bgpfa_infer_mc=args.bgpfa_infer_mc,
         bgpfa_infer_lr=args.bgpfa_infer_lr,
     )
-    write_rate_traces(output_dir / f"{model_name}_rate_traces.csv", trace_rows)
+    write_rate_traces(model_dir / "rate_traces.csv", trace_rows)
     plot_rate_traces(
         trace_rows,
-        output_dir / f"{model_name}_rate_traces.png",
+        model_dir / "rate_traces.png",
         title=f"{model_name} held-out firing-rate traces",
     )
 
@@ -277,6 +373,89 @@ def run_case(
                 "error": "",
             }
         )
+    write_model_artifacts(model_dir, args, model_name, model_config, dataset_config, rows, trace_rows, model)
+    return rows, trace_rows
+
+
+def fit_mint_lorenz_library(
+    model,
+    dataset: PreprocessedDataset,
+    dataset_config: LorenzDatasetConfig,
+    device: str,
+) -> None:
+    if not hasattr(model, "fit_library"):
+        raise TypeError(f"{type(model).__name__} does not expose fit_library().")
+
+    torch_device = torch.device(device)
+    model.to(torch_device)
+    spikes = getattr(dataset, "raw_spikes", dataset.spikes)
+    rates = getattr(dataset, "rates", None)
+    if rates is None:
+        raise AttributeError("MINT Lorenz fitting requires true training rates.")
+    if spikes.ndim != 3 or rates.ndim != 3:
+        raise ValueError("MINT Lorenz fitting expects trial x time x neuron tensors.")
+
+    n_trials, n_time, _ = spikes.shape
+    if n_trials == 0:
+        raise ValueError("MINT Lorenz fitting received an empty training split.")
+
+    if hasattr(model, "settings"):
+        model.settings.trial_alignment = range(0, n_time)
+        model.settings.test_alignment = range(0, n_time)
+    if hasattr(model, "hyperparams"):
+        model.hyperparams.trajectories_alignment = range(0, n_time)
+
+    n_conditions = min(max(int(dataset_config.num_inits), 1), int(n_trials))
+    condition = np.arange(n_trials, dtype=np.int64) % n_conditions
+    if hasattr(model, "hyperparams"):
+        model.hyperparams.n_candidates = min(int(model.hyperparams.n_candidates), n_conditions)
+        if model.hyperparams.n_candidates < 2:
+            model.hyperparams.interp = 1
+
+    spike_trials = [spikes[i].T.contiguous().to(torch_device) for i in range(n_trials)]
+    rate_trials = [
+        rates[i].T.contiguous().to(device=torch_device, dtype=torch.float64)
+        for i in range(n_trials)
+    ]
+    model.fit_library(spike_trials, rate_trials, condition)
+
+
+def rows_for_inference_only_model(
+    args: argparse.Namespace,
+    model,
+    model_name: str,
+    test_loader: DataLoader,
+    started: float,
+) -> list[dict[str, str | int | float]]:
+    test_rate_mse = evaluate_rate_mse(
+        model,
+        test_loader,
+        args.device,
+        bgpfa_infer_steps=args.bgpfa_infer_steps,
+        bgpfa_infer_mc=args.bgpfa_infer_mc,
+        bgpfa_infer_lr=args.bgpfa_infer_lr,
+    )
+    wall_seconds = time.perf_counter() - started
+    rows = []
+    for epoch in range(args.epochs):
+        optimizer_seconds = wall_seconds if epoch == 0 else 0.0
+        rows.append(
+            {
+                "status": "ok",
+                "model": model_name,
+                "neurons": args.neurons,
+                "seed": args.seed,
+                "epoch": epoch + 1,
+                "optimizer_seconds": optimizer_seconds,
+                "cumulative_optimizer_seconds": wall_seconds,
+                "wall_seconds": wall_seconds,
+                "train_loss": 0.0,
+                "test_loss": 0.0,
+                "test_rate_mse": test_rate_mse,
+                "objective": getattr(model, "objective", "inference_only"),
+                "error": "",
+            }
+        )
     return rows
 
 
@@ -285,7 +464,7 @@ def build_model_config(
     model_name: str,
     n_neurons: int,
 ) -> BaseModelConfig:
-    path = Path(args.experiment_config_dir) / f"{model_name}_lorenz.yaml"
+    path = _lorenz_experiment_config_path(args.experiment_config_dir, model_name, n_neurons)
     model_data = None
     if path.exists():
         model_data = dict(load_yaml(path)["model"])
@@ -329,6 +508,42 @@ def build_model_config(
         if model_data is not None:
             return BaseModelConfig.from_dict(model_data)
         return BGPFAConfig()
+    if model_name == "ilqr_vae":
+        if model_data is not None:
+            model_data["held_in_neurons"] = n_neurons
+            model_data["output_neuron_start"] = 0
+            model_data["output_neurons"] = n_neurons
+            return BaseModelConfig.from_dict(model_data)
+        return ILQRVAEConfig(
+            objective="ilqr_vae_elbo",
+            params_path=None,
+            initialization="random",
+            trainable_parameters=True,
+            held_in_neurons=n_neurons,
+            output_neuron_start=0,
+            output_neurons=n_neurons,
+            dt=1.0,
+            optimization={
+                "name": "gradient",
+                "optimizer": "Adam",
+                "lr": 4e-3,
+                "weight_decay": 0.0,
+                "gradient_clip": 200.0,
+            },
+        )
+    if model_name == "mint":
+        if model_data is None:
+            model_data = {"name": "mint", "dataset": "lorenz"}
+        model_data["dataset"] = "lorenz"
+        if args.mint_n_candidates is not None:
+            model_data["n_candidates"] = args.mint_n_candidates
+        if args.mint_window_length is not None:
+            model_data["window_length"] = args.mint_window_length
+        if args.mint_delta is not None:
+            model_data["delta"] = args.mint_delta
+        if args.mint_causal:
+            model_data["causal"] = True
+        return BaseModelConfig.from_dict(model_data)
     if model_name in {"lfads", "ndt"}:
         if model_data is not None:
             return BaseModelConfig.from_dict(model_data)
@@ -340,15 +555,44 @@ def build_preprocessing_config(
     model_name: str,
     config_dir: str,
     preprocessing_mode: str = "model",
+    n_neurons: int | None = None,
 ) -> PreprocessingConfig:
     if preprocessing_mode == "none":
         return PreprocessingConfig()
 
-    path = Path(config_dir) / f"{model_name}_lorenz.yaml"
+    path = _lorenz_experiment_config_path(config_dir, model_name, n_neurons)
     if not path.exists():
         return PreprocessingConfig()
     data = load_yaml(path)
     return PreprocessingConfig.model_validate(data.get("preprocessing", {}))
+
+
+def _lorenz_experiment_config_path(
+    config_dir: str,
+    model_name: str,
+    n_neurons: int | None = None,
+) -> Path:
+    root = Path(config_dir)
+    candidates = []
+    if n_neurons is not None:
+        candidates.append(
+            root
+            / "synthetic"
+            / "lorenz"
+            / model_name
+            / f"{model_name}_lorenz_{n_neurons}.yaml"
+        )
+    candidates.extend(
+        [
+            root / "synthetic" / "lorenz" / model_name / f"{model_name}_lorenz.yaml",
+        root / "lorenz" / model_name / f"{model_name}_lorenz.yaml",
+        root / f"{model_name}_lorenz.yaml",
+        ]
+    )
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]
 
 
 def evaluate_rate_mse(
@@ -653,6 +897,206 @@ def plot_train_test_objective(rows: list[dict], path: Path) -> None:
     fig.tight_layout()
     fig.savefig(path, dpi=200)
     plt.close(fig)
+
+
+def write_group_outputs(output_dir: Path, rows: list[dict], trace_rows: list[dict]) -> None:
+    plots_dir = output_dir / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    write_history(output_dir / "summary.csv", rows)
+    write_history(output_dir / "lorenz_loss_history.csv", rows)
+    write_group_summary(output_dir / "summary.md", rows)
+    plot_test_rate_mse(rows, plots_dir / "test_rate_mse_curves.png")
+    plot_test_rate_mse(rows, plots_dir / "test_rate_mse_curves_log.png", log_y=True)
+    plot_test_objective(rows, plots_dir / "test_objective_curves.png")
+    plot_train_test_objective(rows, plots_dir / "train_test_objective_curves.png")
+    plot_combined_rate_traces(trace_rows, plots_dir / "rate_traces_all_models.png")
+
+
+def write_model_artifacts(
+    model_dir: Path,
+    args: argparse.Namespace,
+    model_name: str,
+    model_config: BaseModelConfig,
+    dataset_config: LorenzDatasetConfig,
+    rows: list[dict],
+    trace_rows: list[dict],
+    model,
+) -> None:
+    write_history(model_dir / "history.csv", rows)
+    if trace_rows:
+        write_rate_traces(model_dir / "rate_traces.csv", trace_rows)
+    final = rows[-1] if rows else {}
+    metrics = {
+        "status": final.get("status"),
+        "model": model_name,
+        "neurons": args.neurons,
+        "seed": args.seed,
+        "epochs": args.epochs,
+        "final_train_loss": final.get("train_loss"),
+        "final_test_loss": final.get("test_loss"),
+        "final_test_rate_mse": final.get("test_rate_mse"),
+        "wall_seconds": final.get("wall_seconds"),
+        "error": final.get("error", ""),
+    }
+    (model_dir / "metrics.json").write_text(json.dumps(_json_ready(metrics), indent=2, sort_keys=True) + "\n")
+    config = {
+        "dataset": dataset_config.model_dump(mode="json"),
+        "model": model_config.model_dump(mode="json"),
+        "trainer": {
+            "epochs": args.epochs,
+            "batch_size": args.batch_size,
+            "device": args.device,
+        },
+        "benchmark_args": _json_ready(vars(args)),
+    }
+    (model_dir / "config.json").write_text(json.dumps(_json_ready(config), indent=2, sort_keys=True) + "\n")
+    (model_dir / "report.md").write_text(_model_report_text(metrics) + "\n")
+    if model is not None:
+        torch.save(model.state_dict(), model_dir / "model.pt")
+
+
+def write_group_summary(path: Path, rows: list[dict]) -> None:
+    ok_rows = [row for row in rows if row.get("status") == "ok"]
+    lines = [
+        "# Lorenz Loss-Curve Run Group",
+        "",
+        "| model | status | final epoch | final train loss | final test loss | final test rate MSE | wall seconds |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for model in sorted({str(row["model"]) for row in rows}):
+        model_rows = sorted(
+            [row for row in rows if row["model"] == model],
+            key=lambda row: int(row["epoch"]),
+        )
+        final = model_rows[-1]
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    model,
+                    str(final.get("status", "")),
+                    str(final.get("epoch", "")),
+                    _fmt(final.get("train_loss")),
+                    _fmt(final.get("test_loss")),
+                    _fmt(final.get("test_rate_mse")),
+                    _fmt(final.get("wall_seconds")),
+                ]
+            )
+            + " |"
+        )
+    if ok_rows:
+        lines.extend(
+            [
+                "",
+                "## Plots",
+                "",
+                "- `plots/test_rate_mse_curves.png`",
+                "- `plots/test_rate_mse_curves_log.png`",
+                "- `plots/test_objective_curves.png`",
+                "- `plots/train_test_objective_curves.png`",
+                "- `plots/rate_traces_all_models.png`",
+            ]
+        )
+    path.write_text("\n".join(lines) + "\n")
+
+
+def plot_combined_rate_traces(rows: list[dict], path: Path) -> None:
+    if not rows:
+        return
+    neurons = sorted({int(row["neuron"]) for row in rows})
+    models = sorted({str(row["model"]) for row in rows})
+    ncols = 2
+    nrows = int(np.ceil(len(neurons) / ncols))
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(12, max(3, 2.2 * nrows)),
+        sharex=True,
+        squeeze=False,
+    )
+    cmap = plt.get_cmap("tab10")
+    model_colors = {model: cmap(i % 10) for i, model in enumerate(models)}
+
+    for ax, neuron in zip(axes.ravel(), neurons):
+        neuron_rows = [row for row in rows if int(row["neuron"]) == neuron]
+        first_model = models[0]
+        truth_rows = sorted(
+            [row for row in neuron_rows if str(row["model"]) == first_model],
+            key=lambda row: int(row["time"]),
+        )
+        if truth_rows:
+            ax.plot(
+                [int(row["time"]) for row in truth_rows],
+                [float(row["true_rate"]) for row in truth_rows],
+                color="black",
+                linewidth=1.5,
+                label="true",
+            )
+        for model in models:
+            model_rows = sorted(
+                [row for row in neuron_rows if str(row["model"]) == model],
+                key=lambda row: int(row["time"]),
+            )
+            ax.plot(
+                [int(row["time"]) for row in model_rows],
+                [float(row["pred_rate"]) for row in model_rows],
+                color=model_colors[model],
+                linewidth=1.1,
+                label=model,
+            )
+        ax.set_title(f"neuron {neuron}")
+        ax.grid(True, alpha=0.2)
+
+    for ax in axes.ravel()[len(neurons) :]:
+        ax.axis("off")
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    fig.legend(by_label.values(), by_label.keys(), loc="upper right")
+    fig.suptitle("Held-out firing-rate traces by model")
+    fig.supxlabel("Time")
+    fig.supylabel("Firing rate")
+    fig.tight_layout(rect=(0, 0, 0.94, 0.96))
+    fig.savefig(path, dpi=200)
+    plt.close(fig)
+
+
+def _model_report_text(metrics: dict) -> str:
+    return "\n".join(
+        [
+            "# LaDyS Benchmark Model Run",
+            "",
+            f"- Model: `{metrics.get('model')}`",
+            f"- Status: `{metrics.get('status')}`",
+            f"- Final train loss: `{_fmt(metrics.get('final_train_loss'))}`",
+            f"- Final test loss: `{_fmt(metrics.get('final_test_loss'))}`",
+            f"- Final test rate MSE: `{_fmt(metrics.get('final_test_rate_mse'))}`",
+            f"- Wall seconds: `{_fmt(metrics.get('wall_seconds'))}`",
+        ]
+    )
+
+
+def _json_ready(value):
+    if isinstance(value, dict):
+        return {str(key): _json_ready(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(item) for item in value]
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.generic):
+        return _json_ready(value.item())
+    if isinstance(value, float):
+        return None if not np.isfinite(value) else value
+    return value
+
+
+def _fmt(value) -> str:
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if not np.isfinite(val):
+        return ""
+    return f"{val:.6g}"
 
 
 if __name__ == "__main__":

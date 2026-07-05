@@ -142,7 +142,7 @@ class ILQRVAE(BaseDynamicsModel):
     original repository's standalone Lorenz example uses MGU2 dynamics with a
     3D Gaussian observation model; exact parity with that example would require
     adding that dynamics/likelihood variant as a separate model option. The
-    provided `configs/experiment/synthetic/lorenz/ilqr_vae_lorenz_100.yaml`
+    provided `configs/experiment/synthetic/lorenz/ilqr_vae/ilqr_vae_lorenz_100.yaml`
     trains the Poisson/Mini-GRU-IO variant on the LaDyS Lorenz-100 spike
     population for comparison with LFADS and NDT.
     """

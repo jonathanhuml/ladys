@@ -49,7 +49,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--burn-steps", type=int, default=1000)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--output-dir", default="artifacts/lorenz_time_scaling")
+    parser.add_argument("--output-dir", default="runs/lorenz_time_scaling")
     parser.add_argument("--experiment-config-dir", default="configs/experiment")
     parser.add_argument(
         "--preprocessing-mode",
@@ -97,7 +97,7 @@ def main() -> None:
     args = parse_args()
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = output_dir / "lorenz_time_scaling_results.csv"
+    csv_path = output_dir / "summary.csv"
 
     existing = [] if args.overwrite else _read_existing(csv_path)
     completed = {
@@ -137,7 +137,7 @@ def main() -> None:
 
     _write_outputs(output_dir, rows)
     print(f"Wrote {csv_path}")
-    print(f"Wrote {output_dir / 'time_vs_steps.png'}")
+    print(f"Wrote {output_dir / 'plots' / 'time_vs_steps.png'}")
 
 
 def _maybe_skip_large_gpfa(
@@ -179,8 +179,10 @@ def _maybe_skip_large_gpfa(
 
 
 def _write_outputs(output_dir: Path, rows: list[dict]) -> None:
-    _write_csv(output_dir / "lorenz_time_scaling_results.csv", rows)
-    plot_results(rows, output_dir / "time_vs_steps.png")
+    plots_dir = output_dir / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    _write_csv(output_dir / "summary.csv", rows)
+    plot_results(rows, plots_dir / "time_vs_steps.png")
     write_summary(rows, output_dir / "time_scaling_summary.md")
 
 

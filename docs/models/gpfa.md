@@ -39,7 +39,7 @@ them against dataset-provided ground-truth rates and latent states when
 those targets are available.
 
 ```bash
-ladys run -c configs/experiment/synthetic/lorenz/gpfa_lorenz.yaml
+ladys run -c configs/experiment/synthetic/lorenz/gpfa/gpfa_lorenz.yaml
 ```
 
 The resulting run folder contains `metrics.json` with synthetic metrics
@@ -57,8 +57,8 @@ co-smoothing bits/spike metric.
 Prepare the NLB H5 first, then run the real-data config:
 
 ```bash
-ladys prepare-nlb --datasets mc_maze --splits test --bin-sizes-ms 5 --target-h5 ../mint/data/eval_data_test.h5 --nwb-root ../mint/data/dandi
-ladys run -c configs/experiment/real/mc_maze/gpfa_mc_maze_nlb_5ms.yaml
+ladys prepare-nlb --datasets mc_maze --splits test --bin-sizes-ms 5 --download
+ladys run -c configs/experiment/real/mc_maze/gpfa/gpfa_mc_maze_nlb_5ms.yaml
 ladys score-nlb --run-dir runs/gpfa_mc_maze_nlb_5ms
 ```
 

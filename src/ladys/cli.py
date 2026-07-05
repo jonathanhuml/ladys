@@ -101,7 +101,11 @@ def build_parser() -> argparse.ArgumentParser:
         dest="search_roots",
         help="additional root to search for DANDI-style NWB paths",
     )
-    prepare_nlb_parser.add_argument("--download", action="store_true", help="download missing NWB files with dandi")
+    prepare_nlb_parser.add_argument(
+        "--download",
+        action="store_true",
+        help="download the NLB target H5 and missing NWB files with dandi",
+    )
     prepare_nlb_parser.add_argument("--overwrite", action="store_true")
     prepare_nlb_parser.add_argument("--include-psth", action="store_true", help="include PSTHs for val targets")
     prepare_nlb_parser.set_defaults(handler=prepare_nlb_command)
@@ -262,11 +266,24 @@ def _load_model_config(name: str, path: str | None) -> BaseModelConfig:
 
 
 def _load_default_preprocessing(dataset: str, model: str) -> PreprocessingConfig:
-    path = Path("configs") / "experiment" / f"{model}_{dataset}.yaml"
+    path = _default_experiment_config_path(dataset, model)
     if not path.exists():
         return PreprocessingConfig()
     data = load_yaml(path)
     return PreprocessingConfig.model_validate(data.get("preprocessing", {}))
+
+
+def _default_experiment_config_path(dataset: str, model: str) -> Path:
+    root = Path("configs") / "experiment"
+    candidates = [
+        root / "synthetic" / dataset / model / f"{model}_{dataset}.yaml",
+        root / "real" / dataset / model / f"{model}_{dataset}.yaml",
+        root / f"{model}_{dataset}.yaml",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]
 
 
 def _is_help_request(argv: list[str]) -> bool:

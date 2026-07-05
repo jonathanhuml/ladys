@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from ladys.cli import main
-from ladys.config import ExperimentConfig
+from ladys.config import ExperimentConfig, load_experiment_config
 from ladys.datasets import LorenzDatasetConfig
 from ladys.experiment import Experiment
 from ladys.models import GPFAConfig
@@ -129,3 +129,17 @@ def test_cli_lists_datasets(capsys):
     assert "lorenz" in output
     assert "mc_maze" in output
     assert "mc_rtt" in output
+
+
+def test_experiment_configs_are_nested_by_dataset_and_model():
+    root = Path("configs/experiment")
+    paths = sorted(root.glob("*/*/*/*.yaml"))
+    assert paths
+
+    for path in paths:
+        relative = path.relative_to(root)
+        assert len(relative.parts) == 4
+        load_experiment_config(str(path))
+
+    shallow_yaml = sorted(root.glob("*/*/*.yaml"))
+    assert shallow_yaml == []

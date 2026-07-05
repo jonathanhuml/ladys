@@ -170,7 +170,7 @@ class MINTConfig(BaseModelConfig):
 
     name: Literal["mint"] = "mint"
     objective: str = "mint_likelihood_recursion"
-    dataset: Literal["area2_bump", "mc_maze", "mc_rtt"] = "mc_maze"
+    dataset: Literal["area2_bump", "mc_maze", "mc_rtt", "lorenz"] = "mc_maze"
     train_source: Literal["mat", "nwb"] = "nwb"
     train_split: Literal["auto", "train", "trainval"] = "trainval"
     nlb_neural_state_defaults: bool = True
@@ -201,6 +201,7 @@ class MINT(BaseDynamicsModel):
         self.config = config
         self.objective = config.objective
         self.settings, self.hyperparams = get_mint_config(config.dataset)
+        self._apply_config_overrides()
         self.settings.data_path = Path(config.mat_data_root) / f"{config.dataset}.mat"
 
         self.Ts = self.settings.Ts
@@ -230,6 +231,20 @@ class MINT(BaseDynamicsModel):
 
         self.register_buffer("_device_anchor", torch.empty(0))
         self._refresh_runtime_params()
+
+    def _apply_config_overrides(self) -> None:
+        if self.config.n_candidates is not None:
+            self.hyperparams.n_candidates = int(self.config.n_candidates)
+        if self.config.window_length is not None:
+            self.hyperparams.window_length = int(self.config.window_length)
+        if self.config.delta is not None:
+            self.hyperparams.Delta = int(self.config.delta)
+        if self.config.sigma is not None:
+            self.hyperparams.sigma = int(self.config.sigma)
+        if self.config.min_rate is not None:
+            self.hyperparams.min_rate = float(self.config.min_rate)
+        if self.config.causal is not None:
+            self.hyperparams.causal = bool(self.config.causal)
 
     def _refresh_runtime_params(self) -> None:
         """Refresh derived tensors after config/hyperparameter overrides."""
@@ -622,6 +637,20 @@ def get_mint_config(dataset: str) -> Tuple[Settings, HyperParams]:
         hp.window_length = 480
         hp.n_candidates = 6
         hp.interp_within_trajectories = True
+    elif dataset == "lorenz":
+        settings.Ts = 0.2
+        settings.trial_alignment = range(0, 100)
+        settings.test_alignment = range(0, 100)
+        hp.trajectories_alignment = range(0, 100)
+        hp.min_lambda = 1e-3
+        hp.Delta = 1
+        hp.window_length = 6
+        hp.n_candidates = 4
+        hp.causal = False
+        hp.interp_within_trajectories = False
+        hp.n_neural_dims = None
+        hp.n_cond_dims = None
+        hp.n_trial_dims = None
     else:
         raise ValueError(f"Unknown MINT dataset: {dataset}")
     return settings, hp
@@ -1066,6 +1095,14 @@ def fit_trajectories(S, Z, condition, settings, hyperparams):
         vel, labels = preprocess_behavior(Z, settings)
         rates = [item[4:] * settings.Ts * hyperparams.Delta for item in Z]
         return rates, vel, labels
+    if settings.task == "lorenz":
+        cond_list = np.unique(condition)
+        grouped_rates = []
+        for cond in cond_list:
+            trial_idx = np.flatnonzero(condition == cond)
+            grouped_rates.append([Z[i].to(TORCH_DTYPE) for i in trial_idx])
+        x_bar = [torch.mean(torch.stack(group, dim=2), dim=2).clamp_min(0.0) for group in grouped_rates]
+        return x_bar, [item.clone() for item in x_bar], [f"rate_{i}" for i in range(x_bar[0].shape[0])]
     raise ValueError(f"Unknown task: {settings.task}")
 
 
