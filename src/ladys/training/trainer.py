@@ -52,6 +52,7 @@ class Trainer:
             strategy.on_epoch_end(model, epoch)
             seconds = time.perf_counter() - start
             valid_result = self.validate(model, strategy, valid_loader, epoch, device)
+            strategy.on_validation_end(model, epoch, valid_result)
             metrics = _compute_epoch_metrics(model, epoch_metrics)
 
             report = EpochReport(

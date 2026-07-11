@@ -266,7 +266,10 @@ def _build_return_class(class_node: ast.ClassDef) -> str:
             annotation = _literal_annotation(node.returns)
             if not annotation:
                 raise ModelDocError(f"Could not parse {class_node.name}.build return annotation.")
-            return annotation.rsplit(".", maxsplit=1)[-1]
+            return_class = annotation.rsplit(".", maxsplit=1)[-1]
+            if return_class == "BaseDynamicsModel" and class_node.name.endswith("Config"):
+                return class_node.name[: -len("Config")]
+            return return_class
     raise ModelDocError(f"{class_node.name} must define a build method.")
 
 

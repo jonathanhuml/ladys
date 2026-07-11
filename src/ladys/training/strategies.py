@@ -13,7 +13,7 @@ from typing import Iterable
 import numpy as np
 import torch
 from torch import Tensor
-from torch.optim.lr_scheduler import LambdaLR
+from torch.optim.lr_scheduler import LambdaLR, ReduceLROnPlateau
 
 from ladys.models.base import BaseDynamicsModel, OptimizationConfig
 from ladys.types import LossOutput, StepResult, move_batch_to_device, observations_from_batch
@@ -30,6 +30,14 @@ class OptimizationStrategy(ABC):
 
     def on_epoch_end(self, model: BaseDynamicsModel, epoch: int) -> None:
         """Hook after an epoch ends."""
+
+    def on_validation_end(
+        self,
+        model: BaseDynamicsModel,
+        epoch: int,
+        valid_result: StepResult | None,
+    ) -> None:
+        """Hook after validation finishes."""
 
     def train_epoch(
         self,
@@ -75,12 +83,23 @@ class GradientStrategy(OptimizationStrategy):
         lr: float = 1e-3,
         weight_decay: float = 0.0,
         gradient_clip: float | None = None,
+        lr_scheduler: str | None = None,
+        scheduler_factor: float = 0.95,
+        scheduler_patience: int = 10,
+        scheduler_threshold: float = 0.0,
+        scheduler_min_lr: float = 1e-5,
     ) -> None:
         self.optimizer_name = optimizer
         self.lr = lr
         self.weight_decay = weight_decay
         self.gradient_clip = gradient_clip
+        self.lr_scheduler_name = lr_scheduler
+        self.scheduler_factor = scheduler_factor
+        self.scheduler_patience = scheduler_patience
+        self.scheduler_threshold = scheduler_threshold
+        self.scheduler_min_lr = scheduler_min_lr
         self.optimizer: torch.optim.Optimizer | None = None
+        self.scheduler: ReduceLROnPlateau | None = None
 
     def setup(self, model: BaseDynamicsModel) -> None:
         optimizer_cls = getattr(torch.optim, self.optimizer_name)
@@ -88,6 +107,19 @@ class GradientStrategy(OptimizationStrategy):
             model.parameters(),
             lr=self.lr,
             weight_decay=self.weight_decay,
+        )
+        self.scheduler = None
+        if self.lr_scheduler_name is None:
+            return
+        if self.lr_scheduler_name != "ReduceLROnPlateau":
+            raise ValueError(f"Unsupported lr_scheduler '{self.lr_scheduler_name}'.")
+        self.scheduler = ReduceLROnPlateau(
+            self.optimizer,
+            mode="min",
+            factor=self.scheduler_factor,
+            patience=self.scheduler_patience,
+            threshold=self.scheduler_threshold,
+            min_lr=self.scheduler_min_lr,
         )
 
     def step(
@@ -108,11 +140,23 @@ class GradientStrategy(OptimizationStrategy):
         loss.total.backward()
         if self.gradient_clip is not None:
             torch.nn.utils.clip_grad_norm_(model.parameters(), self.gradient_clip)
+        if hasattr(model, "on_before_optimizer_step"):
+            model.on_before_optimizer_step(self.optimizer, epoch)
         self.optimizer.step()
         if hasattr(model, "project_parameters"):
             model.project_parameters()
 
         return StepResult.from_loss(loss, batch_size=int(x.shape[0]))
+
+    def on_validation_end(
+        self,
+        model: BaseDynamicsModel,
+        epoch: int,
+        valid_result: StepResult | None,
+    ) -> None:
+        del model, epoch
+        if self.scheduler is not None and valid_result is not None:
+            self.scheduler.step(valid_result.loss)
 
 
 class FullBatchGradientStrategy(OptimizationStrategy):
@@ -178,6 +222,8 @@ class FullBatchGradientStrategy(OptimizationStrategy):
         loss.total.backward()
         if self.gradient_clip is not None:
             torch.nn.utils.clip_grad_norm_(model.parameters(), self.gradient_clip)
+        if hasattr(model, "on_before_optimizer_step"):
+            model.on_before_optimizer_step(self.optimizer, epoch)
         self.optimizer.step()
         if hasattr(model, "project_parameters"):
             model.project_parameters()

@@ -179,9 +179,10 @@ class MINTConfig(BaseModelConfig):
     """Config for the MINT trajectory-library decoder.
 
     MINT is inference-only after its trajectory library has been built. The
-    optimization block should normally remain `name="inference_only"`; benchmark
-    epoch curves repeat the same decoded rates so MINT can be plotted alongside
-    trainable methods without implying a backward pass or EM loop.
+    optimization block should normally remain `name="inference_only"`. Lorenz
+    benchmark epoch curves can progressively add repeated trials to the
+    trajectory library, but those curves still do not imply a backward pass or
+    EM loop.
 
     For NLB tasks, `dataset` selects a task-specific trajectory builder.
     `area2_bump` and `mc_maze` can build libraries from DANDI NWBs, `mc_rtt`

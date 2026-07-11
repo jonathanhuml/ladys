@@ -1,0 +1,58 @@
+name: stndt
+objective: stndt_masked_poisson_nll
+ensemble: false
+ensemble_size: 2
+output_neurons: null
+output_mode: auto
+fwd_steps: 0
+context_forward: 4
+context_backward: 8
+context_wrap_initial: false
+full_context: false
+hidden_size: 128
+dropout: 0.1
+dropout_rates: 0.2
+dropout_embedding: 0.2
+num_heads: 2
+num_layers: 4
+activation: relu
+linear_embedder: true
+embed_dim: 1
+learnable_position: false
+max_spike_count: 20
+lograte: true
+log_rate_min: -8.0
+log_rate_max: 8.0
+spike_log_init: false
+fixup_init: true
+pre_norm: true
+scale_norm: false
+decoder_layers: 1
+position_offset: false
+mask_ratio: 0.25
+mask_mode: full
+mask_token_ratio: 1.0
+mask_random_ratio: 0.5
+mask_max_span: 1
+mask_span_expand_prob: 0.0
+use_zero_mask: true
+topk_loss_fraction: 1.0
+do_contrast: true
+contrast_mask_ratio: 0.05
+contrast_mask_mode: full
+contrast_mask_token_ratio: 0.5
+contrast_mask_random_ratio: 0.5
+contrast_mask_max_span: 1
+contrast_mask_span_expand_prob: 0.0
+temperature: 0.07
+contrast_lambda: 0.1
+use_contrast_projector: false
+linear_projector: true
+contrast_layer: embedder
+nlb_decoder: direct
+optimization:
+  name: gradient
+  optimizer: Adam
+  lr: 1.0e-3
+  weight_decay: 5.0e-5
+  gradient_clip: 200.0

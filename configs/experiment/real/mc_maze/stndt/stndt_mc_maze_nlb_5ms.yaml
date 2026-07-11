@@ -1,0 +1,76 @@
+dataset:
+  name: mc_maze
+  split: test
+  bin_size_ms: 5
+  data_path: data/real/nlb/mc_maze_test_5ms.h5
+
+model:
+  name: stndt
+  objective: stndt_masked_poisson_nll
+  ensemble: false
+  ensemble_size: 2
+  output_mode: auto
+  context_forward: 46
+  context_backward: 7
+  context_wrap_initial: false
+  full_context: false
+  hidden_size: 128
+  dropout: 0.3258805092088328
+  dropout_rates: 0.3331559445029162
+  dropout_embedding: 0.5567310695526302
+  num_heads: 2
+  num_layers: 4
+  activation: relu
+  linear_embedder: true
+  embed_dim: 1
+  learnable_position: false
+  max_spike_count: 20
+  lograte: true
+  log_rate_min: -8.0
+  log_rate_max: 8.0
+  spike_log_init: false
+  fixup_init: true
+  pre_norm: true
+  scale_norm: false
+  decoder_layers: 1
+  position_offset: false
+  mask_ratio: 0.25473718401208967
+  mask_mode: full
+  mask_token_ratio: 0.8355074373250815
+  mask_random_ratio: 0.8578455430626231
+  mask_max_span: 5
+  mask_span_expand_prob: 0.0
+  use_zero_mask: true
+  topk_loss_fraction: 1.0
+  do_contrast: true
+  contrast_mask_ratio: 0.16105417937781183
+  contrast_mask_mode: full
+  contrast_mask_token_ratio: 0.9925137916228178
+  contrast_mask_random_ratio: 0.8592738189960607
+  contrast_mask_max_span: 1
+  contrast_mask_span_expand_prob: 0.0
+  temperature: 0.07
+  contrast_lambda: 0.5706354364772466
+  use_contrast_projector: false
+  linear_projector: true
+  contrast_layer: embedder
+  nlb_decoder: direct
+  optimization:
+    name: gradient
+    optimizer: Adam
+    lr: 1.0e-3
+    weight_decay: 3.8970415504287285e-4
+    gradient_clip: 200.0
+
+preprocessing:
+  observations: null
+
+trainer:
+  epochs: 5
+  batch_size: 64
+  device: cpu
+
+experiment:
+  output_dir: runs
+  run_name: stndt_mc_maze_nlb_5ms
+  save_predictions: true

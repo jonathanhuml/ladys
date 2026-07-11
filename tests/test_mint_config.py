@@ -4,8 +4,11 @@ import numpy as np
 import torch
 
 from ladys.config import load_experiment_config
+from ladys.datasets import LorenzDataset, LorenzDatasetConfig
 from ladys.models.base import BaseModelConfig
 from ladys.models.mint import MINTConfig, get_mint_config
+from ladys.preprocessing import PreprocessedDataset, PreprocessingConfig
+from scripts.benchmark_lorenz_loss_curves import mint_lorenz_epoch_trial_counts
 
 
 def test_mint_model_is_registered():
@@ -65,3 +68,20 @@ def test_mint_lorenz_library_defaults_to_smoothed_spikes():
     assert model.config.lorenz_library_source == "smoothed_spikes"
     assert len(model.Omega_plus) == 1
     assert float(model.Omega_plus[0].max()) < 10.0
+
+
+def test_mint_lorenz_epoch_counts_use_available_repeats():
+    config = LorenzDatasetConfig(
+        neurons=2,
+        num_inits=3,
+        num_trials=5,
+        num_steps=8,
+        burn_steps=5,
+        train_fraction=0.8,
+        seed=1,
+    )
+    train_ds, _ = LorenzDataset.make_splits(config)
+    train_ds = PreprocessedDataset(train_ds, PreprocessingConfig())
+
+    assert mint_lorenz_epoch_trial_counts(train_ds, config, requested_epochs=2) == [3, 6]
+    assert mint_lorenz_epoch_trial_counts(train_ds, config, requested_epochs=50) == [3, 6, 9, 12]

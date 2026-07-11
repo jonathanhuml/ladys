@@ -20,6 +20,7 @@ model:
   coordinated_dropout_rate: 0.3
   kl_weight: 0.1
   kl_warmup_epochs: 500
+  weight_decay_warmup_epochs: 500
   velocity_prior_var: 0.1
   prediction_samples: 50
   optimization:
@@ -28,6 +29,11 @@ model:
     lr: 3.0e-3
     weight_decay: 2.0e-5
     gradient_clip: 200.0
+    lr_scheduler: ReduceLROnPlateau
+    scheduler_factor: 0.95
+    scheduler_patience: 10
+    scheduler_threshold: 0.0
+    scheduler_min_lr: 1.0e-5
 
 preprocessing:
   observations: null

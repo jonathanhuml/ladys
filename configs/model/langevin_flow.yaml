@@ -14,6 +14,7 @@ transformer_feedforward: 512
 coordinated_dropout_rate: 0.5
 kl_weight: 0.1
 kl_warmup_epochs: 500
+weight_decay_warmup_epochs: 500
 velocity_prior_var: 0.1
 log_rate_min: -8.0
 log_rate_max: 8.0

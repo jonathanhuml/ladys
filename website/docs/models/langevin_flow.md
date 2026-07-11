@@ -55,6 +55,7 @@ Config for the LangevinFlow sequential VAE.
 | `coordinated_dropout_rate` | `float` | `0.5` |
 | `kl_weight` | `float` | `0.1` |
 | `kl_warmup_epochs` | `int` | `500` |
+| `weight_decay_warmup_epochs` | `int` | `500` |
 | `velocity_prior_var` | `float` | `0.1` |
 | `log_rate_min` | `float` | `-8.0` |
 | `log_rate_max` | `float` | `8.0` |

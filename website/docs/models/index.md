@@ -23,3 +23,4 @@ python scripts/generate_model_docs.py
 | [NDT](ndt.md) | `ndt` | Transformer encoder trained with a masked Poisson spike objective. |
 | [PSTH](psth.md) | `psth` | Peri-stimulus time histogram baseline. |
 | [Smoothing](smoothing.md) | `smoothing` | Gaussian-smoothed spike-count baseline. |
+| [STNDT](stndt.md) | `stndt` | Spatiotemporal Neural Data Transformer for binned spike counts. |

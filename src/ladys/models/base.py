@@ -9,7 +9,7 @@ import torch
 from pydantic import BaseModel, ConfigDict, Field
 from torch import Tensor, nn
 
-from ladys.types import LossOutput, ModelOutput
+from ladys.types import LossOutput, ModelOutput, observations_from_batch
 from ladys.utils.yaml import load_yaml
 
 
@@ -99,6 +99,93 @@ class BaseDynamicsModel(nn.Module, ABC):
                 return next(self.buffers()).device
             except StopIteration:
                 return torch.device("cpu")
+
+
+class EnsembleDynamicsModel(BaseDynamicsModel):
+    """Average predictions and member objectives from compatible dynamics models."""
+
+    def __init__(
+        self,
+        members: list[BaseDynamicsModel],
+        objective: str | None = None,
+    ) -> None:
+        super().__init__()
+        if len(members) < 1:
+            raise ValueError("EnsembleDynamicsModel requires at least one member.")
+        self.members = nn.ModuleList(members)
+        self.objective = objective or f"ensemble_{members[0].objective}"
+
+    def forward(self, x: Tensor) -> ModelOutput:
+        member_outputs = [member(x) for member in self.members]
+        return ModelOutput(
+            rates=_mean_optional_tensor([output.rates for output in member_outputs]),
+            latents=_mean_optional_tensor([output.latents for output in member_outputs]),
+            reconstruction=_mean_optional_tensor(
+                [output.reconstruction for output in member_outputs]
+            ),
+            extras={
+                "ensemble_size": len(self.members),
+                "member_outputs": member_outputs,
+            },
+        )
+
+    def loss(
+        self,
+        batch: Tensor | dict[str, Tensor],
+        output: ModelOutput,
+        epoch: int = 0,
+    ) -> LossOutput:
+        member_outputs = output.extras.get("member_outputs")
+        if member_outputs is None:
+            member_outputs = [member(observations_from_batch(batch)) for member in self.members]
+        if len(member_outputs) != len(self.members):
+            raise ValueError(
+                "Ensemble loss received "
+                f"{len(member_outputs)} member outputs for {len(self.members)} members."
+            )
+
+        losses = [
+            member.loss(batch, member_output, epoch=epoch)
+            for member, member_output in zip(self.members, member_outputs)
+        ]
+        total = torch.stack([loss.total for loss in losses]).mean()
+        named_terms = {}
+        keys = set().union(*(loss.named_terms.keys() for loss in losses))
+        for key in keys:
+            values = [
+                loss.named_terms[key]
+                for loss in losses
+                if key in loss.named_terms
+            ]
+            named_terms[key] = _mean_loss_term(values, total)
+        named_terms["ensemble_size"] = float(len(self.members))
+        return LossOutput(total=total, named_terms=named_terms, objective=self.objective)
+
+    def predict_rates(self, x: Tensor) -> Tensor:
+        return torch.stack([member.predict_rates(x) for member in self.members]).mean(dim=0)
+
+    def evaluation_adapter(self, task: str) -> Any | None:
+        return self.members[0].evaluation_adapter(task)
+
+
+def _mean_optional_tensor(values: list[Tensor | None]) -> Tensor | None:
+    tensors = [value for value in values if value is not None]
+    if len(tensors) != len(values):
+        return None
+    shapes = {tuple(tensor.shape) for tensor in tensors}
+    if len(shapes) != 1:
+        return None
+    return torch.stack(tensors).mean(dim=0)
+
+
+def _mean_loss_term(values: list[Tensor | float], reference: Tensor) -> Tensor:
+    tensors = [
+        value
+        if isinstance(value, Tensor)
+        else torch.as_tensor(value, device=reference.device, dtype=reference.dtype)
+        for value in values
+    ]
+    return torch.stack(tensors).mean()
 
 
 def load_model_config(path: str) -> BaseModelConfig:

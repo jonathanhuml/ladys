@@ -101,6 +101,10 @@ class NLBArrays:
     train_heldout_spikes: Tensor
     eval_heldin_spikes: Tensor
     eval_heldout_spikes: Tensor
+    train_heldin_forward_spikes: Tensor | None
+    train_heldout_forward_spikes: Tensor | None
+    eval_heldin_forward_spikes: Tensor | None
+    eval_heldout_forward_spikes: Tensor | None
     dt: float
 
 
@@ -134,6 +138,10 @@ def load_nlb_h5(config: NLBDatasetConfig) -> NLBArrays:
         eval_heldout = np.asarray(group[config.target_key])
         train_heldin = np.asarray(group.get("train_spikes_heldin", eval_heldin))
         train_heldout = np.asarray(group.get("train_spikes_heldout", eval_heldout))
+        train_heldin_forward = _optional_array(group, "train_spikes_heldin_forward")
+        train_heldout_forward = _optional_array(group, "train_spikes_heldout_forward")
+        eval_heldin_forward = _optional_array(group, "eval_spikes_heldin_forward")
+        eval_heldout_forward = _optional_array(group, "eval_spikes_heldout_forward")
 
     if eval_heldin.shape[:2] != eval_heldout.shape[:2]:
         raise ValueError(
@@ -151,14 +159,40 @@ def load_nlb_h5(config: NLBDatasetConfig) -> NLBArrays:
         eval_heldout = eval_heldout[: config.max_trials]
         train_heldin = train_heldin[: config.max_trials]
         train_heldout = train_heldout[: config.max_trials]
+        train_heldin_forward = _slice_optional(train_heldin_forward, config.max_trials)
+        train_heldout_forward = _slice_optional(train_heldout_forward, config.max_trials)
+        eval_heldin_forward = _slice_optional(eval_heldin_forward, config.max_trials)
+        eval_heldout_forward = _slice_optional(eval_heldout_forward, config.max_trials)
 
     return NLBArrays(
         train_heldin_spikes=torch.from_numpy(train_heldin.copy()).float(),
         train_heldout_spikes=torch.from_numpy(train_heldout.copy()).float(),
         eval_heldin_spikes=torch.from_numpy(eval_heldin.copy()).float(),
         eval_heldout_spikes=torch.from_numpy(eval_heldout.copy()).float(),
+        train_heldin_forward_spikes=_optional_tensor(train_heldin_forward),
+        train_heldout_forward_spikes=_optional_tensor(train_heldout_forward),
+        eval_heldin_forward_spikes=_optional_tensor(eval_heldin_forward),
+        eval_heldout_forward_spikes=_optional_tensor(eval_heldout_forward),
         dt=float(config.bin_size_ms) / 1000.0,
     )
+
+
+def _optional_array(group: h5py.Group | h5py.File, key: str) -> np.ndarray | None:
+    if key not in group:
+        return None
+    return np.asarray(group[key])
+
+
+def _slice_optional(array: np.ndarray | None, max_trials: int) -> np.ndarray | None:
+    if array is None:
+        return None
+    return array[:max_trials]
+
+
+def _optional_tensor(array: np.ndarray | None) -> Tensor | None:
+    if array is None:
+        return None
+    return torch.from_numpy(array.copy()).float()
 
 
 class NLBDataset(Dataset):
@@ -176,9 +210,13 @@ class NLBDataset(Dataset):
         if split == "train":
             self.spikes = self.arrays.train_heldin_spikes
             self.raw_spikes = self.arrays.train_heldout_spikes
+            self.heldin_forward_spikes = self.arrays.train_heldin_forward_spikes
+            self.heldout_forward_spikes = self.arrays.train_heldout_forward_spikes
         elif split == "valid":
             self.spikes = self.arrays.eval_heldin_spikes
             self.raw_spikes = self.arrays.eval_heldout_spikes
+            self.heldin_forward_spikes = self.arrays.eval_heldin_forward_spikes
+            self.heldout_forward_spikes = self.arrays.eval_heldout_forward_spikes
         else:
             raise ValueError("split must be 'train' or 'valid'.")
 
@@ -195,13 +233,18 @@ class NLBDataset(Dataset):
         return int(self.spikes.shape[0])
 
     def __getitem__(self, index: int) -> dict[str, Tensor]:
-        return {
+        item = {
             "spikes": self.spikes[index],
             "heldin_spikes": self.spikes[index],
             "raw_spikes": self.raw_spikes[index],
             "heldout_spikes": self.raw_spikes[index],
             "dt": torch.tensor(self.arrays.dt, dtype=torch.float32),
         }
+        if self.heldin_forward_spikes is not None:
+            item["heldin_forward_spikes"] = self.heldin_forward_spikes[index]
+        if self.heldout_forward_spikes is not None:
+            item["heldout_forward_spikes"] = self.heldout_forward_spikes[index]
+        return item
 
 
 @dataclass(frozen=True)
@@ -487,6 +530,8 @@ def _build_train_tensors(
             dataset_obj,
             dataset_name=dataset,
             trial_split=trial_split,
+            include_behavior=True,
+            include_forward_pred=True,
             save_file=True,
             save_path=str(train_h5),
         )

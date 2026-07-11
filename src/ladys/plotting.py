@@ -19,6 +19,7 @@ _MODEL_COLORS = {
     "cassm": "#0072B2",
     "lfads": "#7F3C8D",
     "ndt": "#666666",
+    "stndt": "#A6761D",
 }
 
 _MODEL_MARKERS = {
@@ -30,6 +31,7 @@ _MODEL_MARKERS = {
     "cassm": "P",
     "lfads": "X",
     "ndt": "h",
+    "stndt": "*",
 }
 
 _MODEL_LABELS = {
@@ -41,6 +43,7 @@ _MODEL_LABELS = {
     "lfads": "LFADS",
     "mint": "MINT",
     "ndt": "NDT",
+    "stndt": "STNDT",
     "true": "true",
     "pred": "predicted",
     "prediction": "predicted",

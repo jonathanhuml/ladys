@@ -95,6 +95,7 @@ class LangevinFlowConfig(BaseModelConfig):
     coordinated_dropout_rate: float = 0.5
     kl_weight: float = 0.1
     kl_warmup_epochs: int = 500
+    weight_decay_warmup_epochs: int = 500
     velocity_prior_var: float = 0.1
     log_rate_min: float = -8.0
     log_rate_max: float = 8.0
@@ -137,6 +138,8 @@ class LangevinFlowConfig(BaseModelConfig):
             raise ValueError("kl_weight must be nonnegative.")
         if self.kl_warmup_epochs < 0:
             raise ValueError("kl_warmup_epochs must be nonnegative.")
+        if self.weight_decay_warmup_epochs < 0:
+            raise ValueError("weight_decay_warmup_epochs must be nonnegative.")
         if self.velocity_prior_var <= 0.0:
             raise ValueError("velocity_prior_var must be positive.")
         if self.prediction_samples < 1:
@@ -155,6 +158,7 @@ class LangevinFlowConfig(BaseModelConfig):
         n_neurons = int(data.n_neurons)
         n_time = int(data.n_time)
         output_neurons = self.output_neurons
+        fwd_steps = self.fwd_steps
         if output_neurons is None:
             output_neurons = n_neurons
             if self.output_mode != "heldin":
@@ -164,6 +168,10 @@ class LangevinFlowConfig(BaseModelConfig):
                 heldout = getattr(train_dataset, "raw_spikes", None)
                 if heldout is not None:
                     output_neurons = n_neurons + int(heldout.shape[-1])
+                    heldin_forward = getattr(train_dataset, "heldin_forward_spikes", None)
+                    heldout_forward = getattr(train_dataset, "heldout_forward_spikes", None)
+                    if heldin_forward is not None and heldout_forward is not None:
+                        fwd_steps = fwd_steps or int(heldin_forward.shape[1])
                 elif self.output_mode == "heldin_heldout":
                     raise ValueError(
                         "output_mode='heldin_heldout' requires a dataset with raw_spikes."
@@ -172,15 +180,23 @@ class LangevinFlowConfig(BaseModelConfig):
             n_neurons=n_neurons,
             n_time=n_time,
             output_neurons=output_neurons,
+            fwd_steps=fwd_steps,
         )
 
-    def _build(self, n_neurons: int, n_time: int, output_neurons: int) -> "LangevinFlow":
+    def _build(
+        self,
+        n_neurons: int,
+        n_time: int,
+        output_neurons: int,
+        fwd_steps: int | None = None,
+    ) -> "LangevinFlow":
+        fwd_steps = self.fwd_steps if fwd_steps is None else int(fwd_steps)
         return LangevinFlow(
             n_neurons=n_neurons,
             n_time=n_time,
             output_neurons=output_neurons,
             hidden_size=self.hidden_size,
-            fwd_steps=self.fwd_steps,
+            fwd_steps=fwd_steps,
             dropout=self.dropout,
             gamma=self.gamma,
             langevin_step=self.langevin_step,
@@ -191,6 +207,7 @@ class LangevinFlowConfig(BaseModelConfig):
             coordinated_dropout_rate=self.coordinated_dropout_rate,
             kl_weight=self.kl_weight,
             kl_warmup_epochs=self.kl_warmup_epochs,
+            weight_decay_warmup_epochs=self.weight_decay_warmup_epochs,
             velocity_prior_var=self.velocity_prior_var,
             log_rate_min=self.log_rate_min,
             log_rate_max=self.log_rate_max,
@@ -246,6 +263,7 @@ class LangevinFlow(BaseDynamicsModel):
         coordinated_dropout_rate: float = 0.5,
         kl_weight: float = 0.1,
         kl_warmup_epochs: int = 500,
+        weight_decay_warmup_epochs: int = 500,
         velocity_prior_var: float = 0.1,
         log_rate_min: float = -8.0,
         log_rate_max: float = 8.0,
@@ -268,6 +286,7 @@ class LangevinFlow(BaseDynamicsModel):
         self.coordinated_dropout_rate = float(coordinated_dropout_rate)
         self.kl_weight = float(kl_weight)
         self.kl_warmup_epochs = int(kl_warmup_epochs)
+        self.weight_decay_warmup_epochs = int(weight_decay_warmup_epochs)
         self.velocity_prior_var = float(velocity_prior_var)
         self.log_rate_min = float(log_rate_min)
         self.log_rate_max = float(log_rate_max)
@@ -329,15 +348,17 @@ class LangevinFlow(BaseDynamicsModel):
         target = self._reconstruction_target(batch, log_rates)
         target = target.to(device=self.device, dtype=log_rates.dtype)
         log_rates = log_rates[:, : target.shape[1], : target.shape[2]]
-        recon = F.poisson_nll_loss(log_rates, target, log_input=True, reduction="none")
+        finite = torch.isfinite(target)
+        safe_target = torch.nan_to_num(target, nan=0.0, posinf=0.0, neginf=0.0)
+        recon = F.poisson_nll_loss(log_rates, safe_target, log_input=True, reduction="none")
         cd_mask = output.extras.get("coordinated_dropout_mask")
         if self.training and cd_mask is not None:
             cd_mask = self._pad_cd_mask(cd_mask, recon)
             recon = recon * cd_mask + (recon * (1.0 - cd_mask)).detach()
-        recon_nll = recon.mean()
+        recon_nll = recon[finite].mean()
 
         kl = output.extras["kl"]
-        kl_weight = self._kl_weight(epoch)
+        kl_weight = self._kl_weight(epoch) if self.training else 0.0
         total = recon_nll + kl_weight * kl
         if self.training:
             self._train_step.add_(1)
@@ -359,13 +380,13 @@ class LangevinFlow(BaseDynamicsModel):
         try:
             if self.prediction_samples <= 1:
                 return self._forward(x, sample=self.sample_eval).rates
-            rates = [
-                self._forward(x, sample=True).rates
+            log_rates = [
+                self._forward(x, sample=True).extras["log_rates"]
                 for _ in range(self.prediction_samples)
             ]
         finally:
             self.train(was_training)
-        return torch.stack(rates, dim=0).mean(dim=0)
+        return torch.stack(log_rates, dim=0).mean(dim=0).exp()
 
     def evaluation_adapter(self, task: str) -> EvaluationAdapter | None:
         if task != "nlb":
@@ -373,6 +394,21 @@ class LangevinFlow(BaseDynamicsModel):
         if self.output_neurons > self.n_neurons:
             return LangevinFlowNLBAdapter()
         return NLBCoSmoothingAdapter(feature_source="latents")
+
+    def on_before_optimizer_step(
+        self,
+        optimizer: torch.optim.Optimizer,
+        epoch: int,
+    ) -> None:
+        if self.weight_decay_warmup_epochs <= 0:
+            return
+        ramp = min(max(float(epoch) / float(self.weight_decay_warmup_epochs), 0.0), 1.0)
+        for group in optimizer.param_groups:
+            base = group.setdefault(
+                "_langevin_flow_base_weight_decay",
+                float(group.get("weight_decay", 0.0)),
+            )
+            group["weight_decay"] = float(base) * ramp
 
     def _forward(self, x: Tensor, sample: bool) -> ModelOutput:
         if x.ndim != 3:
@@ -473,7 +509,18 @@ class LangevinFlow(BaseDynamicsModel):
             heldout = batch["heldout_spikes"]
             total_neurons = observed.shape[-1] + heldout.shape[-1]
             if log_rates.shape[-1] >= total_neurons:
-                return torch.cat([observed, heldout], dim=-1)
+                target = torch.cat([observed, heldout], dim=-1)
+                if (
+                    "heldin_forward_spikes" in batch
+                    and "heldout_forward_spikes" in batch
+                    and log_rates.shape[1] > target.shape[1]
+                ):
+                    forward = torch.cat(
+                        [batch["heldin_forward_spikes"], batch["heldout_forward_spikes"]],
+                        dim=-1,
+                    )
+                    target = torch.cat([target, forward], dim=1)
+                return target
         return observed
 
     @staticmethod

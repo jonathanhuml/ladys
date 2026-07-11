@@ -52,13 +52,13 @@ from ladys.models import (
     LFADSConfig,
     MINTConfig,
     NDTConfig,
+    STNDTConfig,
 )
 from ladys.models.base import BaseModelConfig
 from ladys.plotting import (
     legend_outside,
     model_color,
     model_label,
-    model_marker,
     plot_context,
     save_figure,
     style_axis,
@@ -78,6 +78,7 @@ MODEL_CONFIGS = {
     "lfads": LFADSConfig,
     "mint": MINTConfig,
     "ndt": NDTConfig,
+    "stndt": STNDTConfig,
 }
 
 
@@ -184,6 +185,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use causal MINT inference on Lorenz. The default Lorenz preset is acausal.",
     )
+    parser.add_argument(
+        "--append-existing",
+        action="store_true",
+        help=(
+            "Load existing rows and per-model traces from --output-dir, then replace only "
+            "the models requested in --models."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -194,8 +203,12 @@ def main() -> None:
     plots_dir = output_dir / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
 
+    rerun_models = {str(model) for model in args.models}
     rows = []
     trace_rows = []
+    if args.append_existing:
+        rows = read_existing_history(output_dir / "lorenz_loss_history.csv", rerun_models)
+        trace_rows = read_existing_rate_traces(output_dir, rerun_models)
     for model_name in args.models:
         if model_name not in MODEL_CONFIGS:
             raise KeyError(f"Unknown model '{model_name}'. Choices: {sorted(MODEL_CONFIGS)}")
@@ -254,11 +267,13 @@ def run_case(
     if model_name == "mint":
         started = time.perf_counter()
         try:
-            fit_mint_lorenz_library(model, train_ds, dataset_config, args.device)
-            rows = rows_for_inference_only_model(
+            rows = rows_for_mint_lorenz_epochs(
                 args=args,
                 model=model,
                 model_name=model_name,
+                train_dataset=train_ds,
+                dataset_config=dataset_config,
+                train_loader=train_loader,
                 test_loader=test_loader,
                 started=started,
             )
@@ -400,6 +415,7 @@ def fit_mint_lorenz_library(
     dataset: PreprocessedDataset,
     dataset_config: LorenzDatasetConfig,
     device: str,
+    max_trials: int | None = None,
 ) -> None:
     if not hasattr(model, "fit_library"):
         raise TypeError(f"{type(model).__name__} does not expose fit_library().")
@@ -407,9 +423,16 @@ def fit_mint_lorenz_library(
     torch_device = torch.device(device)
     model.to(torch_device)
     spikes = getattr(dataset, "raw_spikes", dataset.spikes)
-    library_source = getattr(getattr(model, "config", None), "lorenz_library_source", "smoothed_spikes")
     rates = getattr(dataset, "rates", None)
     latents = getattr(dataset, "latents", None)
+    if max_trials is not None:
+        n_subset = max(1, min(int(max_trials), int(spikes.shape[0])))
+        spikes = spikes[:n_subset]
+        if rates is not None:
+            rates = rates[:n_subset]
+        if latents is not None:
+            latents = latents[:n_subset]
+    library_source = getattr(getattr(model, "config", None), "lorenz_library_source", "smoothed_spikes")
     if library_source == "true_rates" and rates is None:
         raise AttributeError("MINT Lorenz fitting requires true training rates.")
     z_source = rates if library_source == "true_rates" else latents
@@ -443,43 +466,87 @@ def fit_mint_lorenz_library(
     model.fit_library(spike_trials, z_trials, condition)
 
 
-def rows_for_inference_only_model(
+def rows_for_mint_lorenz_epochs(
     args: argparse.Namespace,
     model,
     model_name: str,
+    train_dataset: PreprocessedDataset,
+    dataset_config: LorenzDatasetConfig,
+    train_loader: DataLoader,
     test_loader: DataLoader,
     started: float,
 ) -> list[dict[str, str | int | float]]:
-    test_rate_mse = evaluate_rate_mse(
-        model,
-        test_loader,
-        args.device,
-        bgpfa_infer_steps=args.bgpfa_infer_steps,
-        bgpfa_infer_mc=args.bgpfa_infer_mc,
-        bgpfa_infer_lr=args.bgpfa_infer_lr,
-    )
-    wall_seconds = time.perf_counter() - started
     rows = []
-    for epoch in range(args.epochs):
-        optimizer_seconds = wall_seconds if epoch == 0 else 0.0
+    cumulative_optimizer_seconds = 0.0
+    trial_counts = mint_lorenz_epoch_trial_counts(
+        train_dataset,
+        dataset_config,
+        requested_epochs=args.epochs,
+    )
+    for epoch, trial_count in enumerate(trial_counts, start=1):
+        epoch_started = time.perf_counter()
+        fit_mint_lorenz_library(
+            model,
+            train_dataset,
+            dataset_config,
+            args.device,
+            max_trials=trial_count,
+        )
+        optimizer_seconds = time.perf_counter() - epoch_started
+        cumulative_optimizer_seconds += optimizer_seconds
+        train_loss = evaluate_poisson_nll(
+            model,
+            train_loader,
+            args.device,
+            use_raw_spikes=True,
+        )
+        test_loss = evaluate_poisson_nll(
+            model,
+            test_loader,
+            args.device,
+            use_raw_spikes=True,
+        )
+        test_rate_mse = evaluate_rate_mse(
+            model,
+            test_loader,
+            args.device,
+            use_raw_spikes=True,
+            bgpfa_infer_steps=args.bgpfa_infer_steps,
+            bgpfa_infer_mc=args.bgpfa_infer_mc,
+            bgpfa_infer_lr=args.bgpfa_infer_lr,
+        )
         rows.append(
             {
                 "status": "ok",
                 "model": model_name,
                 "neurons": args.neurons,
                 "seed": args.seed,
-                "epoch": epoch + 1,
+                "epoch": epoch,
                 "optimizer_seconds": optimizer_seconds,
-                "cumulative_optimizer_seconds": wall_seconds,
-                "wall_seconds": wall_seconds,
-                "train_loss": 0.0,
-                "test_loss": 0.0,
+                "cumulative_optimizer_seconds": cumulative_optimizer_seconds,
+                "wall_seconds": time.perf_counter() - started,
+                "train_loss": train_loss,
+                "test_loss": test_loss,
                 "test_rate_mse": test_rate_mse,
-                "objective": getattr(model, "objective", "inference_only"),
+                "objective": "mint_poisson_nll",
                 "error": "",
             }
         )
     return rows
+
+
+def mint_lorenz_epoch_trial_counts(
+    dataset: PreprocessedDataset,
+    dataset_config: LorenzDatasetConfig,
+    requested_epochs: int,
+) -> list[int]:
+    total_trials = len(dataset)
+    if total_trials <= 0:
+        raise ValueError("MINT Lorenz fitting received an empty training split.")
+    n_conditions = min(max(int(dataset_config.num_inits), 1), total_trials)
+    available_passes = int(np.ceil(total_trials / n_conditions))
+    n_epochs = max(1, min(int(requested_epochs), available_passes))
+    return [min(total_trials, n_conditions * epoch) for epoch in range(1, n_epochs + 1)]
 
 
 def build_model_config(
@@ -569,7 +636,7 @@ def build_model_config(
         if args.mint_causal:
             model_data["causal"] = True
         return BaseModelConfig.from_dict(model_data)
-    if model_name in {"lfads", "ndt"}:
+    if model_name in {"lfads", "ndt", "stndt"}:
         if model_data is not None:
             return BaseModelConfig.from_dict(model_data)
         return MODEL_CONFIGS[model_name]()
@@ -624,6 +691,7 @@ def evaluate_rate_mse(
     model,
     loader: DataLoader,
     device: str,
+    use_raw_spikes: bool = False,
     bgpfa_infer_steps: int = 300,
     bgpfa_infer_mc: int = 20,
     bgpfa_infer_lr: float = 1e-1,
@@ -644,7 +712,7 @@ def evaluate_rate_mse(
     torch_device = torch.device(device)
     with torch.no_grad():
         for batch in loader:
-            spikes = batch["spikes"].to(torch_device)
+            spikes = _input_spikes(batch, use_raw_spikes).to(torch_device)
             rates = batch["rates"].to(torch_device)
             pred = model.predict_rates(spikes)
             loss = torch.mean((pred - rates) ** 2)
@@ -653,6 +721,39 @@ def evaluate_rate_mse(
     if not losses:
         return float("nan")
     return float(np.average(losses, weights=weights))
+
+
+def evaluate_poisson_nll(
+    model,
+    loader: DataLoader,
+    device: str,
+    use_raw_spikes: bool = False,
+) -> float:
+    model.eval()
+    losses = []
+    weights = []
+    torch_device = torch.device(device)
+    with torch.no_grad():
+        for batch in loader:
+            spikes = _input_spikes(batch, use_raw_spikes).to(torch_device)
+            target = _target_spikes(batch).to(torch_device)
+            rates = model.predict_rates(spikes).to(dtype=target.dtype).clamp_min(1e-8)
+            loss = rates - target * torch.log(rates) + torch.lgamma(target + 1.0)
+            losses.append(float(torch.mean(loss).detach().cpu()))
+            weights.append(int(target.shape[0]))
+    if not losses:
+        return float("nan")
+    return float(np.average(losses, weights=weights))
+
+
+def _input_spikes(batch: dict, use_raw_spikes: bool) -> torch.Tensor:
+    if use_raw_spikes and "raw_spikes" in batch:
+        return batch["raw_spikes"]
+    return batch["spikes"]
+
+
+def _target_spikes(batch: dict) -> torch.Tensor:
+    return batch["raw_spikes"] if "raw_spikes" in batch else batch["spikes"]
 
 
 def evaluate_bgpfa_rate_mse(
@@ -836,6 +937,36 @@ def write_history(path: Path, rows: list[dict]) -> None:
             writer.writerow(row)
 
 
+def read_existing_history(path: Path, exclude_models: set[str]) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    with path.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        return [
+            row
+            for row in reader
+            if str(row.get("model", "")) not in exclude_models
+        ]
+
+
+def read_existing_rate_traces(output_dir: Path, exclude_models: set[str]) -> list[dict[str, str]]:
+    model_root = output_dir / "models"
+    if not model_root.exists():
+        return []
+
+    rows = []
+    for path in sorted(model_root.glob("*/rate_traces.csv")):
+        model_name = path.parent.name
+        if model_name in exclude_models:
+            continue
+        with path.open(newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                row["model"] = str(row.get("model") or model_name)
+                rows.append(row)
+    return rows
+
+
 def plot_test_rate_mse(rows: list[dict], path: Path, log_y: bool = False) -> None:
     ok_rows = [row for row in rows if row.get("status") == "ok"]
     if not ok_rows:
@@ -896,7 +1027,6 @@ def plot_test_objective(rows: list[dict], path: Path) -> None:
             ax.plot(
                 epochs,
                 test_loss,
-                marker=model_marker(model),
                 color=model_color(model),
                 label="test objective",
             )
@@ -1064,8 +1194,10 @@ def write_group_summary(path: Path, rows: list[dict]) -> None:
                 "## Notes",
                 "",
                 (
-                    "- MINT is inference-only here: fitting builds a trajectory library once, "
-                    "so its metric curve is constant over epochs."
+                    "- MINT is inference-only here: Lorenz epochs progressively add one complete "
+                    "repeat across initial conditions to the trajectory library, capped by the "
+                    "available training repeats. Its train/test objective is the Poisson NLL of "
+                    "the decoded rates, not a gradient-training loss."
                 ),
                 (
                     "- Lorenz MINT defaults to spike-derived smoothed trajectory libraries. "

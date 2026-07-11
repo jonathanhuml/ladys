@@ -266,7 +266,7 @@ def _plot_finite_curve(ax, epochs: np.ndarray, values: np.ndarray, *, label: str
     finite = np.isfinite(values)
     if not bool(np.any(finite)):
         return
-    ax.plot(epochs[finite], values[finite], label=label, linestyle=linestyle, marker="o")
+    ax.plot(epochs[finite], values[finite], label=label, linestyle=linestyle)
 
 
 def _prepare_matplotlib_cache() -> None:

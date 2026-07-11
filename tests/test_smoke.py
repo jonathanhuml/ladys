@@ -1,3 +1,4 @@
+import math
 import importlib.util
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from ladys.metrics import evaluate_model
 from ladys.models import (
     BGPFAConfig,
     CASSMConfig,
+    EnsembleDynamicsModel,
     GPFAConfig,
     KalmanConfig,
     LangevinFlowConfig,
@@ -27,7 +29,9 @@ from ladys.models import (
     NDTConfig,
     PSTHConfig,
     SmoothingConfig,
+    STNDTConfig,
 )
+from ladys.types import ModelOutput, StepResult
 from ladys.training.strategies import build_strategy
 
 
@@ -119,6 +123,20 @@ def test_model_contracts_smoke():
     assert langevin_flow.predict_rates(x).shape == x.shape
     assert langevin_loss.total.ndim == 0
     _assert_all_trainable_parameters_receive_gradients(langevin_flow, langevin_loss.total)
+    langevin_flow.eval()
+    langevin_valid_out = langevin_flow(x)
+    langevin_valid_loss = langevin_flow.loss(batch, langevin_valid_out, epoch=500)
+    assert langevin_valid_loss.named_terms["kl_weight"] == 0.0
+    assert torch.allclose(
+        langevin_valid_loss.total,
+        langevin_valid_loss.named_terms["reconstruction_nll"],
+    )
+
+    optimizer = torch.optim.Adam(langevin_flow.parameters(), lr=1e-3, weight_decay=0.2)
+    langevin_flow.on_before_optimizer_step(optimizer, epoch=0)
+    assert optimizer.param_groups[0]["weight_decay"] == pytest.approx(0.0)
+    langevin_flow.on_before_optimizer_step(optimizer, epoch=250)
+    assert optimizer.param_groups[0]["weight_decay"] == pytest.approx(0.1)
 
     ndt = NDTConfig(
         hidden_size=16,
@@ -136,6 +154,95 @@ def test_model_contracts_smoke():
     assert ndt.predict_rates(x).shape == x.shape
     assert ndt_loss.total.ndim == 0
     _assert_all_trainable_parameters_receive_gradients(ndt, ndt_loss.total)
+
+    stndt = STNDTConfig(
+        hidden_size=16,
+        num_layers=1,
+        num_heads=2,
+        dropout=0.0,
+        dropout_rates=0.0,
+        dropout_embedding=0.0,
+        do_contrast=True,
+        contrast_lambda=0.1,
+    ).build(n_neurons=x.shape[-1], n_time=x.shape[1])
+    stndt_out = stndt(x)
+    stndt_loss = stndt.loss(batch, stndt_out)
+    assert stndt_out.rates.shape == x.shape
+    assert stndt_out.latents.shape[:2] == x.shape[:2]
+    assert stndt.predict_rates(x).shape == x.shape
+    assert stndt_loss.total.ndim == 0
+    _assert_all_trainable_parameters_receive_gradients(stndt, stndt_loss.total)
+
+    stndt_ensemble = STNDTConfig(
+        ensemble=True,
+        ensemble_size=2,
+        hidden_size=16,
+        num_layers=1,
+        num_heads=2,
+        dropout=0.0,
+        dropout_rates=0.0,
+        dropout_embedding=0.0,
+        do_contrast=False,
+    ).build(n_neurons=x.shape[-1], n_time=x.shape[1])
+    stndt_ensemble_out = stndt_ensemble(x)
+    stndt_ensemble_loss = stndt_ensemble.loss(batch, stndt_ensemble_out)
+    assert isinstance(stndt_ensemble, EnsembleDynamicsModel)
+    assert len(stndt_ensemble.members) == 2
+    assert stndt_ensemble_out.rates.shape == x.shape
+    assert stndt_ensemble_out.extras["ensemble_size"] == 2
+    assert stndt_ensemble.predict_rates(x).shape == x.shape
+    assert stndt_ensemble_loss.total.ndim == 0
+    _assert_all_trainable_parameters_receive_gradients(
+        stndt_ensemble,
+        stndt_ensemble_loss.total,
+    )
+
+
+def test_langevin_flow_prediction_samples_average_log_rates():
+    x = torch.zeros(1, 2, 3)
+    model = LangevinFlowConfig(
+        hidden_size=8,
+        transformer_feedforward=16,
+        coordinated_dropout_rate=1.0,
+        prediction_samples=2,
+    ).build(n_neurons=x.shape[-1], n_time=x.shape[1])
+    log_values = iter([math.log(2.0), math.log(8.0)])
+
+    def fake_forward(batch, sample):
+        del sample
+        log_rates = torch.full_like(batch, next(log_values))
+        return ModelOutput(rates=log_rates.exp(), extras={"log_rates": log_rates})
+
+    model._forward = fake_forward
+    rates = model.predict_rates(x)
+    assert torch.allclose(rates, torch.full_like(x, 4.0))
+
+
+def test_gradient_strategy_reduce_on_plateau_scheduler():
+    x = torch.zeros(1, 2, 3)
+    config = LangevinFlowConfig(
+        hidden_size=8,
+        transformer_feedforward=16,
+        coordinated_dropout_rate=1.0,
+        optimization={
+            "name": "gradient",
+            "optimizer": "Adam",
+            "lr": 1e-3,
+            "lr_scheduler": "ReduceLROnPlateau",
+            "scheduler_factor": 0.5,
+            "scheduler_patience": 0,
+            "scheduler_min_lr": 1e-5,
+        },
+    )
+    model = config.build(n_neurons=x.shape[-1], n_time=x.shape[1])
+    strategy = build_strategy(config.optimization)
+    strategy.setup(model)
+
+    assert strategy.optimizer is not None
+    assert strategy.optimizer.param_groups[0]["lr"] == pytest.approx(1e-3)
+    strategy.on_validation_end(model, 0, StepResult(loss=1.0, batch_size=1))
+    strategy.on_validation_end(model, 1, StepResult(loss=1.1, batch_size=1))
+    assert strategy.optimizer.param_groups[0]["lr"] == pytest.approx(5e-4)
 
 
 def test_bgpfa_config_uses_differentiable_full_batch_strategy():
@@ -344,6 +451,57 @@ def test_langevin_flow_nlb_adapter_scores_direct_heldout_slice(tmp_path: Path):
         n_time=train_ds.spikes.shape[1],
         output_neurons=train_ds.spikes.shape[-1] + train_ds.raw_spikes.shape[-1],
     )
+    batch = next(iter(DataLoader(train_ds, batch_size=2)))
+    output = model(batch["spikes"])
+    loss = model.loss(batch, output)
+    assert output.rates.shape[-1] == train_heldin.shape[-1] + train_heldout.shape[-1]
+    assert loss.total.ndim == 0
+
+    result = evaluate_model(
+        model,
+        DataLoader(valid_ds, batch_size=2),
+        train_loader=DataLoader(train_ds, batch_size=5),
+    )
+
+    assert result.predictions["rates"].shape == eval_heldout.shape
+    assert result.targets["spikes"].shape == eval_heldout.shape
+    assert "co_bps" in result.metrics
+    assert np.isfinite(result.metrics["co_bps"])
+
+
+def test_stndt_nlb_adapter_scores_direct_heldout_slice(tmp_path: Path):
+    path = tmp_path / "stndt_nlb.h5"
+    rng = np.random.default_rng(0)
+    train_heldin = rng.poisson(0.5, size=(5, 8, 4)).astype(np.float32)
+    train_heldout = (train_heldin[..., :2] + 0.1).astype(np.float32)
+    eval_heldin = rng.poisson(0.5, size=(2, 8, 4)).astype(np.float32)
+    eval_heldout = (eval_heldin[..., :2] + 0.1).astype(np.float32)
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset("train_spikes_heldin", data=train_heldin)
+        handle.create_dataset("train_spikes_heldout", data=train_heldout)
+        handle.create_dataset("eval_spikes_heldin", data=eval_heldin)
+        handle.create_dataset("eval_spikes_heldout", data=eval_heldout)
+
+    config = NLBDatasetConfig(name="mc_maze", data_path=str(path), bin_size_ms=5)
+    train_ds, valid_ds = NLBDataset.make_splits(config)
+    data = type(
+        "Data",
+        (),
+        {
+            "n_neurons": train_ds.spikes.shape[-1],
+            "n_time": train_ds.spikes.shape[1],
+            "train_dataset": train_ds,
+        },
+    )()
+    model = STNDTConfig(
+        hidden_size=16,
+        num_layers=1,
+        num_heads=2,
+        dropout=0.0,
+        dropout_rates=0.0,
+        dropout_embedding=0.0,
+        do_contrast=False,
+    ).build_from_data(data)
     batch = next(iter(DataLoader(train_ds, batch_size=2)))
     output = model(batch["spikes"])
     loss = model.loss(batch, output)
