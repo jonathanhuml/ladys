@@ -42,6 +42,10 @@ def test_experiment_writes_run_artifacts(tmp_path: Path):
     assert result.predictions_path is not None
     assert result.predictions_path.exists()
     assert result.report_path.exists()
+    assert (result.run_dir / "plots" / "train_test_objective_curves.png").exists()
+    assert (result.run_dir / "plots" / "test_objective_curves.png").exists()
+    assert result.plot_paths["train_test_objective"].exists()
+    assert result.plot_paths["test_objective"].exists()
     assert "co_bps" in result.metrics
     assert "rate_mse" in result.metrics
 
@@ -119,6 +123,7 @@ def test_cli_lists_models(capsys):
     assert "lfads" in output
     assert "ndt" in output
     assert "psth" in output
+    assert "slds" in output
     assert "smoothing" in output
 
 

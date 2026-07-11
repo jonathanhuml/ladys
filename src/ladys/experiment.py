@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import csv
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 import json
 import math
+import os
 from pathlib import Path
 import re
+import tempfile
 from typing import Any
 
 import numpy as np
@@ -35,6 +37,7 @@ class ExperimentResult:
     model_path: Path
     report_path: Path
     predictions_path: Path | None = None
+    plot_paths: dict[str, Path] = field(default_factory=dict)
 
 
 class Experiment:
@@ -130,7 +133,8 @@ class Experiment:
         torch.save(model.state_dict(), model_path)
         if predictions_path is not None:
             _write_predictions(predictions_path, evaluation)
-        _write_report(report_path, self.config, history, evaluation.metrics)
+        plot_paths = _write_history_plots(run_dir, history)
+        _write_report(report_path, self.config, history, evaluation.metrics, plot_paths)
 
         return ExperimentResult(
             run_dir=run_dir,
@@ -142,6 +146,7 @@ class Experiment:
             model_path=model_path,
             report_path=report_path,
             predictions_path=predictions_path,
+            plot_paths=plot_paths,
         )
 
 
@@ -197,6 +202,79 @@ def _write_history(path: Path, history: list[EpochReport]) -> None:
             )
 
 
+def _write_history_plots(run_dir: Path, history: list[EpochReport]) -> dict[str, Path]:
+    if not history:
+        return {}
+
+    _prepare_matplotlib_cache()
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+
+    from ladys.plotting import plot_context, save_figure, style_axis
+
+    plots_dir = run_dir / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    epochs = np.asarray([report.epoch + 1 for report in history], dtype=np.int64)
+    train_loss = np.asarray([report.train.loss for report in history], dtype=np.float64)
+    valid_loss = np.asarray(
+        [
+            float("nan") if report.valid is None else report.valid.loss
+            for report in history
+        ],
+        dtype=np.float64,
+    )
+
+    plot_paths: dict[str, Path] = {}
+    train_test_path = plots_dir / "train_test_objective_curves.png"
+    with plot_context(nrows=1, ncols=1, rel_width=0.86, height_scale=1.35):
+        fig, ax = plt.subplots()
+        _plot_finite_curve(ax, epochs, train_loss, label="train", linestyle="--")
+        _plot_finite_curve(ax, epochs, valid_loss, label="test", linestyle="-")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Loss")
+        ax.set_title("Train and Test Objective")
+        style_axis(ax)
+        ax.legend()
+        save_figure(fig, train_test_path)
+        plt.close(fig)
+    plot_paths["train_test_objective"] = train_test_path
+
+    if np.isfinite(valid_loss).any():
+        test_path = plots_dir / "test_objective_curves.png"
+        with plot_context(nrows=1, ncols=1, rel_width=0.86, height_scale=1.35):
+            fig, ax = plt.subplots()
+            _plot_finite_curve(ax, epochs, valid_loss, label="test", linestyle="-")
+            ax.set_xlabel("Epoch")
+            ax.set_ylabel("Loss")
+            ax.set_title("Test Objective")
+            style_axis(ax)
+            ax.legend()
+            save_figure(fig, test_path)
+            plt.close(fig)
+        plot_paths["test_objective"] = test_path
+
+    return plot_paths
+
+
+def _plot_finite_curve(ax, epochs: np.ndarray, values: np.ndarray, *, label: str, linestyle: str) -> None:
+    finite = np.isfinite(values)
+    if not bool(np.any(finite)):
+        return
+    ax.plot(epochs[finite], values[finite], label=label, linestyle=linestyle, marker="o")
+
+
+def _prepare_matplotlib_cache() -> None:
+    cache_root = Path(tempfile.gettempdir())
+    mpl_dir = cache_root / "ladys_matplotlib"
+    xdg_dir = cache_root / "ladys_cache"
+    mpl_dir.mkdir(parents=True, exist_ok=True)
+    xdg_dir.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("MPLCONFIGDIR", str(mpl_dir))
+    os.environ.setdefault("XDG_CACHE_HOME", str(xdg_dir))
+
+
 def _write_predictions(path: Path, evaluation: EvaluationResult) -> None:
     arrays = {}
     arrays.update({f"pred_{key}": value for key, value in evaluation.predictions.items()})
@@ -209,6 +287,7 @@ def _write_report(
     config: ExperimentConfig,
     history: list[EpochReport],
     metrics: dict[str, float],
+    plot_paths: dict[str, Path] | None = None,
 ) -> None:
     final = history[-1] if history else None
     lines = [
@@ -242,6 +321,11 @@ def _write_report(
             lines.append(f"- `{key}`: `{display}`")
     else:
         lines.append("No compatible evaluation metrics were available.")
+
+    if plot_paths:
+        lines.extend(["", "## Plots", ""])
+        for plot_path in plot_paths.values():
+            lines.append(f"- `{plot_path.relative_to(path.parent)}`")
 
     path.write_text("\n".join(lines) + "\n")
 

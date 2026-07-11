@@ -69,6 +69,9 @@
   <a href="../psth/" class="dropdown-item">PSTH</a>
 </li>
 <li>
+  <a href="../slds/" class="dropdown-item">SLDS</a>
+</li>
+<li>
   <a href="../smoothing/" class="dropdown-item">Smoothing</a>
 </li>
     </ul>
@@ -204,8 +207,9 @@ epoch curves repeat the same decoded rates so MINT can be plotted alongside
 trainable methods without implying a backward pass or EM loop.</p>
 <p>For NLB tasks, <code>dataset</code> selects a task-specific trajectory builder.
 <code>area2_bump</code> and <code>mc_maze</code> can build libraries from DANDI NWBs, <code>mc_rtt</code>
-uses the downloaded MINT MATLAB data by default, and <code>dmfc_rsg</code> uses the
-prepared NLB H5 tensors. The NLB runner writes EvalAI-style held-out rate
+uses the downloaded MINT MATLAB data by default, and <code>dmfc_rsg</code> can use
+DANDI/NWB trials, prepared NLB H5 tensors, or an experimental LFADS-derived
+trajectory library. The NLB runner writes EvalAI-style held-out rate
 submissions and reports co-smoothing bits/spike.</p>
 <p>For the synthetic Lorenz task, LaDyS builds the MINT trajectory library from
 repeated training trials. The default <code>lorenz_library_source="smoothed_spikes"</code>
@@ -241,7 +245,7 @@ seen trajectories rather than interpolation to unseen trajectories.</p>
 </tr>
 <tr>
 <td><code>train_source</code></td>
-<td><code>Literal['h5', 'mat', 'nwb']</code></td>
+<td><code>Literal['h5', 'lfads', 'mat', 'nwb']</code></td>
 <td><code>'nwb'</code></td>
 </tr>
 <tr>
@@ -308,6 +312,56 @@ seen trajectories rather than interpolation to unseen trajectories.</p>
 <td><code>causal</code></td>
 <td><code>Optional[bool]</code></td>
 <td><code>None</code></td>
+</tr>
+<tr>
+<td><code>lfads_epochs</code></td>
+<td><code>int</code></td>
+<td><code>25</code></td>
+</tr>
+<tr>
+<td><code>lfads_batch_size</code></td>
+<td><code>int</code></td>
+<td><code>16</code></td>
+</tr>
+<tr>
+<td><code>lfads_train_bin_size</code></td>
+<td><code>int</code></td>
+<td><code>1</code></td>
+</tr>
+<tr>
+<td><code>lfads_lr</code></td>
+<td><code>float</code></td>
+<td><code>0.001</code></td>
+</tr>
+<tr>
+<td><code>lfads_generator_dim</code></td>
+<td><code>int</code></td>
+<td><code>64</code></td>
+</tr>
+<tr>
+<td><code>lfads_factor_dim</code></td>
+<td><code>int</code></td>
+<td><code>20</code></td>
+</tr>
+<tr>
+<td><code>lfads_inferred_input_dim</code></td>
+<td><code>int</code></td>
+<td><code>2</code></td>
+</tr>
+<tr>
+<td><code>lfads_encoder_dim</code></td>
+<td><code>int</code></td>
+<td><code>64</code></td>
+</tr>
+<tr>
+<td><code>lfads_controller_dim</code></td>
+<td><code>int</code></td>
+<td><code>64</code></td>
+</tr>
+<tr>
+<td><code>lfads_keep_prob</code></td>
+<td><code>float</code></td>
+<td><code>0.95</code></td>
 </tr>
 <tr>
 <td><code>optimization</code></td>

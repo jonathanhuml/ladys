@@ -1,0 +1,26 @@
+name: slds
+objective: slds_variational_em
+states: 4
+latent_dim: 8
+transition_stickiness: 0.95
+dynamics_l2_A: 1.0e-4
+dynamics_l2_b: 1.0e-6
+dynamics_var_floor: 1.0e-4
+emission_l2: 1.0e-5
+emission_lr: 1.0
+emission_mstep_steps: 20
+emission_batch_size: 16384
+emission_max_points: 200000
+em_alpha: 0.2
+local_inference_iters: 2
+continuous_steps: 25
+continuous_lr: 1.0
+continuous_tolerance: 1.0e-4
+latent_l2: 0.0
+latent_clip: null
+init_seed: 0
+init_max_points: 50000
+init_em_iters: 50
+prediction_floor: 1.0e-9
+optimization:
+  name: em

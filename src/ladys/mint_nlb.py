@@ -29,6 +29,7 @@ from ladys.models.mint import (
     heldout_count,
     observed_neuron_mask,
 )
+from ladys.models.lfads import LFADSConfig
 from ladys.nlb_eval import score_count_predictions
 
 
@@ -86,8 +87,12 @@ def run_mint_nlb(config: ExperimentConfig) -> MINTNLBResult:
     train_S, train_Z, condition = _load_training_data(model, train_split, config, device)
     model.fit_library(train_S, train_Z, condition)
 
-    if dataset == "dmfc_rsg" and cfg.train_source == "h5":
+    if dataset == "dmfc_rsg" and cfg.train_source in {"h5", "lfads"}:
         heldin = _load_h5_eval_heldin(_experiment_h5_path(config), dataset)
+        keep = np.ones(heldin.shape[1], dtype=bool)
+    elif dataset == "dmfc_rsg":
+        test_nwb = _test_nwb_path(dataset, Path(cfg.nwb_root))
+        heldin = _load_dmfc_eval_heldin_nwb(test_nwb)
         keep = np.ones(heldin.shape[1], dtype=bool)
     else:
         test_nwb = _test_nwb_path(dataset, Path(cfg.nwb_root))
@@ -140,8 +145,12 @@ def run_mint_nlb(config: ExperimentConfig) -> MINTNLBResult:
 def _apply_mint_overrides(dataset: str, hyperparams, cfg: MINTConfig) -> None:
     if cfg.nlb_neural_state_defaults:
         hyperparams.causal = False
-        hyperparams.window_length = 500
-        if dataset == "dmfc_rsg" and cfg.train_source == "h5":
+        if dataset == "dmfc_rsg" and cfg.train_source == "nwb":
+            hyperparams.window_length = 1500
+            hyperparams.Delta = 20
+        else:
+            hyperparams.window_length = 500
+        if dataset == "dmfc_rsg" and cfg.train_source in {"h5", "lfads"}:
             hyperparams.window_length = 100
             hyperparams.Delta = 4
         hyperparams.n_candidates = 5 if dataset == "mc_rtt" else 2
@@ -161,7 +170,7 @@ def _apply_mint_overrides(dataset: str, hyperparams, cfg: MINTConfig) -> None:
 
 
 def _apply_source_overrides(model: MINT, cfg: MINTConfig) -> None:
-    if cfg.dataset == "dmfc_rsg" and cfg.train_source == "h5":
+    if cfg.dataset == "dmfc_rsg" and cfg.train_source in {"h5", "lfads"}:
         model.settings.Ts = 0.005
         model.settings.trial_alignment = range(0, 300)
         model.settings.test_alignment = range(0, 300)
@@ -169,6 +178,8 @@ def _apply_source_overrides(model: MINT, cfg: MINTConfig) -> None:
         model.hyperparams.sigma = 14
         model.hyperparams.Delta = 4
         model.hyperparams.window_length = 100
+    if cfg.dataset == "dmfc_rsg" and cfg.train_source == "lfads":
+        model.settings.library_rate_source = "lfads"
 
 
 def _load_training_data(model: MINT, train_split: str, config: ExperimentConfig, device: torch.device):
@@ -178,6 +189,8 @@ def _load_training_data(model: MINT, train_split: str, config: ExperimentConfig,
     dataset = cfg.dataset
     if cfg.train_source == "h5":
         return _load_h5_training_data(_experiment_h5_path(config), dataset, device)
+    if cfg.train_source == "lfads":
+        return _load_lfads_training_data(model, train_split, config, device)
     if cfg.train_source == "mat":
         S, Z, condition, _ = get_trial_data(model.settings, train_split, None, device)
         return S, Z, condition
@@ -186,6 +199,102 @@ def _load_training_data(model: MINT, train_split: str, config: ExperimentConfig,
     train_nwb = default_train_nwb_path(dataset, Path(cfg.nwb_root))
     S, Z, condition, _ = get_nwb_trial_data(model.settings, train_split, train_nwb, None, device)
     return S, Z, condition
+
+
+def _load_lfads_training_data(
+    model: MINT,
+    train_split: str,
+    config: ExperimentConfig,
+    device: torch.device,
+):
+    cfg = config.model
+    if not isinstance(cfg, MINTConfig):
+        raise TypeError(f"Expected MINTConfig, got {type(cfg).__name__}.")
+    if cfg.dataset != "dmfc_rsg":
+        raise ValueError("MINT train_source='lfads' is currently implemented for dmfc_rsg only.")
+
+    del train_split
+    raw_S, Z, condition = _load_h5_training_data(_experiment_h5_path(config), cfg.dataset, device)
+    rate_S = _fit_lfads_rate_trials(raw_S, model, cfg, device)
+    return rate_S, Z, condition
+
+
+def _fit_lfads_rate_trials(
+    S: list[torch.Tensor],
+    mint_model: MINT,
+    cfg: MINTConfig,
+    device: torch.device,
+) -> list[torch.Tensor]:
+    if not S:
+        raise ValueError("LFADS rate estimation received no MINT training trials.")
+
+    n_neurons, n_time = S[0].shape
+    train_bin_size = max(1, int(cfg.lfads_train_bin_size))
+    if train_bin_size > 1:
+        binned_trials = [bin_data(trial, train_bin_size, "sum").T for trial in S]
+        lfads_dt = mint_model.settings.Ts * train_bin_size
+    else:
+        binned_trials = [trial.T for trial in S]
+        lfads_dt = mint_model.settings.Ts
+    spikes = torch.stack([trial.to(dtype=torch.float32) for trial in binned_trials], dim=0)
+    spikes = torch.nan_to_num(spikes, nan=0.0, posinf=0.0, neginf=0.0).to(device)
+
+    torch.manual_seed(0)
+    lfads_cfg = LFADSConfig(
+        generator_dim=cfg.lfads_generator_dim,
+        factor_dim=cfg.lfads_factor_dim,
+        inferred_input_dim=cfg.lfads_inferred_input_dim,
+        g0_encoder_dim=cfg.lfads_encoder_dim,
+        controller_encoder_dim=cfg.lfads_encoder_dim,
+        controller_dim=cfg.lfads_controller_dim,
+        keep_prob=cfg.lfads_keep_prob,
+        dt=lfads_dt,
+        optimization={"name": "gradient", "optimizer": "Adam", "lr": cfg.lfads_lr},
+    )
+    lfads = lfads_cfg.build(n_neurons=n_neurons, n_time=spikes.shape[1]).to(device)
+    optimizer = torch.optim.Adam(lfads.parameters(), lr=cfg.lfads_lr)
+    batch_size = max(1, int(cfg.lfads_batch_size))
+    dt = torch.as_tensor(lfads_dt, dtype=torch.float32, device=device)
+
+    for epoch in range(max(0, int(cfg.lfads_epochs))):
+        lfads.train()
+        permutation = torch.randperm(spikes.shape[0], device=device)
+        epoch_loss = 0.0
+        epoch_items = 0
+        for start in range(0, spikes.shape[0], batch_size):
+            idx = permutation[start : start + batch_size]
+            batch_x = spikes.index_select(0, idx)
+            batch = {
+                "spikes": batch_x,
+                "dt": dt.expand(batch_x.shape[0]),
+            }
+            output = lfads(batch_x)
+            loss = lfads.loss(batch, output, epoch=epoch)
+            optimizer.zero_grad(set_to_none=True)
+            loss.total.backward()
+            torch.nn.utils.clip_grad_norm_(lfads.parameters(), 200.0)
+            optimizer.step()
+            epoch_loss += float(loss.total.detach().cpu()) * int(batch_x.shape[0])
+            epoch_items += int(batch_x.shape[0])
+        if epoch_items:
+            mean_loss = epoch_loss / epoch_items
+            print(f"LFADS library epoch {epoch + 1}/{cfg.lfads_epochs}: loss={mean_loss:.6g}", flush=True)
+
+    lfads.eval()
+    rate_batches = []
+    with torch.no_grad():
+        for start in range(0, spikes.shape[0], batch_size):
+            batch_x = spikes[start : start + batch_size]
+            rate_batches.append(lfads.predict_rates(batch_x).detach().cpu())
+    rates_hz = torch.cat(rate_batches, dim=0)
+    expected_counts = rates_hz * float(mint_model.settings.Ts * mint_model.hyperparams.Delta)
+    if train_bin_size > 1:
+        expected_counts = expected_counts.repeat_interleave(train_bin_size, dim=1)
+        expected_counts = expected_counts[:, :n_time]
+    return [
+        expected_counts[trial].T.to(dtype=TORCH_DTYPE, device=device).contiguous()
+        for trial in range(expected_counts.shape[0])
+    ]
 
 
 def _experiment_h5_path(config: ExperimentConfig) -> Path:
@@ -251,6 +360,25 @@ def _load_h5_eval_heldin(path: Path, dataset: str) -> np.ndarray:
     with h5py.File(path, "r") as handle:
         group = _select_nlb_h5_group(handle, dataset)
         return np.asarray(group["eval_spikes_heldin"], dtype=np.float32)
+
+
+def _load_dmfc_eval_heldin_nwb(nwb_path: Path) -> np.ndarray:
+    from nlb_tools.make_tensors import make_eval_input_tensors
+    from nlb_tools.nwb_interface import NWBDataset
+
+    ds = NWBDataset(nwb_path)
+    data = make_eval_input_tensors(
+        ds,
+        dataset_name="dmfc_rsg",
+        trial_split="test",
+        save_file=False,
+        return_dict=True,
+        seed=0,
+    )
+    heldin = np.asarray(data["eval_spikes_heldin"], dtype=np.float32)
+    if heldin.shape[1] != 1500:
+        raise ValueError(f"dmfc_rsg test NWB produced {heldin.shape[1]} eval samples, expected 1500.")
+    return heldin
 
 
 def _buffered_alignment(settings, hyperparams) -> tuple[np.ndarray, np.ndarray]:
@@ -392,6 +520,18 @@ def _write_run_artifacts(
         "n_train_units": int(n_train_units),
         "n_eval_trials": int(n_eval_trials),
     }
+    if isinstance(config.model, MINTConfig) and config.model.train_source == "lfads":
+        metrics.update(
+            {
+                "lfads_epochs": int(config.model.lfads_epochs),
+                "lfads_batch_size": int(config.model.lfads_batch_size),
+                "lfads_train_bin_size": int(config.model.lfads_train_bin_size),
+                "lfads_lr": float(config.model.lfads_lr),
+                "lfads_generator_dim": int(config.model.lfads_generator_dim),
+                "lfads_factor_dim": int(config.model.lfads_factor_dim),
+                "lfads_keep_prob": float(config.model.lfads_keep_prob),
+            }
+        )
     _write_json(config_path, experiment_config_to_dict(config))
     _write_json(metrics_path, metrics)
     np.savez_compressed(

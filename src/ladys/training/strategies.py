@@ -354,8 +354,11 @@ class EMStrategy(OptimizationStrategy):
     name = "em"
 
     def setup(self, model: BaseDynamicsModel) -> None:
-        if not hasattr(model, "fit_em_epoch"):
-            raise TypeError(f"{type(model).__name__} does not implement fit_em_epoch().")
+        if not hasattr(model, "fit_em_epoch") and not hasattr(model, "fit_em_epoch_from_loader"):
+            raise TypeError(
+                f"{type(model).__name__} does not implement fit_em_epoch() or "
+                "fit_em_epoch_from_loader()."
+            )
 
     def train_epoch(
         self,
@@ -364,6 +367,10 @@ class EMStrategy(OptimizationStrategy):
         epoch: int,
         device: torch.device | str,
     ) -> list[StepResult]:
+        if hasattr(model, "fit_em_epoch_from_loader"):
+            loss = model.fit_em_epoch_from_loader(loader, device=device, epoch=epoch)
+            return [StepResult.from_loss(loss, batch_size=_loader_batch_size(loader))]
+
         batches = []
         for batch in loader:
             batch = move_batch_to_device(batch, device)
@@ -438,3 +445,13 @@ def _concat_batches(batches: list[Tensor | dict[str, Tensor]]) -> Tensor | dict[
                 out[key] = torch.cat([batch[key] for batch in batches], dim=0)
         return out
     raise TypeError(f"Unsupported batch type {type(first).__name__}.")
+
+
+def _loader_batch_size(loader: Iterable) -> int:
+    dataset = getattr(loader, "dataset", None)
+    if dataset is not None:
+        try:
+            return int(len(dataset))
+        except TypeError:
+            pass
+    return 0

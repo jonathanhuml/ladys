@@ -10,6 +10,7 @@ from ladys.models.kalman import Kalman, KalmanConfig
 from ladys.models.lfads import LFADS, LFADSConfig
 from ladys.models.mint import MINT, MINTConfig
 from ladys.models.ndt import NDT, NDTConfig
+from ladys.models.slds import SLDS, SLDSConfig
 
 __all__ = [
     "BaseDynamicsModel",
@@ -35,4 +36,6 @@ __all__ = [
     "MINTConfig",
     "NDT",
     "NDTConfig",
+    "SLDS",
+    "SLDSConfig",
 ]

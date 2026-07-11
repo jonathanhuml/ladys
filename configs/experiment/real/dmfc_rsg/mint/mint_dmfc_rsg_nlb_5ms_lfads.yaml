@@ -9,19 +9,29 @@ model:
   name: mint
   objective: mint_likelihood_recursion
   dataset: dmfc_rsg
-  train_source: nwb
+  train_source: lfads
   train_split: trainval
   nlb_neural_state_defaults: true
   nwb_root: ../mint/data/dandi
   mat_data_root: ../mint/data
   target_h5: ../mint/data/eval_data_test.h5
   eval_bin_size_ms: 5
-  n_candidates: 2
-  window_length: 1500
-  delta: 20
-  sigma: 55
-  min_rate: 0.1
-  causal: false
+  n_candidates: null
+  window_length: null
+  delta: null
+  sigma: null
+  min_rate: null
+  causal: null
+  lfads_epochs: 100
+  lfads_batch_size: 256
+  lfads_train_bin_size: 4
+  lfads_lr: 0.001
+  lfads_generator_dim: 32
+  lfads_factor_dim: 16
+  lfads_inferred_input_dim: 2
+  lfads_encoder_dim: 32
+  lfads_controller_dim: 32
+  lfads_keep_prob: 1.0
   optimization:
     name: inference_only
 
@@ -35,5 +45,5 @@ trainer:
 
 experiment:
   output_dir: runs
-  run_name: mint_dmfc_rsg_nlb_5ms_paper_dmfc
+  run_name: mint_dmfc_rsg_nlb_5ms_lfads_100ep
   save_predictions: true

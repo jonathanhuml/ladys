@@ -15,5 +15,15 @@ delta: null
 sigma: null
 min_rate: null
 causal: null
+lfads_epochs: 25
+lfads_batch_size: 16
+lfads_train_bin_size: 1
+lfads_lr: 0.001
+lfads_generator_dim: 64
+lfads_factor_dim: 20
+lfads_inferred_input_dim: 2
+lfads_encoder_dim: 64
+lfads_controller_dim: 64
+lfads_keep_prob: 0.95
 optimization:
   name: inference_only

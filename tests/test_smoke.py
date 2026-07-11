@@ -25,6 +25,7 @@ from ladys.models import (
     LFADSConfig,
     NDTConfig,
     PSTHConfig,
+    SLDSConfig,
     SmoothingConfig,
 )
 from ladys.training.strategies import build_strategy
@@ -360,6 +361,58 @@ def test_psth_nlb_adapter_uses_training_condition_psths(tmp_path: Path):
 
     assert np.allclose(result.predictions["rates"], eval_heldout)
     assert result.metrics["co_bps"] > 0.0
+
+
+def test_slds_em_strategy_and_nlb_adapter(tmp_path: Path):
+    path = tmp_path / "slds_nlb.h5"
+    rng = np.random.default_rng(0)
+    train_heldin = rng.poisson(0.5, size=(6, 5, 3)).astype(np.float32)
+    train_heldout = rng.poisson(0.3, size=(6, 5, 2)).astype(np.float32)
+    eval_heldin = rng.poisson(0.5, size=(4, 5, 3)).astype(np.float32)
+    eval_heldout = rng.poisson(0.3, size=(4, 5, 2)).astype(np.float32)
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset("train_spikes_heldin", data=train_heldin)
+        handle.create_dataset("train_spikes_heldout", data=train_heldout)
+        handle.create_dataset("eval_spikes_heldin", data=eval_heldin)
+        handle.create_dataset("eval_spikes_heldout", data=eval_heldout)
+
+    config = NLBDatasetConfig(name="mc_maze", data_path=str(path), bin_size_ms=5)
+    train_ds, valid_ds = NLBDataset.make_splits(config)
+    model_config = SLDSConfig(
+        states=2,
+        latent_dim=2,
+        local_inference_iters=1,
+        continuous_steps=2,
+        emission_mstep_steps=1,
+        emission_batch_size=16,
+    )
+    model = model_config.build(
+        n_neurons=train_ds.spikes.shape[-1],
+        n_time=train_ds.spikes.shape[1],
+    )
+    strategy = build_strategy(model_config.optimization)
+    strategy.setup(model)
+    result = strategy.train_epoch(
+        model,
+        DataLoader(train_ds, batch_size=3, shuffle=False),
+        epoch=0,
+        device="cpu",
+    )
+
+    assert result[0].batch_size == len(train_ds)
+    assert model.initialized
+    assert model.observation_dim == train_heldin.shape[-1] + train_heldout.shape[-1]
+
+    evaluation = evaluate_model(
+        model,
+        DataLoader(valid_ds, batch_size=2),
+        train_loader=DataLoader(train_ds, batch_size=3, shuffle=False),
+    )
+
+    assert evaluation.predictions["rates"].shape == eval_heldout.shape
+    assert evaluation.targets["spikes"].shape == eval_heldout.shape
+    assert "co_bps" in evaluation.metrics
+    assert np.isfinite(evaluation.metrics["co_bps"])
 
 
 def test_metrics_skip_incompatible_nlb_shapes():

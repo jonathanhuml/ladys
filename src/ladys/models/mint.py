@@ -50,6 +50,10 @@ class Settings:
     test_alignment: range = range(0)
     CondInfo: Optional[object] = None
     lorenz_library_source: str = "smoothed_spikes"
+    library_rate_source: str = "spikes"
+    dmfc_event_offsets: Optional[Dict[str, np.ndarray]] = None
+    dmfc_condition_rows: Optional[np.ndarray] = None
+    dmfc_section_ids: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -70,6 +74,9 @@ class HyperParams:
     n_neural_dims: Optional[int] = None
     n_cond_dims: Optional[int] = None
     n_trial_dims: Optional[int] = 1
+    dmfc_section_count: int = 0
+    dmfc_section_ridge: float = 100.0
+    dmfc_set_go_weight: float = 4.0
 
 
 @dataclass
@@ -178,8 +185,9 @@ class MINTConfig(BaseModelConfig):
 
     For NLB tasks, `dataset` selects a task-specific trajectory builder.
     `area2_bump` and `mc_maze` can build libraries from DANDI NWBs, `mc_rtt`
-    uses the downloaded MINT MATLAB data by default, and `dmfc_rsg` uses the
-    prepared NLB H5 tensors. The NLB runner writes EvalAI-style held-out rate
+    uses the downloaded MINT MATLAB data by default, and `dmfc_rsg` can use
+    DANDI/NWB trials, prepared NLB H5 tensors, or an experimental LFADS-derived
+    trajectory library. The NLB runner writes EvalAI-style held-out rate
     submissions and reports co-smoothing bits/spike.
 
     For the synthetic Lorenz task, LaDyS builds the MINT trajectory library from
@@ -195,7 +203,7 @@ class MINTConfig(BaseModelConfig):
     name: Literal["mint"] = "mint"
     objective: str = "mint_likelihood_recursion"
     dataset: Literal["area2_bump", "dmfc_rsg", "mc_maze", "mc_rtt", "lorenz"] = "mc_maze"
-    train_source: Literal["h5", "mat", "nwb"] = "nwb"
+    train_source: Literal["h5", "lfads", "mat", "nwb"] = "nwb"
     train_split: Literal["auto", "train", "trainval"] = "trainval"
     nlb_neural_state_defaults: bool = True
     nwb_root: str = "data/real/nlb/dandi"
@@ -209,6 +217,16 @@ class MINTConfig(BaseModelConfig):
     sigma: Optional[int] = None
     min_rate: Optional[float] = None
     causal: Optional[bool] = None
+    lfads_epochs: int = 25
+    lfads_batch_size: int = 16
+    lfads_train_bin_size: int = 1
+    lfads_lr: float = 1e-3
+    lfads_generator_dim: int = 64
+    lfads_factor_dim: int = 20
+    lfads_inferred_input_dim: int = 2
+    lfads_encoder_dim: int = 64
+    lfads_controller_dim: int = 64
+    lfads_keep_prob: float = 0.95
     optimization: OptimizationConfig = Field(
         default_factory=lambda: OptimizationConfig(name="inference_only")
     )
@@ -287,6 +305,7 @@ class MINT(BaseDynamicsModel):
         self.Omega_plus: List[Tensor] = []
         self.Phi_plus: List[Tensor] = []
         self.behavior_labels: List[str] = []
+        self.library_ids: Optional[Tensor] = None
         self.V: Optional[Tensor] = None
         self.first_idx0: Optional[Tensor] = None
         self.last_idx0: Optional[Tensor] = None
@@ -355,9 +374,17 @@ class MINT(BaseDynamicsModel):
         """Build MINT trajectory libraries from spike and behavior/rate trials."""
 
         self._refresh_runtime_params()
-        self.Omega_plus, self.Phi_plus, self.behavior_labels = fit_trajectories(
-            S, Z, condition, self.settings, self.hyperparams
-        )
+        fit_result = fit_trajectories(S, Z, condition, self.settings, self.hyperparams)
+        if len(fit_result) == 4:
+            self.Omega_plus, self.Phi_plus, self.behavior_labels, library_ids = fit_result
+            if len(library_ids) != len(self.Omega_plus):
+                raise ValueError(
+                    f"MINT got {len(library_ids)} library ids for {len(self.Omega_plus)} trajectories."
+                )
+            self.library_ids = torch.as_tensor(library_ids, dtype=torch.long, device=self.device)
+        else:
+            self.Omega_plus, self.Phi_plus, self.behavior_labels = fit_result
+            self.library_ids = None
         lambdas = [bin_data(omega, self.Delta, "mean") for omega in self.Omega_plus]
         v_cells = [get_rate_indices(lam, self.lambda_range, self.n_rates) for lam in lambdas]
 
@@ -553,6 +580,13 @@ class MINT(BaseDynamicsModel):
                 torch.full((1, z.shape[1]), alpha, dtype=TORCH_DTYPE, device=self.device),
             )
 
+        if self.library_ids is not None:
+            library_interp = self._estimate_states_across_libraries(
+                Q, S_curr, f, likelihood_neuron_mask, K_lengths
+            )
+            if library_interp is not None:
+                return library_interp
+
         candidates = []
         states_to_exclude = []
         conds_to_exclude: List[int] = []
@@ -598,10 +632,100 @@ class MINT(BaseDynamicsModel):
             torch.as_tensor([beta, alpha_a, alpha_b], dtype=TORCH_DTYPE, device=self.device).reshape(3, 1).expand(3, z.shape[1]),
         )
 
+    def _estimate_states_across_libraries(
+        self,
+        Q: Tensor,
+        S_curr: Tensor,
+        f: Callable[[int], Tensor],
+        likelihood_neuron_mask: Optional[Tensor],
+        K_lengths: Sequence[int],
+    ):
+        assert self.library_ids is not None
+        if torch.unique(self.library_ids).numel() < 2:
+            return None
+        try:
+            c_a, k_hats_a = self._maximum_likelihood(Q, restricted_conds=[])
+            lib_a = int(self.library_ids[c_a].item())
+            cand_a = self._estimate_within_library(
+                Q, S_curr, f, likelihood_neuron_mask, K_lengths, c_a, k_hats_a, lib_a
+            )
+            c_b, k_hats_b = self._maximum_likelihood(Q, restricted_library_ids=[lib_a])
+            lib_b = int(self.library_ids[c_b].item())
+            cand_b = self._estimate_within_library(
+                Q, S_curr, f, likelihood_neuron_mask, K_lengths, c_b, k_hats_b, lib_b
+            )
+        except ValueError:
+            return None
+
+        x_a, z_a, lam_a, alpha_a, c_a_primary, k_a_primary = cand_a
+        x_b, z_b, lam_b, alpha_b, c_b_primary, k_b_primary = cand_b
+        beta = fit_poisson_interp(
+            _masked_rows(S_curr, likelihood_neuron_mask),
+            _masked_rows(lam_a, likelihood_neuron_mask),
+            _masked_rows(lam_b, likelihood_neuron_mask),
+            self.InterpOptions,
+            0.0,
+        )
+        x = (1.0 - beta) * x_a + beta * x_b
+        z = (1.0 - beta) * z_a + beta * z_b
+        return (
+            x,
+            z,
+            torch.as_tensor([c_a_primary + 1, c_b_primary + 1], dtype=TORCH_DTYPE, device=self.device)
+            .reshape(2, 1)
+            .expand(2, z.shape[1]),
+            torch.cat([(k_a_primary + 1).to(TORCH_DTYPE), (k_b_primary + 1).to(TORCH_DTYPE)], dim=0),
+            torch.as_tensor([beta, alpha_a, alpha_b], dtype=TORCH_DTYPE, device=self.device)
+            .reshape(3, 1)
+            .expand(3, z.shape[1]),
+        )
+
+    def _estimate_within_library(
+        self,
+        Q: Tensor,
+        S_curr: Tensor,
+        f: Callable[[int], Tensor],
+        likelihood_neuron_mask: Optional[Tensor],
+        K_lengths: Sequence[int],
+        c_primary: int,
+        k_hats_primary: Sequence[int],
+        library_id: int,
+    ):
+        k_primary = get_state_indices(k_hats_primary, f, K_lengths[c_primary]).to(self.device)
+        x_primary, z_primary, lam_primary, alpha_primary = self._interp_adjacent_states(
+            S_curr, c_primary, k_hats_primary, k_primary, likelihood_neuron_mask
+        )
+        try:
+            c_secondary, k_hats_secondary = self._maximum_likelihood(
+                Q,
+                restricted_conds=[c_primary],
+                allowed_library_ids=[library_id],
+            )
+        except ValueError:
+            return x_primary, z_primary, lam_primary, alpha_primary, c_primary, k_primary
+
+        k_secondary = get_state_indices(k_hats_secondary, f, K_lengths[c_secondary]).to(self.device)
+        x_secondary, z_secondary, lam_secondary, _ = self._interp_adjacent_states(
+            S_curr, c_secondary, k_hats_secondary, k_secondary, likelihood_neuron_mask
+        )
+        beta = fit_poisson_interp(
+            _masked_rows(S_curr, likelihood_neuron_mask),
+            _masked_rows(lam_primary, likelihood_neuron_mask),
+            _masked_rows(lam_secondary, likelihood_neuron_mask),
+            self.InterpOptions,
+            0.0,
+        )
+        lam = (1.0 - beta) * lam_primary + beta * lam_secondary
+        x = (1.0 - beta) * x_primary + beta * x_secondary
+        z = (1.0 - beta) * z_primary + beta * z_secondary
+        return x, z, lam, beta, c_primary, k_primary
+
     def _maximum_likelihood(
         self,
         Q: Tensor,
         restricted_conds: Optional[Sequence[int]] = None,
+        restricted_library_ids: Optional[Sequence[int]] = None,
+        allowed_library_ids: Optional[Sequence[int]] = None,
         states_to_exclude: Optional[Sequence[Tuple[int, int]]] = None,
         min_k_prime_dist: Optional[float] = None,
     ) -> Tuple[int, List[int]]:
@@ -612,6 +736,16 @@ class MINT(BaseDynamicsModel):
         if restricted_conds:
             for c0 in restricted_conds:
                 q[self.first_idx0[c0] : self.first_idx0[c0] + lengths[c0]] = float("nan")
+        if restricted_library_ids and self.library_ids is not None:
+            restricted = {int(item) for item in restricted_library_ids}
+            for c0, library_id in enumerate(self.library_ids.tolist()):
+                if int(library_id) in restricted:
+                    q[self.first_idx0[c0] : self.first_idx0[c0] + lengths[c0]] = float("nan")
+        if allowed_library_ids is not None and self.library_ids is not None:
+            allowed = {int(item) for item in allowed_library_ids}
+            for c0, library_id in enumerate(self.library_ids.tolist()):
+                if int(library_id) not in allowed:
+                    q[self.first_idx0[c0] : self.first_idx0[c0] + lengths[c0]] = float("nan")
         if states_to_exclude:
             assert min_k_prime_dist is not None
             for c0, k_one in states_to_exclude:
@@ -621,6 +755,8 @@ class MINT(BaseDynamicsModel):
                 exclude_end = min(int(center + min_k_prime_dist), start + lengths[c0] - 1)
                 q[exclude_start : exclude_end + 1] = float("nan")
 
+        if not bool(torch.isfinite(q).any()):
+            raise ValueError("No finite MINT library state remained after candidate restrictions.")
         idx0 = int(torch.argmax(torch.nan_to_num(q, nan=-torch.inf)).item())
         c0, k1 = ind2ck(idx0, self.first_idx0)
         q_c = q[self.first_idx0[c0] : self.first_idx0[c0] + lengths[c0]]
@@ -704,18 +840,21 @@ def get_mint_config(dataset: str) -> Tuple[Settings, HyperParams]:
         hp.n_candidates = 6
         hp.interp_within_trajectories = True
     elif dataset == "dmfc_rsg":
-        settings.trial_alignment = range(-1500, 0)
+        settings.trial_alignment = range(-1950, 750)
         settings.test_alignment = range(-1500, 0)
-        hp.trajectories_alignment = range(-1500, 0)
-        hp.sigma = 70
-        hp.n_neural_dims = None
-        hp.n_cond_dims = None
-        hp.n_trial_dims = 1
+        hp.trajectories_alignment = range(-1950, 750)
+        hp.sigma = 55
+        hp.n_neural_dims = 49
+        hp.n_cond_dims = 17
+        hp.n_trial_dims = None
         hp.causal = False
         hp.Delta = 20
-        hp.window_length = 500
+        hp.window_length = 1500
         hp.n_candidates = 2
         hp.interp_within_trajectories = False
+        hp.dmfc_section_count = 6
+        hp.dmfc_section_ridge = 100.0
+        hp.dmfc_set_go_weight = 4.0
     elif dataset == "lorenz":
         settings.Ts = 0.2
         settings.trial_alignment = range(0, 100)
@@ -1158,9 +1297,316 @@ def preprocess_behavior(Z: Sequence[Tensor], settings):
     raise ValueError(f"Unknown task: {settings.task}")
 
 
+def _fit_dmfc_rsg_trajectories(S, Z, condition, settings, hyperparams):
+    S_smooth = [as_tensor(gauss_filt(spikes.cpu().numpy(), hyperparams.sigma, hyperparams.Delta), spikes.device) for spikes in S]
+    _, labels = preprocess_behavior(Z, settings)
+    condition = np.asarray(condition, dtype=np.int64)
+    condition_rows = np.asarray(settings.dmfc_condition_rows, dtype=np.float64)
+    section_ids = np.asarray(settings.dmfc_section_ids, dtype=np.int64)
+    cond_ids = np.unique(condition)
+    cond_trial_indices = [np.flatnonzero(condition == cond) for cond in cond_ids]
+    cond_rows = [condition_rows[trial_idx[0]] for trial_idx in cond_trial_indices]
+    z_rows = [
+        torch.nanmean(torch.stack([Z[i][:, 0].to(TORCH_DTYPE) for i in trial_idx], dim=1), dim=1)
+        .detach()
+        .cpu()
+        .numpy()
+        for trial_idx in cond_trial_indices
+    ]
+
+    x_session_raw, set_go_masks = _dmfc_event_average_library(
+        S_smooth,
+        condition,
+        condition_rows,
+        cond_ids,
+        cond_rows,
+        settings,
+        base_mask=None,
+    )
+    x_session = smooth_average([[item] for item in x_session_raw], hyperparams, settings.Ts)
+    z_session = _dmfc_condition_state_trajectories(z_rows, len(settings.trial_alignment), S[0].device)
+
+    section_count = int(hyperparams.dmfc_section_count)
+    if section_count <= 1:
+        return x_session, z_session, labels
+
+    raw_scaled = [spikes.to(TORCH_DTYPE) * float(hyperparams.Delta) for spikes in S]
+    x_libraries: List[Tensor] = []
+    z_libraries: List[Tensor] = []
+    library_ids: List[int] = []
+    for section in range(section_count):
+        section_mask = section_ids == section
+        section_target, _ = _dmfc_event_average_library(
+            raw_scaled,
+            condition,
+            condition_rows,
+            cond_ids,
+            cond_rows,
+            settings,
+            base_mask=section_mask,
+        )
+        transform = _fit_dmfc_identity_ridge_transform(x_session, section_target, set_go_masks, hyperparams)
+        for source, z_cond in zip(x_session, z_session):
+            x_libraries.append(_apply_dmfc_transform(source, transform))
+            z_libraries.append(z_cond)
+            library_ids.append(section)
+
+    return x_libraries, z_libraries, labels, np.asarray(library_ids, dtype=np.int64)
+
+
+def _dmfc_condition_state_trajectories(
+    cond_rows: Sequence[np.ndarray],
+    n_time: int,
+    device: Optional[torch.device],
+) -> List[Tensor]:
+    out = []
+    for row in cond_rows:
+        values = np.repeat(np.asarray(row, dtype=np.float64)[:, None], n_time, axis=1)
+        out.append(as_tensor(values, device))
+    return out
+
+
+def _dmfc_event_average_library(
+    rate_trials: Sequence[Tensor],
+    condition: np.ndarray,
+    condition_rows: np.ndarray,
+    cond_ids: Sequence[int],
+    cond_rows: Sequence[np.ndarray],
+    settings,
+    base_mask: Optional[np.ndarray],
+) -> Tuple[List[Tensor], List[Tensor]]:
+    alignment = _alignment_array(settings.trial_alignment)
+    align_start = int(alignment[0])
+    events = settings.dmfc_event_offsets
+    if events is None:
+        raise ValueError("DMFC paper trajectory fitting requires event offsets.")
+    n_trials = len(rate_trials)
+    all_trials = np.ones(n_trials, dtype=bool)
+    base = all_trials if base_mask is None else np.asarray(base_mask, dtype=bool)
+    full_stop = int(settings.trial_alignment.stop)
+
+    x_bar: List[Tensor] = []
+    set_go_masks: List[Tensor] = []
+    for cond, row in zip(cond_ids, cond_rows):
+        epoch_defs = [
+            ("fix_time", "target_on_time", 0, "median"),
+            ("target_on_time", "ready_time", 1, "median"),
+            ("ready_time", "set_time", 2, "median"),
+            ("set_time", "go_time", 3, "mean_warp"),
+            ("go_time", None, 4, "fixed"),
+        ]
+        pieces: List[Tensor] = []
+        mask_pieces: List[Tensor] = []
+        for start_field, end_field, epoch, mode in epoch_defs:
+            pool = _dmfc_epoch_pool(condition, condition_rows, int(cond), row, epoch) & base
+            if not np.any(pool):
+                pool = _dmfc_epoch_pool(condition, condition_rows, int(cond), row, epoch)
+            trial_idx = np.flatnonzero(pool)
+            start_offsets = np.asarray(events[start_field], dtype=np.int64)
+            if end_field is None:
+                end_offsets = start_offsets + full_stop
+                length = max(1, full_stop)
+                piece = _dmfc_average_aligned_epoch(rate_trials, trial_idx, start_offsets, end_offsets, length, align_start)
+            elif mode == "mean_warp":
+                end_offsets = np.asarray(events[end_field], dtype=np.int64)
+                length = _dmfc_epoch_length(start_offsets, end_offsets, trial_idx, "mean")
+                piece = _dmfc_average_warped_epoch(rate_trials, trial_idx, start_offsets, end_offsets, length, align_start)
+            else:
+                end_offsets = np.asarray(events[end_field], dtype=np.int64)
+                length = _dmfc_epoch_length(start_offsets, end_offsets, trial_idx, "median")
+                piece = _dmfc_average_aligned_epoch(rate_trials, trial_idx, start_offsets, end_offsets, length, align_start)
+            pieces.append(piece)
+            mask_pieces.append(torch.full((piece.shape[1],), epoch == 3, dtype=torch.bool, device=piece.device))
+
+        concat = torch.cat(pieces, dim=1)
+        set_go_concat = torch.cat(mask_pieces, dim=0)
+        go_idx = sum(piece.shape[1] for piece in pieces[:4])
+        trim_idx = torch.as_tensor(go_idx + alignment, dtype=torch.long, device=concat.device)
+        trimmed = _take_time_window_tensor(concat, trim_idx)
+        set_go_mask = _take_bool_window_tensor(set_go_concat, trim_idx)
+        x_bar.append(torch.nan_to_num(trimmed, nan=0.0, posinf=0.0, neginf=0.0))
+        set_go_masks.append(set_go_mask)
+    return x_bar, set_go_masks
+
+
+def _dmfc_epoch_pool(
+    condition: np.ndarray,
+    condition_rows: np.ndarray,
+    cond: int,
+    cond_row: np.ndarray,
+    epoch: int,
+) -> np.ndarray:
+    if epoch == 0:
+        return np.ones(condition.shape[0], dtype=bool)
+    if epoch == 1:
+        return np.all(np.isclose(condition_rows[:, :2], cond_row[:2]), axis=1)
+    if epoch == 2:
+        return np.all(np.isclose(condition_rows[:, :3], cond_row[:3]), axis=1)
+    return condition == cond
+
+
+def _dmfc_epoch_length(
+    start_offsets: np.ndarray,
+    end_offsets: np.ndarray,
+    trial_idx: np.ndarray,
+    mode: str,
+) -> int:
+    if trial_idx.size == 0:
+        return 1
+    durations = np.asarray(end_offsets[trial_idx] - start_offsets[trial_idx], dtype=np.float64)
+    durations = durations[np.isfinite(durations) & (durations > 0)]
+    if durations.size == 0:
+        return 1
+    if mode == "mean":
+        return max(1, int(round(float(np.mean(durations)))))
+    return max(1, int(round(float(np.median(durations)))))
+
+
+def _dmfc_average_aligned_epoch(
+    rate_trials: Sequence[Tensor],
+    trial_idx: np.ndarray,
+    start_offsets: np.ndarray,
+    end_offsets: np.ndarray,
+    length: int,
+    align_start: int,
+) -> Tensor:
+    pieces = []
+    for trial in trial_idx:
+        start = int(start_offsets[trial] - align_start)
+        end = int(end_offsets[trial] - align_start)
+        if end <= start:
+            continue
+        pieces.append(_take_limited_time_window_tensor(rate_trials[trial], start, end, length))
+    return _nanmean_tensor_list(pieces, rate_trials[0].shape[0], length, rate_trials[0].device)
+
+
+def _dmfc_average_warped_epoch(
+    rate_trials: Sequence[Tensor],
+    trial_idx: np.ndarray,
+    start_offsets: np.ndarray,
+    end_offsets: np.ndarray,
+    length: int,
+    align_start: int,
+) -> Tensor:
+    pieces = []
+    for trial in trial_idx:
+        start = int(start_offsets[trial] - align_start)
+        end = int(end_offsets[trial] - align_start)
+        valid_start = max(start, 0)
+        valid_end = min(end, rate_trials[trial].shape[1])
+        if valid_end <= valid_start:
+            continue
+        segment = rate_trials[trial][:, valid_start:valid_end].to(TORCH_DTYPE)
+        if segment.shape[1] == length:
+            warped = segment
+        elif segment.shape[1] == 1:
+            warped = segment.expand(segment.shape[0], length)
+        else:
+            warped = torch.nn.functional.interpolate(
+                segment.reshape(1, segment.shape[0], segment.shape[1]),
+                size=length,
+                mode="linear",
+                align_corners=True,
+            )[0]
+        pieces.append(warped)
+    return _nanmean_tensor_list(pieces, rate_trials[0].shape[0], length, rate_trials[0].device)
+
+
+def _take_limited_time_window_tensor(trial: Tensor, start: int, end: int, length: int) -> Tensor:
+    idx = torch.arange(start, start + length, dtype=torch.long, device=trial.device)
+    valid = (idx >= 0) & (idx < trial.shape[1]) & (idx < end)
+    out = torch.full((trial.shape[0], length), float("nan"), dtype=TORCH_DTYPE, device=trial.device)
+    if bool(valid.any()):
+        out[:, valid] = trial[:, idx[valid]].to(TORCH_DTYPE)
+    return out
+
+
+def _take_time_window_tensor(matrix: Tensor, idx: Tensor) -> Tensor:
+    valid = (idx >= 0) & (idx < matrix.shape[1])
+    out = torch.full((matrix.shape[0], idx.numel()), float("nan"), dtype=TORCH_DTYPE, device=matrix.device)
+    if bool(valid.any()):
+        out[:, valid] = matrix[:, idx[valid]]
+    return out
+
+
+def _take_bool_window_tensor(mask: Tensor, idx: Tensor) -> Tensor:
+    valid = (idx >= 0) & (idx < mask.numel())
+    out = torch.zeros(idx.numel(), dtype=torch.bool, device=mask.device)
+    if bool(valid.any()):
+        out[valid] = mask[idx[valid]]
+    return out
+
+
+def _nanmean_tensor_list(pieces: Sequence[Tensor], n_rows: int, length: int, device: torch.device) -> Tensor:
+    if not pieces:
+        return torch.zeros((n_rows, length), dtype=TORCH_DTYPE, device=device)
+    stacked = torch.stack([piece.to(TORCH_DTYPE) for piece in pieces], dim=2)
+    return torch.nan_to_num(torch.nanmean(stacked, dim=2), nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def _fit_dmfc_identity_ridge_transform(
+    source: Sequence[Tensor],
+    target: Sequence[Tensor],
+    set_go_masks: Sequence[Tensor],
+    hyperparams,
+) -> Tuple[Tensor, Tensor]:
+    n_neurons = source[0].shape[0]
+    X = torch.cat([item.T for item in source], dim=0).detach().cpu().numpy()
+    Y = torch.cat([item.T for item in target], dim=0).detach().cpu().numpy()
+    weights = np.concatenate(
+        [
+            np.where(mask.detach().cpu().numpy(), float(hyperparams.dmfc_set_go_weight), 1.0)
+            for mask in set_go_masks
+        ]
+    ).astype(np.float64)
+    finite = np.all(np.isfinite(X), axis=1) & np.all(np.isfinite(Y), axis=1) & np.isfinite(weights)
+    X = X[finite]
+    Y = Y[finite]
+    weights = weights[finite]
+    if X.shape[0] == 0:
+        identity = torch.eye(n_neurons, dtype=TORCH_DTYPE, device=source[0].device)
+        bias = torch.zeros(n_neurons, dtype=TORCH_DTYPE, device=source[0].device)
+        return identity, bias
+
+    X_aug = np.concatenate([X, np.ones((X.shape[0], 1), dtype=np.float64)], axis=1)
+    sqrt_w = np.sqrt(weights)[:, None]
+    Xw = X_aug * sqrt_w
+    Yw = Y * sqrt_w
+    penalty = np.zeros((n_neurons + 1, n_neurons + 1), dtype=np.float64)
+    penalty[:n_neurons, :n_neurons] = float(hyperparams.dmfc_section_ridge) * np.eye(n_neurons)
+    prior = np.zeros((n_neurons + 1, n_neurons), dtype=np.float64)
+    prior[:n_neurons, :] = np.eye(n_neurons)
+    lhs = Xw.T @ Xw + penalty
+    rhs = Xw.T @ Yw + penalty @ prior
+    try:
+        coeff = np.linalg.solve(lhs, rhs)
+    except np.linalg.LinAlgError:
+        coeff = np.linalg.lstsq(lhs, rhs, rcond=None)[0]
+    A = torch.as_tensor(coeff[:n_neurons], dtype=TORCH_DTYPE, device=source[0].device)
+    b = torch.as_tensor(coeff[n_neurons], dtype=TORCH_DTYPE, device=source[0].device)
+    return A, b
+
+
+def _apply_dmfc_transform(source: Tensor, transform: Tuple[Tensor, Tensor]) -> Tensor:
+    A, b = transform
+    transformed = source.T @ A + b.reshape(1, -1)
+    return torch.clamp(transformed.T, min=0.0)
+
+
 def fit_trajectories(S, Z, condition, settings, hyperparams):
+    if (
+        settings.task == "dmfc_rsg"
+        and settings.dmfc_event_offsets is not None
+        and settings.dmfc_condition_rows is not None
+        and settings.dmfc_section_ids is not None
+    ):
+        return _fit_dmfc_rsg_trajectories(S, Z, condition, settings, hyperparams)
+
     if settings.task in {"area2_bump", "dmfc_rsg", "mc_maze"}:
-        S_smooth = [as_tensor(gauss_filt(spikes.cpu().numpy(), hyperparams.sigma, hyperparams.Delta), spikes.device) for spikes in S]
+        if settings.task == "dmfc_rsg" and getattr(settings, "library_rate_source", "spikes") == "lfads":
+            S_smooth = [spikes.to(TORCH_DTYPE) for spikes in S]
+        else:
+            S_smooth = [as_tensor(gauss_filt(spikes.cpu().numpy(), hyperparams.sigma, hyperparams.Delta), spikes.device) for spikes in S]
         Z_proc, labels = preprocess_behavior(Z, settings)
         t_mask = _mask_by_alignment(settings.trial_alignment, hyperparams.trajectories_alignment)
         S_smooth = [item[:, t_mask] for item in S_smooth]
@@ -1320,37 +1766,37 @@ def _mc_maze_nwb_trial_data(ds, settings, split, max_trials, device):
 
 
 def _dmfc_nwb_trial_data(ds, settings, split, max_trials, device):
-    from nlb_tools.make_tensors import make_train_input_tensors
-
-    data = make_train_input_tensors(
-        ds,
-        dataset_name="dmfc_rsg",
-        trial_split=_split_labels(split),
-        include_behavior=True,
-        save_file=False,
-        return_dict=True,
-        seed=0,
-    )
-    heldin = np.asarray(data["train_spikes_heldin"], dtype=np.float64)
-    heldout = np.asarray(data["train_spikes_heldout"], dtype=np.float64)
-    behavior = np.asarray(data["train_behavior"], dtype=np.float64)
-    if heldin.shape[:2] != heldout.shape[:2]:
-        raise ValueError(f"dmfc_rsg train held-in {heldin.shape} and held-out {heldout.shape} are incompatible.")
-    if heldin.shape[1] != len(settings.trial_alignment):
-        raise ValueError(
-            f"dmfc_rsg expected {len(settings.trial_alignment)} samples from NWB, got {heldin.shape[1]}."
-        )
-
-    finite = np.all(np.isfinite(behavior), axis=1)
-    idx = np.flatnonzero(finite)
+    trial_info = ds.trial_info
+    event_fields = ["fix_time", "target_on_time", "ready_time", "set_time", "go_time"]
+    behavior_fields = ["is_eye", "theta", "is_short", "ts", "tp"]
+    split_mask = trial_info["split"].isin(_split_labels(split)).to_numpy()
+    event_mask = trial_info[event_fields].notna().all(axis=1).to_numpy()
+    behavior = trial_info[behavior_fields].to_numpy(dtype=np.float64)
+    behavior_mask = np.all(np.isfinite(behavior), axis=1)
+    idx = np.flatnonzero(split_mask & event_mask & behavior_mask)
     idx = idx if max_trials is None else idx[:max_trials]
-    condition, cond_list = _condition_index(behavior[idx, :4])
 
+    cond_mat = behavior[idx, :4]
+    condition, cond_list = _condition_index(cond_mat)
+    settings.dmfc_condition_rows = cond_mat
+    section_count = 6
+    settings.dmfc_section_ids = np.floor(np.arange(len(idx), dtype=np.float64) * section_count / len(idx)).astype(np.int64)
+
+    go_ms = trial_info.iloc[idx]["go_time"].map(_to_ms).to_numpy(dtype=np.int64)
+    settings.dmfc_event_offsets = {
+        field: trial_info.iloc[idx][field].map(_to_ms).to_numpy(dtype=np.int64) - go_ms
+        for field in event_fields
+    }
+
+    heldout = _field_matrix(ds, "heldout_spikes")
+    spikes = _field_matrix(ds, "spikes")
+    alignment = _alignment_array(settings.trial_alignment)
     S, Z = [], []
-    n_time = heldin.shape[1]
-    for trial in idx:
-        spikes_trial = np.concatenate([heldout[trial], heldin[trial]], axis=1).T
-        z = np.repeat(behavior[trial, :, None], n_time, axis=1)
+    n_time = len(alignment)
+    for local_idx, tr in enumerate(idx):
+        time_idx = go_ms[local_idx] + alignment
+        spikes_trial = stack_rows([take_time_window(heldout, time_idx), take_time_window(spikes, time_idx)])
+        z = np.repeat(behavior[tr, :, None], n_time, axis=1)
         S.append(_spikes_tensor(spikes_trial, device))
         Z.append(as_tensor(z, device))
     return S, Z, condition, cond_list

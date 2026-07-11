@@ -61,8 +61,9 @@ trainable methods without implying a backward pass or EM loop.
 
 For NLB tasks, `dataset` selects a task-specific trajectory builder.
 `area2_bump` and `mc_maze` can build libraries from DANDI NWBs, `mc_rtt`
-uses the downloaded MINT MATLAB data by default, and `dmfc_rsg` uses the
-prepared NLB H5 tensors. The NLB runner writes EvalAI-style held-out rate
+uses the downloaded MINT MATLAB data by default, and `dmfc_rsg` can use
+DANDI/NWB trials, prepared NLB H5 tensors, or an experimental LFADS-derived
+trajectory library. The NLB runner writes EvalAI-style held-out rate
 submissions and reports co-smoothing bits/spike.
 
 For the synthetic Lorenz task, LaDyS builds the MINT trajectory library from
@@ -79,7 +80,7 @@ seen trajectories rather than interpolation to unseen trajectories.
 | `name` | `Literal['mint']` | `'mint'` |
 | `objective` | `str` | `'mint_likelihood_recursion'` |
 | `dataset` | `Literal['area2_bump', 'dmfc_rsg', 'mc_maze', 'mc_rtt', 'lorenz']` | `'mc_maze'` |
-| `train_source` | `Literal['h5', 'mat', 'nwb']` | `'nwb'` |
+| `train_source` | `Literal['h5', 'lfads', 'mat', 'nwb']` | `'nwb'` |
 | `train_split` | `Literal['auto', 'train', 'trainval']` | `'trainval'` |
 | `nlb_neural_state_defaults` | `bool` | `True` |
 | `nwb_root` | `str` | `'data/real/nlb/dandi'` |
@@ -93,6 +94,16 @@ seen trajectories rather than interpolation to unseen trajectories.
 | `sigma` | `Optional[int]` | `None` |
 | `min_rate` | `Optional[float]` | `None` |
 | `causal` | `Optional[bool]` | `None` |
+| `lfads_epochs` | `int` | `25` |
+| `lfads_batch_size` | `int` | `16` |
+| `lfads_train_bin_size` | `int` | `1` |
+| `lfads_lr` | `float` | `0.001` |
+| `lfads_generator_dim` | `int` | `64` |
+| `lfads_factor_dim` | `int` | `20` |
+| `lfads_inferred_input_dim` | `int` | `2` |
+| `lfads_encoder_dim` | `int` | `64` |
+| `lfads_controller_dim` | `int` | `64` |
+| `lfads_keep_prob` | `float` | `0.95` |
 | `optimization` | `OptimizationConfig` | `OptimizationConfig(name='inference_only')` |
 
 ## Contracts

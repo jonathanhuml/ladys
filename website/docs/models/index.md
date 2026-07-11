@@ -21,4 +21,5 @@ python scripts/generate_model_docs.py
 | [MINT](mint.md) | `mint` | Mesh of Idealized Neural Trajectories adapted to the LaDyS API. |
 | [NDT](ndt.md) | `ndt` | Transformer encoder trained with a masked Poisson spike objective. |
 | [PSTH](psth.md) | `psth` | Peri-stimulus time histogram baseline. |
+| [SLDS](slds.md) | `slds` | Regular switching linear dynamical system with Poisson emissions. |
 | [Smoothing](smoothing.md) | `smoothing` | Gaussian-smoothed spike-count baseline. |

@@ -1,0 +1,53 @@
+dataset:
+  name: lorenz
+  neurons: 32
+  num_inits: 4
+  num_trials: 8
+  num_steps: 100
+  burn_steps: 1000
+  train_fraction: 0.8
+  seed: 0
+  latent_dt: 0.015
+  spike_bin_size: 1.0
+  base_rate: 1.0
+
+model:
+  name: slds
+  objective: slds_variational_em
+  states: 4
+  latent_dim: 3
+  transition_stickiness: 0.95
+  dynamics_l2_A: 1.0e-3
+  dynamics_l2_b: 1.0e-5
+  dynamics_var_floor: 1.0e-4
+  emission_l2: 1.0e-5
+  emission_lr: 1.0
+  emission_mstep_steps: 25
+  emission_batch_size: 8192
+  emission_max_points: null
+  em_alpha: 0.2
+  local_inference_iters: 2
+  continuous_steps: 50
+  continuous_lr: 1.0
+  continuous_tolerance: 1.0e-4
+  latent_l2: 0.0
+  latent_clip: null
+  init_seed: 0
+  init_max_points: 50000
+  init_em_iters: 50
+  prediction_floor: 1.0e-9
+  optimization:
+    name: em
+
+preprocessing:
+  observations: null
+
+trainer:
+  epochs: 5
+  batch_size: 16
+  device: cpu
+
+experiment:
+  output_dir: runs
+  run_name: slds_lorenz
+  save_predictions: true
