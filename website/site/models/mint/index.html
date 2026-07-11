@@ -65,6 +65,12 @@
 <li>
   <a href="../ndt/" class="dropdown-item">NDT</a>
 </li>
+<li>
+  <a href="../psth/" class="dropdown-item">PSTH</a>
+</li>
+<li>
+  <a href="../smoothing/" class="dropdown-item">Smoothing</a>
+</li>
     </ul>
   </li>
   <li class="nav-item dropdown">
@@ -169,10 +175,11 @@ between likely library states. This makes MINT a library/inference method
 rather than a differentiable PyTorch training loop.</p>
 <h2 id="nlb-datasets">NLB datasets</h2>
 <p>The native LaDyS MINT port supports the three MINT/NLB datasets used in the
-original repository: <code>area2_bump</code>, <code>mc_maze</code>, and <code>mc_rtt</code>. These tasks keep
-the original task-specific trajectory builders. Area2 and Maze smooth and
-average repeated condition-aligned trials; RTT can use single-trial
-AutoLFADS-rate trajectories from the MINT MATLAB data. The <code>ladys run</code>
+original repository: <code>area2_bump</code>, <code>mc_maze</code>, and <code>mc_rtt</code>, plus a
+LaDyS-native <code>dmfc_rsg</code> adapter built from the NLB 5 ms H5 tensors. Area2
+and Maze smooth and average repeated condition-aligned trials; RTT can use
+single-trial AutoLFADS-rate trajectories from the MINT MATLAB data; DMFC
+averages the NLB condition-indexed reproduction trials. The <code>ladys run</code>
 command dispatches MINT NLB configs through <code>ladys.mint_nlb</code>, which writes a
 hidden-test H5 submission and a <code>report.md</code> with co-BPS.</p>
 <h2 id="lorenz-datasets">Lorenz datasets</h2>
@@ -195,11 +202,11 @@ parameters.</p>
 optimization block should normally remain <code>name="inference_only"</code>; benchmark
 epoch curves repeat the same decoded rates so MINT can be plotted alongside
 trainable methods without implying a backward pass or EM loop.</p>
-<p>For NLB tasks, <code>dataset</code> selects one of the task-specific trajectory
-builders (<code>area2_bump</code>, <code>mc_maze</code>, or <code>mc_rtt</code>) and <code>train_source</code> controls
-whether libraries are built from the downloaded MATLAB files or DANDI NWB
-files. The NLB runner writes EvalAI-style held-out rate submissions and
-reports co-smoothing bits/spike.</p>
+<p>For NLB tasks, <code>dataset</code> selects a task-specific trajectory builder.
+<code>area2_bump</code> and <code>mc_maze</code> can build libraries from DANDI NWBs, <code>mc_rtt</code>
+uses the downloaded MINT MATLAB data by default, and <code>dmfc_rsg</code> uses the
+prepared NLB H5 tensors. The NLB runner writes EvalAI-style held-out rate
+submissions and reports co-smoothing bits/spike.</p>
 <p>For the synthetic Lorenz task, LaDyS builds the MINT trajectory library from
 repeated training trials. The default <code>lorenz_library_source="smoothed_spikes"</code>
 estimates library rates by Gaussian-smoothing training spikes and averaging
@@ -229,12 +236,12 @@ seen trajectories rather than interpolation to unseen trajectories.</p>
 </tr>
 <tr>
 <td><code>dataset</code></td>
-<td><code>Literal['area2_bump', 'mc_maze', 'mc_rtt', 'lorenz']</code></td>
+<td><code>Literal['area2_bump', 'dmfc_rsg', 'mc_maze', 'mc_rtt', 'lorenz']</code></td>
 <td><code>'mc_maze'</code></td>
 </tr>
 <tr>
 <td><code>train_source</code></td>
-<td><code>Literal['mat', 'nwb']</code></td>
+<td><code>Literal['h5', 'mat', 'nwb']</code></td>
 <td><code>'nwb'</code></td>
 </tr>
 <tr>

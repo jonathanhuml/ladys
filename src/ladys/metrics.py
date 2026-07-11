@@ -158,7 +158,12 @@ class NLBCoSmoothingAdapter(EvaluationAdapter):
                 x = observations_from_batch(batch)
                 output = None if self.feature_source == "predict_rates" else model(x)
                 target = _nlb_target_from_batch(batch)
-                if output is not None and output.rates is not None and output.rates.shape == target.shape:
+                if (
+                    self._allow_direct_prediction()
+                    and output is not None
+                    and output.rates is not None
+                    and output.rates.shape == target.shape
+                ):
                     self.direct_prediction = True
                     return
                 feature = self._features_from_output(output, model=model, x=x)
@@ -267,7 +272,12 @@ class NLBCoSmoothingAdapter(EvaluationAdapter):
         model: BaseDynamicsModel | None = None,
         x: Tensor | None = None,
     ) -> Tensor:
-        if output is not None and output.rates is not None and output.rates.shape == target.shape:
+        if (
+            self._allow_direct_prediction()
+            and output is not None
+            and output.rates is not None
+            and output.rates.shape == target.shape
+        ):
             return output.rates.clamp_min(self.prediction_floor)
         if self.decoder_weight is None:
             raise RuntimeError(
@@ -318,6 +328,9 @@ class NLBCoSmoothingAdapter(EvaluationAdapter):
         if model is not None and x is not None:
             return model.predict_rates(x)
         raise RuntimeError("Model output has no usable NLB decoder features.")
+
+    def _allow_direct_prediction(self) -> bool:
+        return self.feature_source in {"auto", "rates"}
 
 
 def poisson_negative_log_likelihood(

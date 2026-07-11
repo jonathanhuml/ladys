@@ -1,6 +1,7 @@
 """Model registry imports."""
 
 from ladys.models.base import BaseDynamicsModel, BaseModelConfig, OptimizationConfig
+from ladys.models.baselines import PSTH, PSTHConfig, Smoothing, SmoothingConfig
 from ladys.models.bgpfa import BGPFA, BGPFAConfig
 from ladys.models.cassm import CASSM, CASSMConfig
 from ladys.models.gpfa import GPFA, GPFAConfig
@@ -14,6 +15,10 @@ __all__ = [
     "BaseDynamicsModel",
     "BaseModelConfig",
     "OptimizationConfig",
+    "PSTH",
+    "PSTHConfig",
+    "Smoothing",
+    "SmoothingConfig",
     "BGPFA",
     "BGPFAConfig",
     "CASSM",

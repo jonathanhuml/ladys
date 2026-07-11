@@ -24,6 +24,8 @@ from ladys.models import (
     KalmanConfig,
     LFADSConfig,
     NDTConfig,
+    PSTHConfig,
+    SmoothingConfig,
 )
 from ladys.training.strategies import build_strategy
 
@@ -270,6 +272,94 @@ def test_gpfa_nlb_adapter_fits_heldout_decoder(tmp_path: Path):
     assert result.targets["spikes"].shape == eval_heldout.shape
     assert "co_bps" in result.metrics
     assert np.isfinite(result.metrics["co_bps"])
+
+
+def test_smoothing_nlb_adapter_fits_heldout_decoder(tmp_path: Path):
+    path = tmp_path / "smoothing_nlb.h5"
+    rng = np.random.default_rng(0)
+    train_heldin = rng.poisson(0.5, size=(5, 8, 3)).astype(np.float32)
+    train_heldout = (train_heldin[..., :1] + 0.1).astype(np.float32)
+    eval_heldin = rng.poisson(0.5, size=(2, 8, 3)).astype(np.float32)
+    eval_heldout = (eval_heldin[..., :1] + 0.1).astype(np.float32)
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset("train_spikes_heldin", data=train_heldin)
+        handle.create_dataset("train_spikes_heldout", data=train_heldout)
+        handle.create_dataset("eval_spikes_heldin", data=eval_heldin)
+        handle.create_dataset("eval_spikes_heldout", data=eval_heldout)
+
+    config = NLBDatasetConfig(name="mc_maze", data_path=str(path), bin_size_ms=5)
+    train_ds, valid_ds = NLBDataset.make_splits(config)
+    model = SmoothingConfig(
+        kern_sd_ms=10.0,
+        bin_size_ms=5.0,
+        nlb_poisson_max_iter=20,
+    ).build(n_neurons=train_ds.spikes.shape[-1], n_time=train_ds.spikes.shape[1])
+
+    result = evaluate_model(
+        model,
+        DataLoader(valid_ds, batch_size=2),
+        train_loader=DataLoader(train_ds, batch_size=5),
+    )
+
+    assert result.predictions["rates"].shape == eval_heldout.shape
+    assert "co_bps" in result.metrics
+    assert np.isfinite(result.metrics["co_bps"])
+
+
+def test_psth_nlb_adapter_uses_training_condition_psths(tmp_path: Path):
+    path = tmp_path / "psth_nlb.h5"
+    train_heldin = np.ones((2, 4, 2), dtype=np.float32)
+    train_heldout = np.array(
+        [
+            [[2.0], [2.0], [2.0], [2.0]],
+            [[3.0], [3.0], [3.0], [3.0]],
+        ],
+        dtype=np.float32,
+    )
+    eval_heldin = np.ones((3, 4, 2), dtype=np.float32)
+    eval_heldout = np.array(
+        [
+            [[2.0], [2.0], [2.0], [2.0]],
+            [[3.0], [3.0], [3.0], [3.0]],
+            [[2.0], [2.0], [2.0], [2.0]],
+        ],
+        dtype=np.float32,
+    )
+    psth = np.zeros((2, 4, 3), dtype=np.float32)
+    psth[0, :, 2] = 99.0
+    psth[1, :, 2] = 99.0
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset("train_spikes_heldin", data=train_heldin)
+        handle.create_dataset("train_spikes_heldout", data=train_heldout)
+        handle.create_dataset("eval_spikes_heldin", data=eval_heldin)
+        handle.create_dataset("eval_spikes_heldout", data=eval_heldout)
+        handle.create_dataset("psth", data=psth)
+        cond_ds = handle.create_dataset("eval_cond_idx", (2,), dtype=h5py.vlen_dtype(np.dtype("int64")))
+        cond_ds[0] = np.array([0, 2], dtype=np.int64)
+        cond_ds[1] = np.array([1], dtype=np.int64)
+        train_cond_ds = handle.create_dataset(
+            "train_cond_idx",
+            (2,),
+            dtype=h5py.vlen_dtype(np.dtype("int64")),
+        )
+        train_cond_ds[0] = np.array([0], dtype=np.int64)
+        train_cond_ds[1] = np.array([1], dtype=np.int64)
+
+    config = NLBDatasetConfig(name="mc_maze", data_path=str(path), bin_size_ms=5)
+    train_ds, valid_ds = NLBDataset.make_splits(config)
+    model = PSTHConfig(kern_sd_ms=0.0).build(
+        n_neurons=train_ds.spikes.shape[-1],
+        n_time=train_ds.spikes.shape[1],
+    )
+
+    result = evaluate_model(
+        model,
+        DataLoader(valid_ds, batch_size=2),
+        train_loader=DataLoader(train_ds, batch_size=2),
+    )
+
+    assert np.allclose(result.predictions["rates"], eval_heldout)
+    assert result.metrics["co_bps"] > 0.0
 
 
 def test_metrics_skip_incompatible_nlb_shapes():

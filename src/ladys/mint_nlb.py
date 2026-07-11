@@ -21,6 +21,7 @@ from ladys.models.mint import (
     MINT,
     MINTConfig,
     TORCH_DTYPE,
+    _spikes_tensor,
     bin_data,
     default_train_nwb_path,
     get_nwb_trial_data,
@@ -74,6 +75,7 @@ def run_mint_nlb(config: ExperimentConfig) -> MINTNLBResult:
     dataset = cfg.dataset
     device = torch.device(config.trainer.device)
     model = MINT(cfg).to(device)
+    _apply_source_overrides(model, cfg)
     _apply_mint_overrides(dataset, model.hyperparams, cfg)
     model.settings.data_path = Path(cfg.mat_data_root) / f"{dataset}.mat"
 
@@ -81,12 +83,16 @@ def run_mint_nlb(config: ExperimentConfig) -> MINTNLBResult:
     if train_split == "auto":
         train_split = "trainval" if cfg.nlb_neural_state_defaults else ("train" if dataset == "mc_rtt" else "trainval")
 
-    train_S, train_Z, condition = _load_training_data(model, train_split, cfg, device)
+    train_S, train_Z, condition = _load_training_data(model, train_split, config, device)
     model.fit_library(train_S, train_Z, condition)
 
-    test_nwb = _test_nwb_path(dataset, Path(cfg.nwb_root))
-    heldin = _load_buffered_heldin(dataset, test_nwb, model.settings, model.hyperparams)
-    _, keep = _buffered_alignment(model.settings, model.hyperparams)
+    if dataset == "dmfc_rsg" and cfg.train_source == "h5":
+        heldin = _load_h5_eval_heldin(_experiment_h5_path(config), dataset)
+        keep = np.ones(heldin.shape[1], dtype=bool)
+    else:
+        test_nwb = _test_nwb_path(dataset, Path(cfg.nwb_root))
+        heldin = _load_buffered_heldin(dataset, test_nwb, model.settings, model.hyperparams)
+        _, keep = _buffered_alignment(model.settings, model.hyperparams)
     S = _heldin_to_mint_spikes(heldin, dataset, device)
     mask = observed_neuron_mask(dataset, S[0].shape[0], device)
     x_hat, _ = model.predict_spike_trials(S, likelihood_neuron_mask=mask)
@@ -99,6 +105,7 @@ def run_mint_nlb(config: ExperimentConfig) -> MINTNLBResult:
         n_heldout,
         cfg.eval_bin_size_ms,
         model.Delta,
+        model.Ts * 1000.0,
     )
     eval_rates_heldin = _binned_counts_from_state(
         x_eval,
@@ -106,6 +113,7 @@ def run_mint_nlb(config: ExperimentConfig) -> MINTNLBResult:
         x_eval[0].shape[0],
         cfg.eval_bin_size_ms,
         model.Delta,
+        model.Ts * 1000.0,
     )
     target = _read_target_spikes(_resolve_target_h5(cfg.target_h5), dataset)
     if eval_rates_heldout.shape != target.shape:
@@ -133,6 +141,9 @@ def _apply_mint_overrides(dataset: str, hyperparams, cfg: MINTConfig) -> None:
     if cfg.nlb_neural_state_defaults:
         hyperparams.causal = False
         hyperparams.window_length = 500
+        if dataset == "dmfc_rsg" and cfg.train_source == "h5":
+            hyperparams.window_length = 100
+            hyperparams.Delta = 4
         hyperparams.n_candidates = 5 if dataset == "mc_rtt" else 2
         hyperparams.min_rate = 0.1
     if cfg.causal is not None:
@@ -149,8 +160,24 @@ def _apply_mint_overrides(dataset: str, hyperparams, cfg: MINTConfig) -> None:
         hyperparams.min_rate = float(cfg.min_rate)
 
 
-def _load_training_data(model: MINT, train_split: str, cfg: MINTConfig, device: torch.device):
+def _apply_source_overrides(model: MINT, cfg: MINTConfig) -> None:
+    if cfg.dataset == "dmfc_rsg" and cfg.train_source == "h5":
+        model.settings.Ts = 0.005
+        model.settings.trial_alignment = range(0, 300)
+        model.settings.test_alignment = range(0, 300)
+        model.hyperparams.trajectories_alignment = range(0, 300)
+        model.hyperparams.sigma = 14
+        model.hyperparams.Delta = 4
+        model.hyperparams.window_length = 100
+
+
+def _load_training_data(model: MINT, train_split: str, config: ExperimentConfig, device: torch.device):
+    cfg = config.model
+    if not isinstance(cfg, MINTConfig):
+        raise TypeError(f"Expected MINTConfig, got {type(cfg).__name__}.")
     dataset = cfg.dataset
+    if cfg.train_source == "h5":
+        return _load_h5_training_data(_experiment_h5_path(config), dataset, device)
     if cfg.train_source == "mat":
         S, Z, condition, _ = get_trial_data(model.settings, train_split, None, device)
         return S, Z, condition
@@ -159,6 +186,71 @@ def _load_training_data(model: MINT, train_split: str, cfg: MINTConfig, device: 
     train_nwb = default_train_nwb_path(dataset, Path(cfg.nwb_root))
     S, Z, condition, _ = get_nwb_trial_data(model.settings, train_split, train_nwb, None, device)
     return S, Z, condition
+
+
+def _experiment_h5_path(config: ExperimentConfig) -> Path:
+    data_config = config.dataset
+    if hasattr(data_config, "resolved_data_path"):
+        return Path(data_config.resolved_data_path)
+    data_path = getattr(data_config, "data_path", None)
+    if data_path is None:
+        raise ValueError("H5-backed MINT runs require dataset.data_path.")
+    return Path(data_path)
+
+
+def _select_nlb_h5_group(handle: h5py.File, dataset: str):
+    if dataset in handle:
+        return handle[dataset]
+    return handle
+
+
+def _load_h5_training_data(path: Path, dataset: str, device: torch.device):
+    with h5py.File(path, "r") as handle:
+        group = _select_nlb_h5_group(handle, dataset)
+        heldin = np.asarray(group["train_spikes_heldin"], dtype=np.float64)
+        heldout = np.asarray(group["train_spikes_heldout"], dtype=np.float64)
+        behavior = np.asarray(group.get("train_behavior", np.zeros((heldin.shape[0], 1))), dtype=np.float64)
+        if "train_cond_idx" in group:
+            cond_trials = [np.asarray(item, dtype=np.int64) for item in group["train_cond_idx"][()]]
+        else:
+            cond_trials = _condition_trials_from_behavior(behavior)
+
+    if heldin.shape[:2] != heldout.shape[:2]:
+        raise ValueError(f"{path}: train held-in {heldin.shape} and held-out {heldout.shape} are incompatible.")
+
+    n_trials, n_time, _ = heldin.shape
+    S, Z, condition = [], [], []
+    for cond, trials in enumerate(cond_trials):
+        for trial in trials:
+            trial_idx = int(trial)
+            if trial_idx < 0 or trial_idx >= n_trials:
+                continue
+            spikes = np.concatenate([heldout[trial_idx], heldin[trial_idx]], axis=1).T
+            values = np.nan_to_num(behavior[trial_idx], nan=0.0, posinf=0.0, neginf=0.0)
+            z = np.repeat(values[:, None], n_time, axis=1)
+            S.append(_spikes_tensor(spikes, device))
+            Z.append(torch.as_tensor(z, dtype=TORCH_DTYPE, device=device))
+            condition.append(cond)
+
+    if not S:
+        raise ValueError(f"{path}: no condition-indexed training trials found for {dataset}.")
+    return S, Z, np.asarray(condition, dtype=np.int64)
+
+
+def _condition_trials_from_behavior(behavior: np.ndarray) -> list[np.ndarray]:
+    cond_fields = behavior[:, : min(4, behavior.shape[1])]
+    finite = np.all(np.isfinite(cond_fields), axis=1)
+    cond_list = np.unique(cond_fields[finite], axis=0)
+    trials = []
+    for row in cond_list:
+        trials.append(np.flatnonzero(finite & np.all(cond_fields == row, axis=1)).astype(np.int64))
+    return trials
+
+
+def _load_h5_eval_heldin(path: Path, dataset: str) -> np.ndarray:
+    with h5py.File(path, "r") as handle:
+        group = _select_nlb_h5_group(handle, dataset)
+        return np.asarray(group["eval_spikes_heldin"], dtype=np.float32)
 
 
 def _buffered_alignment(settings, hyperparams) -> tuple[np.ndarray, np.ndarray]:
@@ -218,12 +310,21 @@ def _binned_counts_from_state(
     x_hat: list[torch.Tensor],
     start: int,
     stop: int,
-    eval_bin_size: int,
-    delta: int,
+    eval_bin_size_ms: int,
+    delta_samples: int,
+    sample_period_ms: float,
 ) -> np.ndarray:
+    bin_samples_float = float(eval_bin_size_ms) / float(sample_period_ms)
+    bin_samples = int(round(bin_samples_float))
+    if bin_samples <= 0 or not np.isclose(bin_samples, bin_samples_float):
+        raise ValueError(
+            f"eval_bin_size_ms={eval_bin_size_ms} is not an integer number of "
+            f"samples at {sample_period_ms:g} ms/sample."
+        )
+    scale = float(eval_bin_size_ms) / (float(delta_samples) * float(sample_period_ms))
     pieces = []
     for item in x_hat:
-        counts = bin_data(item[start:stop], eval_bin_size, "mean") * (eval_bin_size / delta)
+        counts = bin_data(item[start:stop], bin_samples, "mean") * scale
         pieces.append(counts.cpu().numpy().T)
     return np.stack(pieces, axis=0)
 

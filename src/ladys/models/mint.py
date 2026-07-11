@@ -27,12 +27,14 @@ TORCH_DTYPE = torch.float64
 
 HELDOUT_COUNTS = {
     "area2_bump": 16,
+    "dmfc_rsg": 14,
     "mc_maze": 45,
     "mc_rtt": 32,
 }
 
 TRAIN_NWB_REL = {
     "area2_bump": Path("000127/sub-Han/sub-Han_desc-train_behavior+ecephys.nwb"),
+    "dmfc_rsg": Path("000130/sub-Haydn/sub-Haydn_desc-train_ecephys.nwb"),
     "mc_maze": Path("000128/sub-Jenkins/sub-Jenkins_ses-full_desc-train_behavior+ecephys.nwb"),
     "mc_rtt": Path("000129/sub-Indy/sub-Indy_desc-train_behavior+ecephys.nwb"),
 }
@@ -174,11 +176,11 @@ class MINTConfig(BaseModelConfig):
     epoch curves repeat the same decoded rates so MINT can be plotted alongside
     trainable methods without implying a backward pass or EM loop.
 
-    For NLB tasks, `dataset` selects one of the task-specific trajectory
-    builders (`area2_bump`, `mc_maze`, or `mc_rtt`) and `train_source` controls
-    whether libraries are built from the downloaded MATLAB files or DANDI NWB
-    files. The NLB runner writes EvalAI-style held-out rate submissions and
-    reports co-smoothing bits/spike.
+    For NLB tasks, `dataset` selects a task-specific trajectory builder.
+    `area2_bump` and `mc_maze` can build libraries from DANDI NWBs, `mc_rtt`
+    uses the downloaded MINT MATLAB data by default, and `dmfc_rsg` uses the
+    prepared NLB H5 tensors. The NLB runner writes EvalAI-style held-out rate
+    submissions and reports co-smoothing bits/spike.
 
     For the synthetic Lorenz task, LaDyS builds the MINT trajectory library from
     repeated training trials. The default `lorenz_library_source="smoothed_spikes"`
@@ -192,8 +194,8 @@ class MINTConfig(BaseModelConfig):
 
     name: Literal["mint"] = "mint"
     objective: str = "mint_likelihood_recursion"
-    dataset: Literal["area2_bump", "mc_maze", "mc_rtt", "lorenz"] = "mc_maze"
-    train_source: Literal["mat", "nwb"] = "nwb"
+    dataset: Literal["area2_bump", "dmfc_rsg", "mc_maze", "mc_rtt", "lorenz"] = "mc_maze"
+    train_source: Literal["h5", "mat", "nwb"] = "nwb"
     train_split: Literal["auto", "train", "trainval"] = "trainval"
     nlb_neural_state_defaults: bool = True
     nwb_root: str = "data/real/nlb/dandi"
@@ -231,10 +233,11 @@ class MINT(BaseDynamicsModel):
     ## NLB datasets
 
     The native LaDyS MINT port supports the three MINT/NLB datasets used in the
-    original repository: `area2_bump`, `mc_maze`, and `mc_rtt`. These tasks keep
-    the original task-specific trajectory builders. Area2 and Maze smooth and
-    average repeated condition-aligned trials; RTT can use single-trial
-    AutoLFADS-rate trajectories from the MINT MATLAB data. The `ladys run`
+    original repository: `area2_bump`, `mc_maze`, and `mc_rtt`, plus a
+    LaDyS-native `dmfc_rsg` adapter built from the NLB 5 ms H5 tensors. Area2
+    and Maze smooth and average repeated condition-aligned trials; RTT can use
+    single-trial AutoLFADS-rate trajectories from the MINT MATLAB data; DMFC
+    averages the NLB condition-indexed reproduction trials. The `ladys run`
     command dispatches MINT NLB configs through `ladys.mint_nlb`, which writes a
     hidden-test H5 submission and a `report.md` with co-BPS.
 
@@ -700,6 +703,19 @@ def get_mint_config(dataset: str) -> Tuple[Settings, HyperParams]:
         hp.window_length = 480
         hp.n_candidates = 6
         hp.interp_within_trajectories = True
+    elif dataset == "dmfc_rsg":
+        settings.trial_alignment = range(-1500, 0)
+        settings.test_alignment = range(-1500, 0)
+        hp.trajectories_alignment = range(-1500, 0)
+        hp.sigma = 70
+        hp.n_neural_dims = None
+        hp.n_cond_dims = None
+        hp.n_trial_dims = 1
+        hp.causal = False
+        hp.Delta = 20
+        hp.window_length = 500
+        hp.n_candidates = 2
+        hp.interp_within_trajectories = False
     elif dataset == "lorenz":
         settings.Ts = 0.2
         settings.trial_alignment = range(0, 100)
@@ -1136,11 +1152,14 @@ def preprocess_behavior(Z: Sequence[Tensor], settings):
         return out, ["xpos", "ypos", "xvel", "yvel"]
     if settings.task == "mc_rtt":
         return [item[2:4] for item in Z], ["xvel", "yvel"]
+    if settings.task == "dmfc_rsg":
+        labels = ["is_eye", "theta", "is_short", "ts", "tp"]
+        return list(Z), labels
     raise ValueError(f"Unknown task: {settings.task}")
 
 
 def fit_trajectories(S, Z, condition, settings, hyperparams):
-    if settings.task in {"area2_bump", "mc_maze"}:
+    if settings.task in {"area2_bump", "dmfc_rsg", "mc_maze"}:
         S_smooth = [as_tensor(gauss_filt(spikes.cpu().numpy(), hyperparams.sigma, hyperparams.Delta), spikes.device) for spikes in S]
         Z_proc, labels = preprocess_behavior(Z, settings)
         t_mask = _mask_by_alignment(settings.trial_alignment, hyperparams.trajectories_alignment)
@@ -1227,6 +1246,8 @@ def get_nwb_trial_data(
     ds = NWBDataset(Path(nwb_path))
     if settings.task == "area2_bump":
         return _area2_nwb_trial_data(ds, settings, split, max_trials, device)
+    if settings.task == "dmfc_rsg":
+        return _dmfc_nwb_trial_data(ds, settings, split, max_trials, device)
     if settings.task == "mc_maze":
         return _mc_maze_nwb_trial_data(ds, settings, split, max_trials, device)
     raise ValueError(f"Direct trial NWB loading is not implemented for {settings.task}.")
@@ -1295,6 +1316,43 @@ def _mc_maze_nwb_trial_data(ds, settings, split, max_trials, device):
             raise ValueError(f"mc_maze trial {tr}: behavior window contains NaNs.")
         S.append(_spikes_tensor(spikes_trial, device))
         Z.append(as_tensor(behavior, device))
+    return S, Z, condition, cond_list
+
+
+def _dmfc_nwb_trial_data(ds, settings, split, max_trials, device):
+    from nlb_tools.make_tensors import make_train_input_tensors
+
+    data = make_train_input_tensors(
+        ds,
+        dataset_name="dmfc_rsg",
+        trial_split=_split_labels(split),
+        include_behavior=True,
+        save_file=False,
+        return_dict=True,
+        seed=0,
+    )
+    heldin = np.asarray(data["train_spikes_heldin"], dtype=np.float64)
+    heldout = np.asarray(data["train_spikes_heldout"], dtype=np.float64)
+    behavior = np.asarray(data["train_behavior"], dtype=np.float64)
+    if heldin.shape[:2] != heldout.shape[:2]:
+        raise ValueError(f"dmfc_rsg train held-in {heldin.shape} and held-out {heldout.shape} are incompatible.")
+    if heldin.shape[1] != len(settings.trial_alignment):
+        raise ValueError(
+            f"dmfc_rsg expected {len(settings.trial_alignment)} samples from NWB, got {heldin.shape[1]}."
+        )
+
+    finite = np.all(np.isfinite(behavior), axis=1)
+    idx = np.flatnonzero(finite)
+    idx = idx if max_trials is None else idx[:max_trials]
+    condition, cond_list = _condition_index(behavior[idx, :4])
+
+    S, Z = [], []
+    n_time = heldin.shape[1]
+    for trial in idx:
+        spikes_trial = np.concatenate([heldout[trial], heldin[trial]], axis=1).T
+        z = np.repeat(behavior[trial, :, None], n_time, axis=1)
+        S.append(_spikes_tensor(spikes_trial, device))
+        Z.append(as_tensor(z, device))
     return S, Z, condition, cond_list
 
 

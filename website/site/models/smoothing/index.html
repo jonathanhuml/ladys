@@ -6,19 +6,19 @@
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         
         
-        <link rel="canonical" href="https://zkunkworks.com/ladys/models/">
-        <link rel="shortcut icon" href="../assets/favicon.ico">
+        <link rel="canonical" href="https://zkunkworks.com/ladys/models/smoothing/">
+        <link rel="shortcut icon" href="../../assets/favicon.ico">
         
-        <title>Overview - LaDyS</title>
-        <link href="../css/bootstrap.min.css" rel="stylesheet">
-        <link href="../css/fontawesome.min.css" rel="stylesheet">
-        <link href="../css/brands.min.css" rel="stylesheet">
-        <link href="../css/solid.min.css" rel="stylesheet">
-        <link href="../css/v4-font-face.min.css" rel="stylesheet">
-        <link href="../css/base.css" rel="stylesheet">
+        <title>Smoothing - LaDyS</title>
+        <link href="../../css/bootstrap.min.css" rel="stylesheet">
+        <link href="../../css/fontawesome.min.css" rel="stylesheet">
+        <link href="../../css/brands.min.css" rel="stylesheet">
+        <link href="../../css/solid.min.css" rel="stylesheet">
+        <link href="../../css/v4-font-face.min.css" rel="stylesheet">
+        <link href="../../css/base.css" rel="stylesheet">
         <link id="hljs-light" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" >
         <link id="hljs-dark" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github-dark.min.css" disabled>
-        <link href="../stylesheets/minimal.css" rel="stylesheet">
+        <link href="../../stylesheets/minimal.css" rel="stylesheet">
         <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
         <script>hljs.highlightAll();</script> 
     </head>
@@ -26,7 +26,7 @@
     <body>
         <div class="navbar fixed-top navbar-expand-lg navbar-dark bg-primary">
             <div class="container">
-                <a class="navbar-brand" href="..">LaDyS</a>
+                <a class="navbar-brand" href="../..">LaDyS</a>
                 <!-- Expander button -->
                 <button type="button" class="navbar-toggler" data-bs-toggle="collapse" data-bs-target="#navbar-collapse" aria-controls="navbar-collapse" aria-expanded="false" aria-label="Toggle navigation">
                     <span class="navbar-toggler-icon"></span>
@@ -39,37 +39,37 @@
     <a href="#" class="nav-link dropdown-toggle active" aria-current="page" role="button" data-bs-toggle="dropdown" aria-expanded="false">Models</a>
     <ul class="dropdown-menu">
 <li>
-  <a href="./" class="dropdown-item active" aria-current="page">Overview</a>
+  <a href="../" class="dropdown-item">Overview</a>
 </li>
 <li>
-  <a href="bgpfa/" class="dropdown-item">BGPFA</a>
+  <a href="../bgpfa/" class="dropdown-item">BGPFA</a>
 </li>
 <li>
-  <a href="cassm/" class="dropdown-item">CASSM</a>
+  <a href="../cassm/" class="dropdown-item">CASSM</a>
 </li>
 <li>
-  <a href="gpfa/" class="dropdown-item">GPFA</a>
+  <a href="../gpfa/" class="dropdown-item">GPFA</a>
 </li>
 <li>
-  <a href="ilqr_vae/" class="dropdown-item">ILQR-VAE</a>
+  <a href="../ilqr_vae/" class="dropdown-item">ILQR-VAE</a>
 </li>
 <li>
-  <a href="kalman/" class="dropdown-item">Kalman</a>
+  <a href="../kalman/" class="dropdown-item">Kalman</a>
 </li>
 <li>
-  <a href="lfads/" class="dropdown-item">LFADS</a>
+  <a href="../lfads/" class="dropdown-item">LFADS</a>
 </li>
 <li>
-  <a href="mint/" class="dropdown-item">MINT</a>
+  <a href="../mint/" class="dropdown-item">MINT</a>
 </li>
 <li>
-  <a href="ndt/" class="dropdown-item">NDT</a>
+  <a href="../ndt/" class="dropdown-item">NDT</a>
 </li>
 <li>
-  <a href="psth/" class="dropdown-item">PSTH</a>
+  <a href="../psth/" class="dropdown-item">PSTH</a>
 </li>
 <li>
-  <a href="smoothing/" class="dropdown-item">Smoothing</a>
+  <a href="./" class="dropdown-item active" aria-current="page">Smoothing</a>
 </li>
     </ul>
   </li>
@@ -77,13 +77,13 @@
     <a href="#" class="nav-link dropdown-toggle" role="button" data-bs-toggle="dropdown" aria-expanded="false">Contracts</a>
     <ul class="dropdown-menu">
 <li>
-  <a href="../model_output_contract/" class="dropdown-item">Model Output</a>
+  <a href="../../model_output_contract/" class="dropdown-item">Model Output</a>
 </li>
 <li>
-  <a href="../optimizer_contract/" class="dropdown-item">Optimizer</a>
+  <a href="../../optimizer_contract/" class="dropdown-item">Optimizer</a>
 </li>
 <li>
-  <a href="../gpfa_port_notes/" class="dropdown-item">GPFA Port Notes</a>
+  <a href="../../gpfa_port_notes/" class="dropdown-item">GPFA Port Notes</a>
 </li>
     </ul>
   </li>
@@ -97,7 +97,7 @@
                         </li>
 <li class="nav-item">
   <a href="/" class="nav-link zkunkworks-nav-link" aria-label="zkunkworks home">
-    <img class="zkunkworks-nav-logo" src="../assets/skunk.png" alt="" width="34" height="24">
+    <img class="zkunkworks-nav-logo" src="../../assets/skunk.png" alt="" width="34" height="24">
   </a>
 </li>
                     </ul>
@@ -118,8 +118,32 @@
     <div id="toc-collapse" class="navbar-collapse collapse card bg-body-tertiary">
         <ul class="nav flex-column">
             
-            <li class="nav-item" data-bs-level="1"><a href="#model-documentation" class="nav-link">Model Documentation</a>
+            <li class="nav-item" data-bs-level="1"><a href="#smoothing" class="nav-link">Smoothing</a>
               <ul class="nav flex-column">
+            <li class="nav-item" data-bs-level="2"><a href="#source" class="nav-link">Source</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
+            <li class="nav-item" data-bs-level="2"><a href="#when-to-use" class="nav-link">When to use</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
+            <li class="nav-item" data-bs-level="2"><a href="#assumptions" class="nav-link">Assumptions</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
+            <li class="nav-item" data-bs-level="2"><a href="#outputs" class="nav-link">Outputs</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
+            <li class="nav-item" data-bs-level="2"><a href="#configuration" class="nav-link">Configuration</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
+            <li class="nav-item" data-bs-level="2"><a href="#contracts" class="nav-link">Contracts</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
               </ul>
             </li>
         </ul>
@@ -129,72 +153,95 @@
 
 <!-- Generated by scripts/generate_model_docs.py. Do not edit manually. -->
 
-<h1 id="model-documentation">Model Documentation</h1>
-<p>These pages are generated from registered model config classes, model class docstrings, and config field defaults.</p>
-<p>After editing a model docstring or config, regenerate these files with:</p>
-<pre><code class="language-bash">python scripts/generate_model_docs.py
-</code></pre>
+<h1 id="smoothing">Smoothing</h1>
+<p>Gaussian-smoothed spike-count baseline.</p>
+<h2 id="source">Source</h2>
+<ul>
+<li>Registry name: <code>smoothing</code></li>
+<li>Model class: <code>ladys.models.baselines.Smoothing</code></li>
+<li>Config class: <code>ladys.models.baselines.SmoothingConfig</code></li>
+<li>Source file: <code>src/ladys/models/baselines.py</code></li>
+</ul>
+<h2 id="when-to-use">When to use</h2>
+<p>Use Smoothing as a lightweight statistical baseline for binned spike
+counts. It convolves each neuron's spike train with a Gaussian kernel and
+returns nonnegative smoothed count rates. For NLB co-smoothing, the model
+mirrors the public NLB smoothing baseline: log-smoothed held-in counts are
+used as features for a Poisson decoder fitted to training held-out neurons.</p>
+<h2 id="assumptions">Assumptions</h2>
+<p>Inputs are nonnegative binned spike counts. <code>kern_sd_ms</code> and <code>bin_size_ms</code>
+define the Gaussian kernel in the same units as the NLB baseline scripts.
+The default <code>kern_sd_ms=50</code> and <code>bin_size_ms=5</code> match the public MCMaze
+smoothing defaults.</p>
+<h2 id="outputs">Outputs</h2>
+<p><code>forward</code> returns smoothed counts as <code>rates</code> and log-smoothed counts as
+<code>latents</code>. On synthetic datasets the rates are scored directly. On NLB
+datasets, the NLB adapter fits a Poisson readout from <code>latents</code> to held-out
+spike counts and scores the decoded held-out rates.</p>
+<h2 id="configuration">Configuration</h2>
+<p>Config for Gaussian spike smoothing plus an NLB held-out decoder.</p>
 <table>
 <thead>
 <tr>
-<th>Model</th>
-<th>Registry Name</th>
-<th>Summary</th>
+<th>Field</th>
+<th>Type</th>
+<th>Default</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td><a href="bgpfa/">BGPFA</a></td>
-<td><code>bgpfa</code></td>
-<td>Variational Bayesian GPFA with ARD and differentiable ELBO training.</td>
+<td><code>name</code></td>
+<td><code>Literal['smoothing']</code></td>
+<td><code>'smoothing'</code></td>
 </tr>
 <tr>
-<td><a href="cassm/">CASSM</a></td>
-<td><code>cassm</code></td>
-<td>Thin wrapper around the bundled CASSM sparse filter/smoother.</td>
+<td><code>objective</code></td>
+<td><code>str</code></td>
+<td><code>'smoothed_poisson_nll'</code></td>
 </tr>
 <tr>
-<td><a href="gpfa/">GPFA</a></td>
-<td><code>gpfa</code></td>
-<td>Gaussian Process Factor Analysis with diagonal observation noise.</td>
+<td><code>kern_sd_ms</code></td>
+<td><code>float</code></td>
+<td><code>50.0</code></td>
 </tr>
 <tr>
-<td><a href="ilqr_vae/">ILQRVAE</a></td>
-<td><code>ilqr_vae</code></td>
-<td>Optimization-based iLQR-VAE with posterior-control inference and ELBO training.</td>
+<td><code>bin_size_ms</code></td>
+<td><code>float</code></td>
+<td><code>5.0</code></td>
 </tr>
 <tr>
-<td><a href="kalman/">Kalman</a></td>
-<td><code>kalman</code></td>
-<td>Dense Kalman filter baseline adapted from the CASSM source.</td>
+<td><code>log_offset</code></td>
+<td><code>float</code></td>
+<td><code>0.0001</code></td>
 </tr>
 <tr>
-<td><a href="lfads/">LFADS</a></td>
-<td><code>lfads</code></td>
-<td>Latent Factor Analysis via Dynamical Systems for binned spike counts.</td>
+<td><code>nlb_decoder_alpha</code></td>
+<td><code>float</code></td>
+<td><code>0.01</code></td>
 </tr>
 <tr>
-<td><a href="mint/">MINT</a></td>
-<td><code>mint</code></td>
-<td>Mesh of Idealized Neural Trajectories adapted to the LaDyS API.</td>
+<td><code>nlb_poisson_max_iter</code></td>
+<td><code>int</code></td>
+<td><code>500</code></td>
 </tr>
 <tr>
-<td><a href="ndt/">NDT</a></td>
-<td><code>ndt</code></td>
-<td>Transformer encoder trained with a masked Poisson spike objective.</td>
+<td><code>prediction_floor</code></td>
+<td><code>float</code></td>
+<td><code>1e-09</code></td>
 </tr>
 <tr>
-<td><a href="psth/">PSTH</a></td>
-<td><code>psth</code></td>
-<td>Peri-stimulus time histogram baseline.</td>
-</tr>
-<tr>
-<td><a href="smoothing/">Smoothing</a></td>
-<td><code>smoothing</code></td>
-<td>Gaussian-smoothed spike-count baseline.</td>
+<td><code>optimization</code></td>
+<td><code>OptimizationConfig</code></td>
+<td><code>OptimizationConfig(name='inference_only')</code></td>
 </tr>
 </tbody>
-</table></div>
+</table>
+<h2 id="contracts">Contracts</h2>
+<ul>
+<li><code>forward</code> inputs use <code>(batch, time, neurons)</code> observations.</li>
+<li>Runtime outputs follow the <a href="../../model_output_contract/">model output contract</a>.</li>
+<li>Optimizer epochs follow the <a href="../../optimizer_contract/">optimizer contract</a>.</li>
+</ul></div>
             </div>
         </div>
 
@@ -202,18 +249,18 @@
 <p>
   <a class="zkunkworks-footer-link" href="/">
     <span>Built by</span>
-    <img class="zkunkworks-footer-logo" src="../assets/skunk.png" alt="" width="28" height="20">
+    <img class="zkunkworks-footer-logo" src="../../assets/skunk.png" alt="" width="28" height="20">
     <span>zkunkworks</span>
   </a>
 </p>
         </footer>
-        <script src="../js/bootstrap.bundle.min.js"></script>
+        <script src="../../js/bootstrap.bundle.min.js"></script>
         <script>
-            var base_url = "..",
+            var base_url = "../..",
                 shortcuts = {"help": 191, "next": 78, "previous": 80, "search": 83};
         </script>
-        <script src="../js/base.js"></script>
-        <script src="../search/main.js"></script>
+        <script src="../../js/base.js"></script>
+        <script src="../../search/main.js"></script>
 
         <div class="modal" id="mkdocs_search_modal" tabindex="-1" role="dialog" aria-labelledby="searchModalLabel" aria-hidden="true">
     <div class="modal-dialog modal-lg">

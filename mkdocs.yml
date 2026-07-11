@@ -18,6 +18,8 @@ nav:
       - LFADS: models/lfads.md
       - MINT: models/mint.md
       - NDT: models/ndt.md
+      - PSTH: models/psth.md
+      - Smoothing: models/smoothing.md
   - Contracts:
       - Model Output: model_output_contract.md
       - Optimizer: optimizer_contract.md

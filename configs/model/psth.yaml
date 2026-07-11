@@ -1,0 +1,7 @@
+name: psth
+objective: psth_poisson_nll
+kern_sd_ms: 70.0
+bin_size_ms: 5.0
+prediction_floor: 1.0e-9
+optimization:
+  name: inference_only

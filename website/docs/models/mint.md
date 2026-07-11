@@ -23,10 +23,11 @@ rather than a differentiable PyTorch training loop.
 ## NLB datasets
 
 The native LaDyS MINT port supports the three MINT/NLB datasets used in the
-original repository: `area2_bump`, `mc_maze`, and `mc_rtt`. These tasks keep
-the original task-specific trajectory builders. Area2 and Maze smooth and
-average repeated condition-aligned trials; RTT can use single-trial
-AutoLFADS-rate trajectories from the MINT MATLAB data. The `ladys run`
+original repository: `area2_bump`, `mc_maze`, and `mc_rtt`, plus a
+LaDyS-native `dmfc_rsg` adapter built from the NLB 5 ms H5 tensors. Area2
+and Maze smooth and average repeated condition-aligned trials; RTT can use
+single-trial AutoLFADS-rate trajectories from the MINT MATLAB data; DMFC
+averages the NLB condition-indexed reproduction trials. The `ladys run`
 command dispatches MINT NLB configs through `ladys.mint_nlb`, which writes a
 hidden-test H5 submission and a `report.md` with co-BPS.
 
@@ -58,11 +59,11 @@ optimization block should normally remain `name="inference_only"`; benchmark
 epoch curves repeat the same decoded rates so MINT can be plotted alongside
 trainable methods without implying a backward pass or EM loop.
 
-For NLB tasks, `dataset` selects one of the task-specific trajectory
-builders (`area2_bump`, `mc_maze`, or `mc_rtt`) and `train_source` controls
-whether libraries are built from the downloaded MATLAB files or DANDI NWB
-files. The NLB runner writes EvalAI-style held-out rate submissions and
-reports co-smoothing bits/spike.
+For NLB tasks, `dataset` selects a task-specific trajectory builder.
+`area2_bump` and `mc_maze` can build libraries from DANDI NWBs, `mc_rtt`
+uses the downloaded MINT MATLAB data by default, and `dmfc_rsg` uses the
+prepared NLB H5 tensors. The NLB runner writes EvalAI-style held-out rate
+submissions and reports co-smoothing bits/spike.
 
 For the synthetic Lorenz task, LaDyS builds the MINT trajectory library from
 repeated training trials. The default `lorenz_library_source="smoothed_spikes"`
@@ -77,8 +78,8 @@ seen trajectories rather than interpolation to unseen trajectories.
 | --- | --- | --- |
 | `name` | `Literal['mint']` | `'mint'` |
 | `objective` | `str` | `'mint_likelihood_recursion'` |
-| `dataset` | `Literal['area2_bump', 'mc_maze', 'mc_rtt', 'lorenz']` | `'mc_maze'` |
-| `train_source` | `Literal['mat', 'nwb']` | `'nwb'` |
+| `dataset` | `Literal['area2_bump', 'dmfc_rsg', 'mc_maze', 'mc_rtt', 'lorenz']` | `'mc_maze'` |
+| `train_source` | `Literal['h5', 'mat', 'nwb']` | `'nwb'` |
 | `train_split` | `Literal['auto', 'train', 'trainval']` | `'trainval'` |
 | `nlb_neural_state_defaults` | `bool` | `True` |
 | `nwb_root` | `str` | `'data/real/nlb/dandi'` |

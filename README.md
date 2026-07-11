@@ -33,6 +33,13 @@ tensors in `forward`.
   oracle/debug checks.
 - `ladys.models.ndt`: masked-count NeuralDataTransformer (NDT)
   adapter with native LaDyS config, training, prediction, and metrics contracts.
+- `ladys.models.psth`: peri-stimulus time histogram baseline. On NLB H5 files
+  with condition indices, it smooths training held-out spikes, averages them by
+  condition, and maps those condition averages onto eval trials without using
+  target-side PSTH evaluation metadata.
+- `ladys.models.smoothing`: Gaussian spike-smoothing baseline. For NLB
+  co-smoothing, it mirrors the public NLB smoothing baseline by fitting a
+  Poisson readout from log-smoothed held-in counts to training held-out counts.
 
 
 ## Public Experiment API
@@ -106,6 +113,22 @@ GPFA uses the same real-data path with its NLB adapter:
 ```bash
 ladys run -c configs/experiment/real/mc_maze/gpfa/gpfa_mc_maze_nlb_5ms.yaml
 ladys score-nlb --run-dir runs/gpfa_mc_maze_nlb_5ms
+```
+
+The lightweight NLB baselines are available through the same experiment API:
+
+```bash
+ladys run -c configs/experiment/real/mc_maze/psth/psth_mc_maze_nlb_5ms.yaml
+ladys run -c configs/experiment/real/mc_maze/smoothing/smoothing_mc_maze_nlb_5ms.yaml
+ladys score-nlb --run-dir runs/psth_mc_maze_nlb_5ms
+ladys score-nlb --run-dir runs/smoothing_mc_maze_nlb_5ms
+```
+
+Synthetic Lorenz configs are also included:
+
+```bash
+ladys run -c configs/experiment/synthetic/lorenz/psth/psth_lorenz.yaml
+ladys run -c configs/experiment/synthetic/lorenz/smoothing/smoothing_lorenz.yaml
 ```
 
 For methods that emit a full EvalAI-style submission H5, the same command can

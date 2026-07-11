@@ -20,3 +20,5 @@ python scripts/generate_model_docs.py
 | [LFADS](lfads.md) | `lfads` | Latent Factor Analysis via Dynamical Systems for binned spike counts. |
 | [MINT](mint.md) | `mint` | Mesh of Idealized Neural Trajectories adapted to the LaDyS API. |
 | [NDT](ndt.md) | `ndt` | Transformer encoder trained with a masked Poisson spike objective. |
+| [PSTH](psth.md) | `psth` | Peri-stimulus time histogram baseline. |
+| [Smoothing](smoothing.md) | `smoothing` | Gaussian-smoothed spike-count baseline. |

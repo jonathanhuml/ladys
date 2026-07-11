@@ -118,6 +118,8 @@ def test_cli_lists_models(capsys):
     assert "kalman" in output
     assert "lfads" in output
     assert "ndt" in output
+    assert "psth" in output
+    assert "smoothing" in output
 
 
 def test_cli_lists_datasets(capsys):

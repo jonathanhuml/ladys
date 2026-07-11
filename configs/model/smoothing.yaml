@@ -1,0 +1,10 @@
+name: smoothing
+objective: smoothed_poisson_nll
+kern_sd_ms: 50.0
+bin_size_ms: 5.0
+log_offset: 1.0e-4
+nlb_decoder_alpha: 0.01
+nlb_poisson_max_iter: 500
+prediction_floor: 1.0e-9
+optimization:
+  name: inference_only
