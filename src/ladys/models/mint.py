@@ -47,6 +47,7 @@ class Settings:
     trial_alignment: range = range(0)
     test_alignment: range = range(0)
     CondInfo: Optional[object] = None
+    lorenz_library_source: str = "smoothed_spikes"
 
 
 @dataclass
@@ -166,7 +167,28 @@ DATASET_FIELDS: Mapping[str, Mapping[str, Mapping[str, str]]] = {
 
 @BaseModelConfig.register
 class MINTConfig(BaseModelConfig):
-    """Config for the MINT NLB co-smoothing port."""
+    """Config for the MINT trajectory-library decoder.
+
+    MINT is inference-only after its trajectory library has been built. The
+    optimization block should normally remain `name="inference_only"`; benchmark
+    epoch curves repeat the same decoded rates so MINT can be plotted alongside
+    trainable methods without implying a backward pass or EM loop.
+
+    For NLB tasks, `dataset` selects one of the task-specific trajectory
+    builders (`area2_bump`, `mc_maze`, or `mc_rtt`) and `train_source` controls
+    whether libraries are built from the downloaded MATLAB files or DANDI NWB
+    files. The NLB runner writes EvalAI-style held-out rate submissions and
+    reports co-smoothing bits/spike.
+
+    For the synthetic Lorenz task, LaDyS builds the MINT trajectory library from
+    repeated training trials. The default `lorenz_library_source="smoothed_spikes"`
+    estimates library rates by Gaussian-smoothing training spikes and averaging
+    by initial condition. `lorenz_library_source="true_rates"` is an oracle
+    sanity-check mode only and should not be used for fair method comparisons.
+    The default Lorenz split repeats the same initial-condition trajectories
+    across train and validation trials, so this benchmark measures denoising of
+    seen trajectories rather than interpolation to unseen trajectories.
+    """
 
     name: Literal["mint"] = "mint"
     objective: str = "mint_likelihood_recursion"
@@ -178,6 +200,7 @@ class MINTConfig(BaseModelConfig):
     mat_data_root: str = "data/mint"
     target_h5: Optional[str] = None
     eval_bin_size_ms: int = 5
+    lorenz_library_source: Literal["smoothed_spikes", "true_rates"] = "smoothed_spikes"
     n_candidates: Optional[int] = None
     window_length: Optional[int] = None
     delta: Optional[int] = None
@@ -194,7 +217,46 @@ class MINTConfig(BaseModelConfig):
 
 
 class MINT(BaseDynamicsModel):
-    """MINT library model following the LaDyS ``BaseDynamicsModel`` API."""
+    """Mesh of Idealized Neural Trajectories adapted to the LaDyS API.
+
+    ## Method
+
+    MINT builds a library of idealized neural trajectories (`Omega_plus`) and
+    paired task-state trajectories (`Phi_plus`). Prediction does not optimize
+    model parameters. Instead, it bins incoming spikes, updates a Poisson
+    likelihood recursion over the library, and estimates rates by interpolating
+    between likely library states. This makes MINT a library/inference method
+    rather than a differentiable PyTorch training loop.
+
+    ## NLB datasets
+
+    The native LaDyS MINT port supports the three MINT/NLB datasets used in the
+    original repository: `area2_bump`, `mc_maze`, and `mc_rtt`. These tasks keep
+    the original task-specific trajectory builders. Area2 and Maze smooth and
+    average repeated condition-aligned trials; RTT can use single-trial
+    AutoLFADS-rate trajectories from the MINT MATLAB data. The `ladys run`
+    command dispatches MINT NLB configs through `ladys.mint_nlb`, which writes a
+    hidden-test H5 submission and a `report.md` with co-BPS.
+
+    ## Lorenz datasets
+
+    The synthetic Lorenz adapter is a LaDyS-specific trajectory builder. With
+    the default `lorenz_library_source="smoothed_spikes"`, the library is
+    estimated from training spikes by Gaussian smoothing and condition averaging.
+    This keeps the comparison non-oracular while still matching MINT's
+    assumption that useful trajectory templates are learned before inference.
+
+    The `true_rates` library source is intentionally exposed for debugging. It
+    reproduces an oracle/template-retrieval sanity check, not a fair method
+    comparison. Use it only when validating the likelihood/interpolation code.
+
+    ## Outputs
+
+    `forward` accepts `(batch, time, neurons)` spikes and returns decoded rates
+    in the standard `ModelOutput.rates` field. `loss` returns a zero scalar so
+    the common trainer can record inference-only epochs without updating model
+    parameters.
+    """
 
     def __init__(self, config: MINTConfig) -> None:
         super().__init__()
@@ -233,6 +295,7 @@ class MINT(BaseDynamicsModel):
         self._refresh_runtime_params()
 
     def _apply_config_overrides(self) -> None:
+        self.settings.lorenz_library_source = self.config.lorenz_library_source
         if self.config.n_candidates is not None:
             self.hyperparams.n_candidates = int(self.config.n_candidates)
         if self.config.window_length is not None:
@@ -643,6 +706,7 @@ def get_mint_config(dataset: str) -> Tuple[Settings, HyperParams]:
         settings.test_alignment = range(0, 100)
         hp.trajectories_alignment = range(0, 100)
         hp.min_lambda = 1e-3
+        hp.sigma = 2
         hp.Delta = 1
         hp.window_length = 6
         hp.n_candidates = 4
@@ -1096,12 +1160,35 @@ def fit_trajectories(S, Z, condition, settings, hyperparams):
         rates = [item[4:] * settings.Ts * hyperparams.Delta for item in Z]
         return rates, vel, labels
     if settings.task == "lorenz":
+        source = getattr(settings, "lorenz_library_source", "smoothed_spikes")
+        if source == "true_rates":
+            rate_trials = [item.to(TORCH_DTYPE) for item in Z]
+        elif source == "smoothed_spikes":
+            if int(hyperparams.sigma) > 0:
+                rate_trials = [
+                    as_tensor(
+                        gauss_filt(spikes.cpu().numpy(), int(hyperparams.sigma), hyperparams.Delta),
+                        spikes.device,
+                    )
+                    for spikes in S
+                ]
+            else:
+                rate_trials = [spikes.to(TORCH_DTYPE) for spikes in S]
+        else:
+            raise ValueError(f"Unknown Lorenz MINT library source: {source}")
+
+        n_time = rate_trials[0].shape[1]
+        if len(settings.trial_alignment) == n_time:
+            t_mask = _mask_by_alignment(settings.trial_alignment, hyperparams.trajectories_alignment)
+        else:
+            t_mask = np.ones(n_time, dtype=bool)
+        rate_trials = [item[:, t_mask] for item in rate_trials]
         cond_list = np.unique(condition)
         grouped_rates = []
         for cond in cond_list:
             trial_idx = np.flatnonzero(condition == cond)
-            grouped_rates.append([Z[i].to(TORCH_DTYPE) for i in trial_idx])
-        x_bar = [torch.mean(torch.stack(group, dim=2), dim=2).clamp_min(0.0) for group in grouped_rates]
+            grouped_rates.append([rate_trials[i] for i in trial_idx])
+        x_bar = smooth_average(grouped_rates, hyperparams, settings.Ts)
         return x_bar, [item.clone() for item in x_bar], [f"rate_{i}" for i in range(x_bar[0].shape[0])]
     raise ValueError(f"Unknown task: {settings.task}")
 

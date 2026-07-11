@@ -15,9 +15,11 @@ model:
   name: mint
   objective: mint_likelihood_recursion
   dataset: lorenz
+  lorenz_library_source: smoothed_spikes
   n_candidates: 4
   window_length: 6
   delta: 1
+  sigma: 2
   min_rate: 0.0
   causal: false
   optimization:

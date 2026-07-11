@@ -2,7 +2,7 @@
 
 # MINT
 
-MINT library model following the LaDyS ``BaseDynamicsModel`` API.
+Mesh of Idealized Neural Trajectories adapted to the LaDyS API.
 
 ## Source
 
@@ -11,9 +11,67 @@ MINT library model following the LaDyS ``BaseDynamicsModel`` API.
 - Config class: `ladys.models.mint.MINTConfig`
 - Source file: `src/ladys/models/mint.py`
 
+## Method
+
+MINT builds a library of idealized neural trajectories (`Omega_plus`) and
+paired task-state trajectories (`Phi_plus`). Prediction does not optimize
+model parameters. Instead, it bins incoming spikes, updates a Poisson
+likelihood recursion over the library, and estimates rates by interpolating
+between likely library states. This makes MINT a library/inference method
+rather than a differentiable PyTorch training loop.
+
+## NLB datasets
+
+The native LaDyS MINT port supports the three MINT/NLB datasets used in the
+original repository: `area2_bump`, `mc_maze`, and `mc_rtt`. These tasks keep
+the original task-specific trajectory builders. Area2 and Maze smooth and
+average repeated condition-aligned trials; RTT can use single-trial
+AutoLFADS-rate trajectories from the MINT MATLAB data. The `ladys run`
+command dispatches MINT NLB configs through `ladys.mint_nlb`, which writes a
+hidden-test H5 submission and a `report.md` with co-BPS.
+
+## Lorenz datasets
+
+The synthetic Lorenz adapter is a LaDyS-specific trajectory builder. With
+the default `lorenz_library_source="smoothed_spikes"`, the library is
+estimated from training spikes by Gaussian smoothing and condition averaging.
+This keeps the comparison non-oracular while still matching MINT's
+assumption that useful trajectory templates are learned before inference.
+
+The `true_rates` library source is intentionally exposed for debugging. It
+reproduces an oracle/template-retrieval sanity check, not a fair method
+comparison. Use it only when validating the likelihood/interpolation code.
+
+## Outputs
+
+`forward` accepts `(batch, time, neurons)` spikes and returns decoded rates
+in the standard `ModelOutput.rates` field. `loss` returns a zero scalar so
+the common trainer can record inference-only epochs without updating model
+parameters.
+
 ## Configuration
 
-Config for the MINT NLB co-smoothing port.
+Config for the MINT trajectory-library decoder.
+
+MINT is inference-only after its trajectory library has been built. The
+optimization block should normally remain `name="inference_only"`; benchmark
+epoch curves repeat the same decoded rates so MINT can be plotted alongside
+trainable methods without implying a backward pass or EM loop.
+
+For NLB tasks, `dataset` selects one of the task-specific trajectory
+builders (`area2_bump`, `mc_maze`, or `mc_rtt`) and `train_source` controls
+whether libraries are built from the downloaded MATLAB files or DANDI NWB
+files. The NLB runner writes EvalAI-style held-out rate submissions and
+reports co-smoothing bits/spike.
+
+For the synthetic Lorenz task, LaDyS builds the MINT trajectory library from
+repeated training trials. The default `lorenz_library_source="smoothed_spikes"`
+estimates library rates by Gaussian-smoothing training spikes and averaging
+by initial condition. `lorenz_library_source="true_rates"` is an oracle
+sanity-check mode only and should not be used for fair method comparisons.
+The default Lorenz split repeats the same initial-condition trajectories
+across train and validation trials, so this benchmark measures denoising of
+seen trajectories rather than interpolation to unseen trajectories.
 
 | Field | Type | Default |
 | --- | --- | --- |
@@ -27,6 +85,7 @@ Config for the MINT NLB co-smoothing port.
 | `mat_data_root` | `str` | `'data/mint'` |
 | `target_h5` | `Optional[str]` | `None` |
 | `eval_bin_size_ms` | `int` | `5` |
+| `lorenz_library_source` | `Literal['smoothed_spikes', 'true_rates']` | `'smoothed_spikes'` |
 | `n_candidates` | `Optional[int]` | `None` |
 | `window_length` | `Optional[int]` | `None` |
 | `delta` | `Optional[int]` | `None` |

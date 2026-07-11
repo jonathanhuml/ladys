@@ -48,6 +48,14 @@ from ladys.models import (
     NDTConfig,
 )
 from ladys.models.base import BaseModelConfig
+from ladys.plotting import (
+    model_color,
+    model_label,
+    model_marker,
+    plot_context,
+    save_figure,
+    style_axis,
+)
 from ladys.preprocessing import PreprocessedDataset, PreprocessingConfig
 from ladys.training import Trainer, TrainerConfig
 from ladys.training.strategies import build_strategy
@@ -350,36 +358,54 @@ def plot_results(rows: list[dict], path: Path) -> None:
     if not ok_rows:
         return
 
-    fig, ax = plt.subplots(figsize=(6, 4))
     models = sorted({str(row["model"]) for row in ok_rows})
-    for model in models:
-        model_rows = [row for row in ok_rows if row["model"] == model]
-        neurons = sorted({int(row["neurons"]) for row in model_rows})
-        means = []
-        lows = []
-        highs = []
-        for n in neurons:
-            vals = np.array(
-                [float(row["seconds_per_epoch"]) for row in model_rows if int(row["neurons"]) == n],
-                dtype=float,
+    with plot_context(nrows=1, ncols=1):
+        fig, ax = plt.subplots()
+        for model in models:
+            model_rows = [row for row in ok_rows if row["model"] == model]
+            neurons = sorted({int(row["neurons"]) for row in model_rows})
+            means = []
+            lows = []
+            highs = []
+            for n in neurons:
+                vals = np.array(
+                    [
+                        float(row["seconds_per_epoch"])
+                        for row in model_rows
+                        if int(row["neurons"]) == n
+                    ],
+                    dtype=float,
+                )
+                means.append(float(np.mean(vals)))
+                lows.append(float(np.min(vals)))
+                highs.append(float(np.max(vals)))
+            means_arr = np.array(means)
+            color = model_color(model)
+            ax.plot(
+                neurons,
+                means_arr,
+                marker=model_marker(model),
+                color=color,
+                label=model_label(model),
             )
-            means.append(float(np.mean(vals)))
-            lows.append(float(np.min(vals)))
-            highs.append(float(np.max(vals)))
-        means_arr = np.array(means)
-        ax.plot(neurons, means_arr, marker="o", label=model)
-        if any(np.array(highs) > np.array(lows)):
-            ax.fill_between(neurons, lows, highs, alpha=0.15)
+            if any(np.array(highs) > np.array(lows)):
+                ax.fill_between(
+                    neurons,
+                    lows,
+                    highs,
+                    color=color,
+                    alpha=0.16,
+                    linewidth=0,
+                )
 
-    ax.set_xscale("log")
-    ax.set_xlabel("Number of neurons")
-    ax.set_ylabel("Seconds per epoch")
-    ax.set_title("Lorenz Scaling")
-    ax.grid(True, which="both", alpha=0.25)
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(path, dpi=200)
-    plt.close(fig)
+        ax.set_xscale("log")
+        ax.set_xlabel("Number of neurons")
+        ax.set_ylabel("Seconds per epoch")
+        ax.set_title("Lorenz Neuron Scaling")
+        style_axis(ax, which="both")
+        ax.legend()
+        save_figure(fig, path)
+        plt.close(fig)
 
 
 def write_summary(rows: list[dict], path: Path) -> None:
@@ -392,7 +418,7 @@ def write_summary(rows: list[dict], path: Path) -> None:
     lines = [
         "# Lorenz Neuron-Scaling Run Group",
         "",
-        "| neurons | " + " | ".join(f"{model} s/epoch" for model in models) + " |",
+        "| neurons | " + " | ".join(f"{model_label(model)} s/epoch" for model in models) + " |",
         "| ---: | " + " | ".join("---:" for _ in models) + " |",
     ]
     for n in neurons:

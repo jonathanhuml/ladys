@@ -9,3 +9,4 @@ PyYAML>=6.0
 h5py>=3.8
 nlb-tools
 dandi
+tueplots>=0.2.4; python_version >= "3.10"

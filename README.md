@@ -26,6 +26,11 @@ tensors in `forward`.
   spike-count datasets.
 - `ladys.models.kalman`: dense Kalman filter baseline adapted from the CASSM
   filtering code, exposed with per-trial rate predictions for benchmark metrics.
+- `ladys.models.mint`: inference-only Mesh of Idealized Neural Trajectories
+  decoder. MINT builds a trajectory library once, then decodes by Poisson
+  likelihood recursion and interpolation; Lorenz defaults to spike-derived
+  smoothed libraries, while `lorenz_library_source: true_rates` is reserved for
+  oracle/debug checks.
 - `ladys.models.ndt`: masked-count NeuralDataTransformer (NDT)
   adapter with native LaDyS config, training, prediction, and metrics contracts.
 
@@ -120,6 +125,11 @@ environment:
 pip install -e ".[benchmarks]"
 ```
 
+Benchmark figures use a shared LaDyS plotting style backed by TUEplots when it
+is available. On Python versions where TUEplots cannot be installed, LaDyS uses
+a local Matplotlib fallback with the same figure sizing, color, grid, legend,
+and export defaults.
+
 ```bash
 PYTHONPATH=src python3 scripts/benchmark_lorenz_scaling.py \
   --models cassm gpfa kalman ndt \
@@ -135,14 +145,20 @@ The script writes a grouped run under `runs/lorenz_scaling/`, including
 
 ```bash
 PYTHONPATH=src python3 scripts/benchmark_lorenz_loss_curves.py \
-  --models cassm gpfa kalman \
+  --models bgpfa cassm gpfa ilqr_vae kalman lfads mint ndt \
   --neurons 100 \
-  --epochs 30
+  --epochs 50
 ```
 
 The script writes a grouped run under `runs/lorenz_loss_curves/`, including
 top-level `summary.csv`/`summary.md`, comparison plots under `plots/`, and
 per-model outputs under `models/<model>/`.
+
+MINT appears in these curves as a horizontal inference-only baseline. Its
+default Lorenz adapter estimates trajectory-library rates from smoothed training
+spikes and repeated-trial averages. Passing
+`--mint-lorenz-library-source true_rates` switches to an oracle sanity check and
+should not be used for fair method ordering.
 
 ## Preprocessing
 

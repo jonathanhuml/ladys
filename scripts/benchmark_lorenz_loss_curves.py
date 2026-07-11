@@ -54,6 +54,15 @@ from ladys.models import (
     NDTConfig,
 )
 from ladys.models.base import BaseModelConfig
+from ladys.plotting import (
+    legend_outside,
+    model_color,
+    model_label,
+    model_marker,
+    plot_context,
+    save_figure,
+    style_axis,
+)
 from ladys.preprocessing import PreprocessedDataset, PreprocessingConfig
 from ladys.training import Trainer, TrainerConfig
 from ladys.training.strategies import build_strategy
@@ -160,6 +169,15 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="MINT binning stride in Lorenz time steps.",
+    )
+    parser.add_argument(
+        "--mint-lorenz-library-source",
+        choices=["smoothed_spikes", "true_rates"],
+        default=None,
+        help=(
+            "Source for Lorenz MINT trajectory-library rates. "
+            "'smoothed_spikes' is the fair default; 'true_rates' is an oracle sanity check."
+        ),
     )
     parser.add_argument(
         "--mint-causal",
@@ -389,11 +407,16 @@ def fit_mint_lorenz_library(
     torch_device = torch.device(device)
     model.to(torch_device)
     spikes = getattr(dataset, "raw_spikes", dataset.spikes)
+    library_source = getattr(getattr(model, "config", None), "lorenz_library_source", "smoothed_spikes")
     rates = getattr(dataset, "rates", None)
-    if rates is None:
+    latents = getattr(dataset, "latents", None)
+    if library_source == "true_rates" and rates is None:
         raise AttributeError("MINT Lorenz fitting requires true training rates.")
-    if spikes.ndim != 3 or rates.ndim != 3:
-        raise ValueError("MINT Lorenz fitting expects trial x time x neuron tensors.")
+    z_source = rates if library_source == "true_rates" else latents
+    if z_source is None:
+        z_source = spikes
+    if spikes.ndim != 3 or z_source.ndim != 3:
+        raise ValueError("MINT Lorenz fitting expects trial x time x feature tensors.")
 
     n_trials, n_time, _ = spikes.shape
     if n_trials == 0:
@@ -413,11 +436,11 @@ def fit_mint_lorenz_library(
             model.hyperparams.interp = 1
 
     spike_trials = [spikes[i].T.contiguous().to(torch_device) for i in range(n_trials)]
-    rate_trials = [
-        rates[i].T.contiguous().to(device=torch_device, dtype=torch.float64)
+    z_trials = [
+        z_source[i].T.contiguous().to(device=torch_device, dtype=torch.float64)
         for i in range(n_trials)
     ]
-    model.fit_library(spike_trials, rate_trials, condition)
+    model.fit_library(spike_trials, z_trials, condition)
 
 
 def rows_for_inference_only_model(
@@ -541,6 +564,8 @@ def build_model_config(
             model_data["window_length"] = args.mint_window_length
         if args.mint_delta is not None:
             model_data["delta"] = args.mint_delta
+        if args.mint_lorenz_library_source is not None:
+            model_data["lorenz_library_source"] = args.mint_lorenz_library_source
         if args.mint_causal:
             model_data["causal"] = True
         return BaseModelConfig.from_dict(model_data)
@@ -741,38 +766,49 @@ def plot_rate_traces(rows: list[dict], path: Path, title: str) -> None:
     neurons = sorted({int(row["neuron"]) for row in rows})
     ncols = 2
     nrows = int(np.ceil(len(neurons) / ncols))
-    fig, axes = plt.subplots(
-        nrows,
-        ncols,
-        figsize=(10, max(3, 2.0 * nrows)),
-        sharex=True,
-        squeeze=False,
-    )
-
-    for ax, neuron in zip(axes.ravel(), neurons):
-        neuron_rows = sorted(
-            [row for row in rows if int(row["neuron"]) == neuron],
-            key=lambda row: int(row["time"]),
+    with plot_context(nrows=nrows, ncols=ncols):
+        fig, axes = plt.subplots(
+            nrows,
+            ncols,
+            sharex=True,
+            squeeze=False,
         )
-        times = [int(row["time"]) for row in neuron_rows]
-        true_rates = [float(row["true_rate"]) for row in neuron_rows]
-        pred_rates = [float(row["pred_rate"]) for row in neuron_rows]
-        ax.plot(times, true_rates, color="black", linewidth=1.4, label="true")
-        ax.plot(times, pred_rates, color="#1f77b4", linewidth=1.2, label="pred")
-        ax.set_title(f"neuron {neuron}")
-        ax.grid(True, alpha=0.2)
 
-    for ax in axes.ravel()[len(neurons) :]:
-        ax.axis("off")
+        for ax, neuron in zip(axes.ravel(), neurons):
+            neuron_rows = sorted(
+                [row for row in rows if int(row["neuron"]) == neuron],
+                key=lambda row: int(row["time"]),
+            )
+            times = [int(row["time"]) for row in neuron_rows]
+            true_rates = [float(row["true_rate"]) for row in neuron_rows]
+            pred_rates = [float(row["pred_rate"]) for row in neuron_rows]
+            ax.plot(
+                times,
+                true_rates,
+                color=model_color("true"),
+                linewidth=1.4,
+                label="true",
+            )
+            ax.plot(
+                times,
+                pred_rates,
+                color=model_color("prediction"),
+                linewidth=1.2,
+                label="predicted",
+            )
+            ax.set_title(f"neuron {neuron}")
+            style_axis(ax)
 
-    handles, labels = axes[0, 0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper right")
-    fig.suptitle(title)
-    fig.supxlabel("Time")
-    fig.supylabel("Firing rate")
-    fig.tight_layout(rect=(0, 0, 0.96, 0.96))
-    fig.savefig(path, dpi=200)
-    plt.close(fig)
+        for ax in axes.ravel()[len(neurons) :]:
+            ax.axis("off")
+
+        handles, labels = axes[0, 0].get_legend_handles_labels()
+        fig.legend(handles, labels, loc="upper right")
+        fig.suptitle(title)
+        fig.supxlabel("Time")
+        fig.supylabel("Firing rate")
+        save_figure(fig, path)
+        plt.close(fig)
 
 
 def write_history(path: Path, rows: list[dict]) -> None:
@@ -806,27 +842,33 @@ def plot_test_rate_mse(rows: list[dict], path: Path, log_y: bool = False) -> Non
         return
 
     models = sorted({str(row["model"]) for row in ok_rows})
-    fig, ax = plt.subplots(figsize=(8, 5))
+    with plot_context(nrows=1, ncols=1, rel_width=0.86, height_scale=1.45):
+        fig, ax = plt.subplots()
 
-    for model in models:
-        model_rows = sorted(
-            [row for row in ok_rows if row["model"] == model],
-            key=lambda row: int(row["epoch"]),
-        )
-        epochs = [int(row["epoch"]) for row in model_rows]
-        test_rate_mse = [float(row["test_rate_mse"]) for row in model_rows]
-        ax.plot(epochs, test_rate_mse, marker="o", markersize=3, label=model)
+        for model in models:
+            model_rows = sorted(
+                [row for row in ok_rows if row["model"] == model],
+                key=lambda row: int(row["epoch"]),
+            )
+            epochs = [int(row["epoch"]) for row in model_rows]
+            test_rate_mse = [float(row["test_rate_mse"]) for row in model_rows]
+            ax.plot(
+                epochs,
+                test_rate_mse,
+                color=model_color(model),
+                linewidth=1.4,
+                label=model_label(model),
+            )
 
-    if log_y:
-        ax.set_yscale("log")
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("Held-out firing-rate MSE")
-    ax.set_title("Held-out firing-rate MSE by epoch")
-    ax.grid(True, alpha=0.25)
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(path, dpi=200)
-    plt.close(fig)
+        if log_y:
+            ax.set_yscale("log")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Held-out firing-rate MSE")
+        ax.set_title("Held-out Firing-Rate MSE")
+        style_axis(ax)
+        legend_outside(ax)
+        save_figure(fig, path)
+        plt.close(fig)
 
 
 def plot_test_objective(rows: list[dict], path: Path) -> None:
@@ -835,32 +877,37 @@ def plot_test_objective(rows: list[dict], path: Path) -> None:
         return
 
     models = sorted({str(row["model"]) for row in ok_rows})
-    fig, axes = plt.subplots(
-        len(models),
-        1,
-        figsize=(7, max(3, 2.8 * len(models))),
-        sharex=True,
-        squeeze=False,
-    )
-
-    for ax, model in zip(axes[:, 0], models):
-        model_rows = sorted(
-            [row for row in ok_rows if row["model"] == model],
-            key=lambda row: int(row["epoch"]),
+    with plot_context(nrows=len(models), ncols=1):
+        fig, axes = plt.subplots(
+            len(models),
+            1,
+            sharex=True,
+            squeeze=False,
         )
-        epochs = [int(row["epoch"]) for row in model_rows]
-        test_loss = [float(row["test_loss"]) for row in model_rows]
-        objective = str(model_rows[0]["objective"])
-        ax.plot(epochs, test_loss, marker="o", markersize=3, label="test objective")
-        ax.set_ylabel("Objective")
-        ax.set_title(f"{model} ({objective})")
-        ax.grid(True, alpha=0.25)
-        ax.legend()
 
-    axes[-1, 0].set_xlabel("Epoch")
-    fig.tight_layout()
-    fig.savefig(path, dpi=200)
-    plt.close(fig)
+        for ax, model in zip(axes[:, 0], models):
+            model_rows = sorted(
+                [row for row in ok_rows if row["model"] == model],
+                key=lambda row: int(row["epoch"]),
+            )
+            epochs = [int(row["epoch"]) for row in model_rows]
+            test_loss = [float(row["test_loss"]) for row in model_rows]
+            objective = str(model_rows[0]["objective"])
+            ax.plot(
+                epochs,
+                test_loss,
+                marker=model_marker(model),
+                color=model_color(model),
+                label="test objective",
+            )
+            ax.set_ylabel("Objective")
+            ax.set_title(f"{model_label(model)} ({objective})")
+            style_axis(ax)
+            ax.legend()
+
+        axes[-1, 0].set_xlabel("Epoch")
+        save_figure(fig, path)
+        plt.close(fig)
 
 
 def plot_train_test_objective(rows: list[dict], path: Path) -> None:
@@ -869,34 +916,34 @@ def plot_train_test_objective(rows: list[dict], path: Path) -> None:
         return
 
     models = sorted({str(row["model"]) for row in ok_rows})
-    fig, axes = plt.subplots(
-        len(models),
-        1,
-        figsize=(7, max(3, 2.8 * len(models))),
-        sharex=True,
-        squeeze=False,
-    )
-
-    for ax, model in zip(axes[:, 0], models):
-        model_rows = sorted(
-            [row for row in ok_rows if row["model"] == model],
-            key=lambda row: int(row["epoch"]),
+    with plot_context(nrows=len(models), ncols=1):
+        fig, axes = plt.subplots(
+            len(models),
+            1,
+            sharex=True,
+            squeeze=False,
         )
-        epochs = [int(row["epoch"]) for row in model_rows]
-        train_loss = [float(row["train_loss"]) for row in model_rows]
-        test_loss = [float(row["test_loss"]) for row in model_rows]
-        objective = str(model_rows[0]["objective"])
-        ax.plot(epochs, train_loss, linestyle="--", label="train")
-        ax.plot(epochs, test_loss, label="test")
-        ax.set_ylabel("Loss")
-        ax.set_title(f"{model} ({objective})")
-        ax.grid(True, alpha=0.25)
-        ax.legend()
 
-    axes[-1, 0].set_xlabel("Epoch")
-    fig.tight_layout()
-    fig.savefig(path, dpi=200)
-    plt.close(fig)
+        for ax, model in zip(axes[:, 0], models):
+            model_rows = sorted(
+                [row for row in ok_rows if row["model"] == model],
+                key=lambda row: int(row["epoch"]),
+            )
+            epochs = [int(row["epoch"]) for row in model_rows]
+            train_loss = [float(row["train_loss"]) for row in model_rows]
+            test_loss = [float(row["test_loss"]) for row in model_rows]
+            objective = str(model_rows[0]["objective"])
+            color = model_color(model)
+            ax.plot(epochs, train_loss, color=color, linestyle="--", label="train")
+            ax.plot(epochs, test_loss, color=color, label="test")
+            ax.set_ylabel("Loss")
+            ax.set_title(f"{model_label(model)} ({objective})")
+            style_axis(ax)
+            ax.legend()
+
+        axes[-1, 0].set_xlabel("Epoch")
+        save_figure(fig, path)
+        plt.close(fig)
 
 
 def write_group_outputs(output_dir: Path, rows: list[dict], trace_rows: list[dict]) -> None:
@@ -904,6 +951,7 @@ def write_group_outputs(output_dir: Path, rows: list[dict], trace_rows: list[dic
     plots_dir.mkdir(parents=True, exist_ok=True)
     write_history(output_dir / "summary.csv", rows)
     write_history(output_dir / "lorenz_loss_history.csv", rows)
+    write_best_metrics(output_dir / "best_metrics.csv", rows)
     write_group_summary(output_dir / "summary.md", rows)
     plot_test_rate_mse(rows, plots_dir / "test_rate_mse_curves.png")
     plot_test_rate_mse(rows, plots_dir / "test_rate_mse_curves_log.png", log_y=True)
@@ -926,12 +974,18 @@ def write_model_artifacts(
     if trace_rows:
         write_rate_traces(model_dir / "rate_traces.csv", trace_rows)
     final = rows[-1] if rows else {}
+    best = _best_mse_row(rows)
     metrics = {
         "status": final.get("status"),
         "model": model_name,
         "neurons": args.neurons,
         "seed": args.seed,
         "epochs": args.epochs,
+        "best_epoch": best.get("epoch"),
+        "best_test_rate_mse": best.get("test_rate_mse"),
+        "best_train_loss": best.get("train_loss"),
+        "best_test_loss": best.get("test_loss"),
+        "final_epoch": final.get("epoch"),
         "final_train_loss": final.get("train_loss"),
         "final_test_loss": final.get("test_loss"),
         "final_test_rate_mse": final.get("test_rate_mse"),
@@ -960,25 +1014,31 @@ def write_group_summary(path: Path, rows: list[dict]) -> None:
     lines = [
         "# Lorenz Loss-Curve Run Group",
         "",
-        "| model | status | final epoch | final train loss | final test loss | final test rate MSE | wall seconds |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
+        (
+            "| model | status | best epoch | best test rate MSE | final epoch | "
+            "final test rate MSE | final train loss | final test loss | wall seconds |"
+        ),
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
-    for model in sorted({str(row["model"]) for row in rows}):
+    for model in _model_names_by_best(rows):
         model_rows = sorted(
             [row for row in rows if row["model"] == model],
             key=lambda row: int(row["epoch"]),
         )
         final = model_rows[-1]
+        best = _best_mse_row(model_rows)
         lines.append(
             "| "
             + " | ".join(
                 [
-                    model,
+                    model_label(model),
                     str(final.get("status", "")),
+                    str(best.get("epoch", "")),
+                    _fmt(best.get("test_rate_mse")),
                     str(final.get("epoch", "")),
+                    _fmt(final.get("test_rate_mse")),
                     _fmt(final.get("train_loss")),
                     _fmt(final.get("test_loss")),
-                    _fmt(final.get("test_rate_mse")),
                     _fmt(final.get("wall_seconds")),
                 ]
             )
@@ -997,7 +1057,70 @@ def write_group_summary(path: Path, rows: list[dict]) -> None:
                 "- `plots/rate_traces_all_models.png`",
             ]
         )
+    if any(str(row.get("model")) == "mint" for row in rows):
+        lines.extend(
+            [
+                "",
+                "## Notes",
+                "",
+                (
+                    "- MINT is inference-only here: fitting builds a trajectory library once, "
+                    "so its metric curve is constant over epochs."
+                ),
+                (
+                    "- Lorenz MINT defaults to spike-derived smoothed trajectory libraries. "
+                    "Runs configured with `lorenz_library_source=true_rates` are oracle "
+                    "sanity checks only."
+                ),
+                (
+                    "- The repeated-trial Lorenz split measures denoising of seen "
+                    "initial-condition trajectories, not generalization to unseen "
+                    "trajectories."
+                ),
+            ]
+        )
     path.write_text("\n".join(lines) + "\n")
+
+
+def write_best_metrics(path: Path, rows: list[dict]) -> None:
+    if not rows:
+        return
+    fieldnames = [
+        "model",
+        "status",
+        "best_epoch",
+        "best_test_rate_mse",
+        "final_epoch",
+        "final_test_rate_mse",
+        "final_train_loss",
+        "final_test_loss",
+        "wall_seconds",
+        "error",
+    ]
+    with path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for model in _model_names_by_best(rows):
+            model_rows = sorted(
+                [row for row in rows if row["model"] == model],
+                key=lambda row: int(row["epoch"]),
+            )
+            final = model_rows[-1]
+            best = _best_mse_row(model_rows)
+            writer.writerow(
+                {
+                    "model": model,
+                    "status": final.get("status", ""),
+                    "best_epoch": best.get("epoch", ""),
+                    "best_test_rate_mse": best.get("test_rate_mse", ""),
+                    "final_epoch": final.get("epoch", ""),
+                    "final_test_rate_mse": final.get("test_rate_mse", ""),
+                    "final_train_loss": final.get("train_loss", ""),
+                    "final_test_loss": final.get("test_loss", ""),
+                    "wall_seconds": final.get("wall_seconds", ""),
+                    "error": final.get("error", ""),
+                }
+            )
 
 
 def plot_combined_rate_traces(rows: list[dict], path: Path) -> None:
@@ -1007,57 +1130,54 @@ def plot_combined_rate_traces(rows: list[dict], path: Path) -> None:
     models = sorted({str(row["model"]) for row in rows})
     ncols = 2
     nrows = int(np.ceil(len(neurons) / ncols))
-    fig, axes = plt.subplots(
-        nrows,
-        ncols,
-        figsize=(12, max(3, 2.2 * nrows)),
-        sharex=True,
-        squeeze=False,
-    )
-    cmap = plt.get_cmap("tab10")
-    model_colors = {model: cmap(i % 10) for i, model in enumerate(models)}
-
-    for ax, neuron in zip(axes.ravel(), neurons):
-        neuron_rows = [row for row in rows if int(row["neuron"]) == neuron]
-        first_model = models[0]
-        truth_rows = sorted(
-            [row for row in neuron_rows if str(row["model"]) == first_model],
-            key=lambda row: int(row["time"]),
+    with plot_context(nrows=nrows, ncols=ncols):
+        fig, axes = plt.subplots(
+            nrows,
+            ncols,
+            sharex=True,
+            squeeze=False,
         )
-        if truth_rows:
-            ax.plot(
-                [int(row["time"]) for row in truth_rows],
-                [float(row["true_rate"]) for row in truth_rows],
-                color="black",
-                linewidth=1.5,
-                label="true",
-            )
-        for model in models:
-            model_rows = sorted(
-                [row for row in neuron_rows if str(row["model"]) == model],
+
+        for ax, neuron in zip(axes.ravel(), neurons):
+            neuron_rows = [row for row in rows if int(row["neuron"]) == neuron]
+            first_model = models[0]
+            truth_rows = sorted(
+                [row for row in neuron_rows if str(row["model"]) == first_model],
                 key=lambda row: int(row["time"]),
             )
-            ax.plot(
-                [int(row["time"]) for row in model_rows],
-                [float(row["pred_rate"]) for row in model_rows],
-                color=model_colors[model],
-                linewidth=1.1,
-                label=model,
-            )
-        ax.set_title(f"neuron {neuron}")
-        ax.grid(True, alpha=0.2)
+            if truth_rows:
+                ax.plot(
+                    [int(row["time"]) for row in truth_rows],
+                    [float(row["true_rate"]) for row in truth_rows],
+                    color=model_color("true"),
+                    linewidth=1.5,
+                    label="true",
+                )
+            for model in models:
+                model_rows = sorted(
+                    [row for row in neuron_rows if str(row["model"]) == model],
+                    key=lambda row: int(row["time"]),
+                )
+                ax.plot(
+                    [int(row["time"]) for row in model_rows],
+                    [float(row["pred_rate"]) for row in model_rows],
+                    color=model_color(model),
+                    linewidth=1.1,
+                    label=model_label(model),
+                )
+            ax.set_title(f"neuron {neuron}")
+            style_axis(ax)
 
-    for ax in axes.ravel()[len(neurons) :]:
-        ax.axis("off")
-    handles, labels = axes[0, 0].get_legend_handles_labels()
-    by_label = dict(zip(labels, handles))
-    fig.legend(by_label.values(), by_label.keys(), loc="upper right")
-    fig.suptitle("Held-out firing-rate traces by model")
-    fig.supxlabel("Time")
-    fig.supylabel("Firing rate")
-    fig.tight_layout(rect=(0, 0, 0.94, 0.96))
-    fig.savefig(path, dpi=200)
-    plt.close(fig)
+        for ax in axes.ravel()[len(neurons) :]:
+            ax.axis("off")
+        handles, labels = axes[0, 0].get_legend_handles_labels()
+        by_label = dict(zip(labels, handles))
+        fig.legend(by_label.values(), by_label.keys(), loc="upper right")
+        fig.suptitle("Held-out Firing-Rate Traces by Model")
+        fig.supxlabel("Time")
+        fig.supylabel("Firing rate")
+        save_figure(fig, path)
+        plt.close(fig)
 
 
 def _model_report_text(metrics: dict) -> str:
@@ -1065,14 +1185,49 @@ def _model_report_text(metrics: dict) -> str:
         [
             "# LaDyS Benchmark Model Run",
             "",
-            f"- Model: `{metrics.get('model')}`",
+            f"- Model: `{model_label(str(metrics.get('model')))}`",
             f"- Status: `{metrics.get('status')}`",
+            f"- Best epoch: `{_fmt(metrics.get('best_epoch'))}`",
+            f"- Best test rate MSE: `{_fmt(metrics.get('best_test_rate_mse'))}`",
             f"- Final train loss: `{_fmt(metrics.get('final_train_loss'))}`",
             f"- Final test loss: `{_fmt(metrics.get('final_test_loss'))}`",
             f"- Final test rate MSE: `{_fmt(metrics.get('final_test_rate_mse'))}`",
             f"- Wall seconds: `{_fmt(metrics.get('wall_seconds'))}`",
         ]
     )
+
+
+def _best_mse_row(rows: list[dict]) -> dict:
+    candidates = []
+    for row in rows:
+        if row.get("status") != "ok":
+            continue
+        try:
+            value = float(row.get("test_rate_mse"))
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(value):
+            candidates.append((value, row))
+    if not candidates:
+        return rows[-1] if rows else {}
+    return min(candidates, key=lambda item: item[0])[1]
+
+
+def _model_names_by_best(rows: list[dict]) -> list[str]:
+    return sorted(
+        {str(row["model"]) for row in rows},
+        key=lambda name: _sort_value(
+            _best_mse_row([row for row in rows if row["model"] == name])
+        ),
+    )
+
+
+def _sort_value(row: dict) -> float:
+    try:
+        value = float(row.get("test_rate_mse"))
+    except (TypeError, ValueError):
+        return float("inf")
+    return value if np.isfinite(value) else float("inf")
 
 
 def _json_ready(value):

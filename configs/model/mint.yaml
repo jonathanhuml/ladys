@@ -8,6 +8,7 @@ nwb_root: ../mint/data/dandi
 mat_data_root: ../mint/data
 target_h5: ../mint/data/eval_data_test.h5
 eval_bin_size_ms: 5
+lorenz_library_source: smoothed_spikes
 n_candidates: null
 window_length: null
 delta: null

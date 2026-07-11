@@ -41,7 +41,10 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 docs = ["mkdocs>=1.6"]
-benchmarks = ["matplotlib>=3.4.3"]
+benchmarks = [
+  "matplotlib>=3.4.3",
+  "tueplots>=0.2.4; python_version >= '3.10'",
+]
 data = ["dandi"]
 
 [project.scripts]

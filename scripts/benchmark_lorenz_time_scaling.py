@@ -29,6 +29,14 @@ import numpy as np
 import torch
 
 from benchmark_lorenz_scaling import MODEL_CONFIGS, run_case
+from ladys.plotting import (
+    model_color,
+    model_label,
+    model_marker,
+    plot_context,
+    save_figure,
+    style_axis,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -191,29 +199,30 @@ def plot_results(rows: list[dict], path: Path) -> None:
     if not ok_rows:
         return
 
-    fig, ax = plt.subplots(figsize=(7, 4))
-    for model in sorted({str(row["model"]) for row in ok_rows}):
-        model_rows = sorted(
-            [row for row in ok_rows if row["model"] == model],
-            key=lambda row: int(row["time_steps"]),
-        )
-        ax.plot(
-            [int(row["time_steps"]) for row in model_rows],
-            [float(row["seconds_per_epoch"]) for row in model_rows],
-            marker="o",
-            label=model,
-        )
+    with plot_context(nrows=1, ncols=1):
+        fig, ax = plt.subplots()
+        for model in sorted({str(row["model"]) for row in ok_rows}):
+            model_rows = sorted(
+                [row for row in ok_rows if row["model"] == model],
+                key=lambda row: int(row["time_steps"]),
+            )
+            ax.plot(
+                [int(row["time_steps"]) for row in model_rows],
+                [float(row["seconds_per_epoch"]) for row in model_rows],
+                marker=model_marker(model),
+                color=model_color(model),
+                label=model_label(model),
+            )
 
-    ax.set_xscale("log")
-    ax.set_yscale("log")
-    ax.set_xlabel("Time bins per trial")
-    ax.set_ylabel("Seconds per epoch")
-    ax.set_title("Lorenz Time-Length Scaling")
-    ax.grid(True, which="both", alpha=0.25)
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(path, dpi=200)
-    plt.close(fig)
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_xlabel("Time bins per trial")
+        ax.set_ylabel("Seconds per epoch")
+        ax.set_title("Lorenz Time-Length Scaling")
+        style_axis(ax, which="both")
+        ax.legend()
+        save_figure(fig, path)
+        plt.close(fig)
 
 
 def write_summary(rows: list[dict], path: Path) -> None:
@@ -223,10 +232,10 @@ def write_summary(rows: list[dict], path: Path) -> None:
         "# Lorenz Time-Length Scaling Summary",
         "",
         "| time bins | "
-        + " | ".join(f"{model.upper()} s/epoch" for model in models)
+        + " | ".join(f"{model_label(model)} s/epoch" for model in models)
         + (" | CASSM/GPFA time ratio" if include_ratio else "")
         + " | "
-        + " | ".join(f"{model.upper()} status" for model in models)
+        + " | ".join(f"{model_label(model)} status" for model in models)
         + " |",
         "| ---: | "
         + " | ".join("---:" for _ in models)
