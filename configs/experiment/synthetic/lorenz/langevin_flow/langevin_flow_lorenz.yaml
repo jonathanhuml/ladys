@@ -1,0 +1,51 @@
+dataset:
+  name: lorenz
+  neurons: 32
+  num_inits: 4
+  num_trials: 8
+  num_steps: 100
+  burn_steps: 1000
+  train_fraction: 0.8
+  seed: 0
+  latent_dt: 0.015
+  spike_bin_size: 1.0
+  base_rate: 1.0
+
+model:
+  name: langevin_flow
+  objective: langevin_flow_elbo
+  hidden_size: 64
+  output_mode: auto
+  fwd_steps: 0
+  dropout: 0.05
+  gamma: 0.55
+  langevin_step: 0.01
+  potential_groups: 4
+  potential_kernel_size: 3
+  transformer_heads: 2
+  transformer_feedforward: 256
+  coordinated_dropout_rate: 0.5
+  kl_weight: 0.1
+  kl_warmup_epochs: 500
+  velocity_prior_var: 0.1
+  log_rate_min: -8.0
+  log_rate_max: 8.0
+  posterior_logvar_min: -9.210340371976182
+  posterior_logvar_max: 5.0
+  sample_train: true
+  sample_eval: false
+  prediction_samples: 5
+  optimization:
+    name: gradient
+    optimizer: Adam
+    lr: 3.0e-3
+    weight_decay: 2.0e-5
+    gradient_clip: 200.0
+
+preprocessing:
+  observations: null
+
+trainer:
+  epochs: 200
+  batch_size: 4
+  device: cpu

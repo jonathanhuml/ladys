@@ -26,6 +26,11 @@ tensors in `forward`.
   spike-count datasets.
 - `ladys.models.kalman`: dense Kalman filter baseline adapted from the CASSM
   filtering code, exposed with per-trial rate predictions for benchmark metrics.
+- `ladys.models.langevin_flow`: sequential VAE adapter for LangevinFlow with a
+  GRU encoder, Langevin latent position/velocity dynamics, a locally coupled
+  oscillator potential, and a one-layer Transformer rate decoder. The LaDyS
+  NLB path trains a direct held-in plus held-out readout and scores the
+  held-out slice.
 - `ladys.models.mint`: inference-only Mesh of Idealized Neural Trajectories
   decoder. MINT builds a trajectory library once, then decodes by Poisson
   likelihood recursion and interpolation; Lorenz defaults to spike-derived
@@ -37,10 +42,6 @@ tensors in `forward`.
   with condition indices, it smooths training held-out spikes, averages them by
   condition, and maps those condition averages onto eval trials without using
   target-side PSTH evaluation metadata.
-- `ladys.models.slds`: regular switching linear dynamical system baseline with
-  stationary transitions, linear Gaussian latent dynamics, and shared
-  softplus-Poisson emissions. The NLB adapter trains on held-in plus held-out
-  training neurons and evaluates held-out eval neurons through a mask.
 - `ladys.models.smoothing`: Gaussian spike-smoothing baseline. For NLB
   co-smoothing, it mirrors the public NLB smoothing baseline by fitting a
   Poisson readout from log-smoothed held-in counts to training held-out counts.
@@ -70,6 +71,7 @@ experiment configs:
 ```bash
 ladys run -c configs/experiment/synthetic/lorenz/bgpfa/bgpfa_lorenz.yaml
 ladys run -c configs/experiment/synthetic/lorenz/gpfa/gpfa_lorenz.yaml
+ladys run -c configs/experiment/synthetic/lorenz/langevin_flow/langevin_flow_lorenz.yaml
 ladys run -c configs/experiment/synthetic/lorenz/ndt/ndt_lorenz.yaml
 ladys list datasets
 ladys list models
@@ -123,18 +125,25 @@ The lightweight NLB baselines are available through the same experiment API:
 
 ```bash
 ladys run -c configs/experiment/real/mc_maze/psth/psth_mc_maze_nlb_5ms.yaml
-ladys run -c configs/experiment/real/mc_maze/slds/slds_mc_maze_nlb_5ms.yaml
 ladys run -c configs/experiment/real/mc_maze/smoothing/smoothing_mc_maze_nlb_5ms.yaml
 ladys score-nlb --run-dir runs/psth_mc_maze_nlb_5ms
-ladys score-nlb --run-dir runs/slds_mc_maze_nlb_5ms
 ladys score-nlb --run-dir runs/smoothing_mc_maze_nlb_5ms
+```
+
+LangevinFlow configs are included for all four NLB datasets at 5 ms and 20 ms:
+
+```bash
+ladys run -c configs/experiment/real/mc_maze/langevin_flow/langevin_flow_mc_maze_nlb_5ms.yaml
+ladys run -c configs/experiment/real/area2_bump/langevin_flow/langevin_flow_area2_bump_nlb_5ms.yaml
+ladys run -c configs/experiment/real/mc_rtt/langevin_flow/langevin_flow_mc_rtt_nlb_5ms.yaml
+ladys run -c configs/experiment/real/dmfc_rsg/langevin_flow/langevin_flow_dmfc_rsg_nlb_5ms.yaml
 ```
 
 Synthetic Lorenz configs are also included:
 
 ```bash
+ladys run -c configs/experiment/synthetic/lorenz/langevin_flow/langevin_flow_lorenz.yaml
 ladys run -c configs/experiment/synthetic/lorenz/psth/psth_lorenz.yaml
-ladys run -c configs/experiment/synthetic/lorenz/slds/slds_lorenz.yaml
 ladys run -c configs/experiment/synthetic/lorenz/smoothing/smoothing_lorenz.yaml
 ```
 

@@ -17,9 +17,9 @@ python scripts/generate_model_docs.py
 | [GPFA](gpfa.md) | `gpfa` | Gaussian Process Factor Analysis with diagonal observation noise. |
 | [ILQRVAE](ilqr_vae.md) | `ilqr_vae` | Optimization-based iLQR-VAE with posterior-control inference and ELBO training. |
 | [Kalman](kalman.md) | `kalman` | Dense Kalman filter baseline adapted from the CASSM source. |
+| [LangevinFlow](langevin_flow.md) | `langevin_flow` | LangevinFlow sequential VAE for binned neural spike counts. |
 | [LFADS](lfads.md) | `lfads` | Latent Factor Analysis via Dynamical Systems for binned spike counts. |
 | [MINT](mint.md) | `mint` | Mesh of Idealized Neural Trajectories adapted to the LaDyS API. |
 | [NDT](ndt.md) | `ndt` | Transformer encoder trained with a masked Poisson spike objective. |
 | [PSTH](psth.md) | `psth` | Peri-stimulus time histogram baseline. |
-| [SLDS](slds.md) | `slds` | Regular switching linear dynamical system with Poisson emissions. |
 | [Smoothing](smoothing.md) | `smoothing` | Gaussian-smoothed spike-count baseline. |

@@ -1,0 +1,38 @@
+dataset:
+  name: mc_maze
+  split: test
+  bin_size_ms: 20
+  data_path: data/real/nlb/mc_maze_test_20ms.h5
+
+model:
+  name: langevin_flow
+  objective: langevin_flow_elbo
+  hidden_size: 280
+  output_mode: auto
+  fwd_steps: 0
+  dropout: 0.05
+  gamma: 0.55
+  langevin_step: 0.01
+  potential_groups: 4
+  potential_kernel_size: 3
+  transformer_heads: 2
+  transformer_feedforward: 512
+  coordinated_dropout_rate: 0.5
+  kl_weight: 0.1
+  kl_warmup_epochs: 500
+  velocity_prior_var: 0.1
+  prediction_samples: 50
+  optimization:
+    name: gradient
+    optimizer: Adam
+    lr: 3.0e-3
+    weight_decay: 2.0e-5
+    gradient_clip: 200.0
+
+preprocessing:
+  observations: null
+
+trainer:
+  epochs: 2000
+  batch_size: 256
+  device: cpu

@@ -19,7 +19,6 @@ nav:
       - MINT: models/mint.md
       - NDT: models/ndt.md
       - PSTH: models/psth.md
-      - SLDS: models/slds.md
       - Smoothing: models/smoothing.md
   - Contracts:
       - Model Output: model_output_contract.md

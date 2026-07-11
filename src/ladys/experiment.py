@@ -65,10 +65,14 @@ class Experiment:
 
         if self.data.train_dataset is None:
             self.data.setup()
-        self.model = self.config.model.build(
-            n_neurons=self.data.n_neurons,
-            n_time=self.data.n_time,
-        )
+        build_from_data = getattr(self.config.model, "build_from_data", None)
+        if callable(build_from_data):
+            self.model = build_from_data(self.data)
+        else:
+            self.model = self.config.model.build(
+                n_neurons=self.data.n_neurons,
+                n_time=self.data.n_time,
+            )
         return self.model
 
     def run(self) -> ExperimentResult:
