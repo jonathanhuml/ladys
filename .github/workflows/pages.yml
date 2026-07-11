@@ -38,7 +38,8 @@ jobs:
         run: |
           rm -rf public
           mkdir -p public
-          cp -R website/. public/
+          cp -R website/home/. public/
+          cp CNAME public/CNAME
           mkdocs build --strict --site-dir public/ladys
 
       - name: Configure GitHub Pages
