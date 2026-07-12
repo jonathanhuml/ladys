@@ -30,6 +30,10 @@ def test_mint_nlb_experiment_configs_load():
     assert [config.model.train_source for config in configs] == ["nwb", "nwb", "lfads", "nwb", "mat"]
     assert all(isinstance(config.model, MINTConfig) for config in configs)
     assert all(config.model.nlb_neural_state_defaults for config in configs)
+    external_root = "../" + "mint"
+    assert all(not config.model.nwb_root.startswith(external_root) for config in configs)
+    assert all(not config.model.mat_data_root.startswith(external_root) for config in configs)
+    assert all(config.model.target_h5 != f"{external_root}/data/eval_data_test.h5" for config in configs)
 
 
 def test_mint_dmfc_uses_paper_trajectory_defaults():

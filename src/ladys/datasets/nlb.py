@@ -373,7 +373,6 @@ def _resolve_target_h5(
         output_target,
         Path("data/real/eval_data_test.h5"),
         Path("data/eval_data_test.h5"),
-        Path("../mint/data/eval_data_test.h5"),
         Path("../nlb_tools/data/eval_data_test.h5"),
     ]
     for candidate in candidates:
@@ -409,7 +408,6 @@ def _default_nwb_search_roots(nwb_root: Path) -> list[Path]:
     return [
         nwb_root,
         Path("data/real/dandi"),
-        Path("../mint/data/dandi"),
         Path("../STNDT/data"),
     ]
 

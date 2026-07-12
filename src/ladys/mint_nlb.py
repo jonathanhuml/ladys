@@ -20,10 +20,12 @@ from ladys.experiment import experiment_config_to_dict
 from ladys.models.mint import (
     MINT,
     MINTConfig,
+    MintMatFile,
     TORCH_DTYPE,
     _spikes_tensor,
     bin_data,
     default_train_nwb_path,
+    find_time_index,
     get_nwb_trial_data,
     get_trial_data,
     heldout_count,
@@ -39,6 +41,7 @@ class MINTNLBResult:
 
     run_dir: Path
     co_bps: float
+    metrics: dict[str, float]
     metrics_path: Path
     predictions_path: Path
     submission_path: Path
@@ -86,6 +89,25 @@ def run_mint_nlb(config: ExperimentConfig) -> MINTNLBResult:
 
     train_S, train_Z, condition = _load_training_data(model, train_split, config, device)
     model.fit_library(train_S, train_Z, condition)
+    target_path = _resolve_target_h5(cfg.target_h5)
+
+    train_rates_heldout = None
+    train_rates_heldin = None
+    if dataset == "mc_rtt" and cfg.train_source == "mat":
+        train_rates_heldout, train_rates_heldin = _load_mc_rtt_mat_train_rate_windows(
+            model,
+            train_split,
+            cfg.eval_bin_size_ms,
+        )
+    elif dataset != "dmfc_rsg":
+        train_keep = _training_eval_keep(model, train_S)
+        train_rates_heldout, train_rates_heldin = _predict_binned_rate_parts(
+            model,
+            train_S,
+            dataset,
+            keep=train_keep,
+            eval_bin_size_ms=cfg.eval_bin_size_ms,
+        )
 
     if dataset == "dmfc_rsg" and cfg.train_source in {"h5", "lfads"}:
         heldin = _load_h5_eval_heldin(_experiment_h5_path(config), dataset)
@@ -100,7 +122,7 @@ def run_mint_nlb(config: ExperimentConfig) -> MINTNLBResult:
         _, keep = _buffered_alignment(model.settings, model.hyperparams)
     S = _heldin_to_mint_spikes(heldin, dataset, device)
     mask = observed_neuron_mask(dataset, S[0].shape[0], device)
-    x_hat, _ = model.predict_spike_trials(S, likelihood_neuron_mask=mask)
+    x_hat, _ = model.predict_spike_trials(S, likelihood_neuron_mask=mask, verbose=False)
     x_eval = [item[:, keep] for item in x_hat]
 
     n_heldout = heldout_count(dataset)
@@ -120,13 +142,22 @@ def run_mint_nlb(config: ExperimentConfig) -> MINTNLBResult:
         model.Delta,
         model.Ts * 1000.0,
     )
-    target = _read_target_spikes(_resolve_target_h5(cfg.target_h5), dataset)
+    target = _read_target_spikes(target_path, dataset)
     if eval_rates_heldout.shape != target.shape:
         raise ValueError(f"{dataset}: predicted {eval_rates_heldout.shape}, target {target.shape}")
     if np.isnan(eval_rates_heldout).any():
         raise ValueError(f"{dataset}: NaNs found in predicted held-out rates.")
 
     score = score_count_predictions(eval_rates_heldout.astype(float), target.astype(float))
+    full_metrics = _score_full_nlb_metrics(
+        target_path=target_path,
+        dataset=dataset,
+        eval_rates_heldout=eval_rates_heldout,
+        eval_rates_heldin=eval_rates_heldin,
+        train_rates_heldout=train_rates_heldout,
+        train_rates_heldin=train_rates_heldin,
+        co_bps=score.co_bps,
+    )
     run_dir = _make_run_dir(config, dataset)
     return _write_run_artifacts(
         run_dir=run_dir,
@@ -137,8 +168,11 @@ def run_mint_nlb(config: ExperimentConfig) -> MINTNLBResult:
         n_eval_trials=heldin.shape[0],
         eval_rates_heldout=eval_rates_heldout,
         eval_rates_heldin=eval_rates_heldin,
+        train_rates_heldout=train_rates_heldout,
+        train_rates_heldin=train_rates_heldin,
         target=target,
         score=score.co_bps,
+        full_metrics=full_metrics,
     )
 
 
@@ -434,6 +468,119 @@ def _heldin_to_mint_spikes(heldin: np.ndarray, dataset: str, device: torch.devic
     return out
 
 
+def _training_eval_keep(model: MINT, train_trials: list[torch.Tensor]) -> np.ndarray:
+    if not train_trials:
+        raise ValueError("Cannot produce train rates without training trials.")
+    n_time = int(train_trials[0].shape[1])
+    trial_alignment = np.asarray(list(model.settings.trial_alignment), dtype=np.int64)
+    eval_alignment = np.asarray(list(model.settings.test_alignment), dtype=np.int64)
+    if trial_alignment.size == n_time:
+        keep = np.isin(trial_alignment, eval_alignment)
+        if int(keep.sum()) != int(eval_alignment.size):
+            raise ValueError(
+                "Training alignment does not contain every eval-aligned time point "
+                f"({keep.sum()} of {eval_alignment.size})."
+            )
+        return keep
+    if eval_alignment.size == n_time:
+        return np.ones(n_time, dtype=bool)
+    raise ValueError(
+        "Cannot align MINT train rates to the NLB eval window: "
+        f"train trial has {n_time} samples, trial alignment has {trial_alignment.size}, "
+        f"eval alignment has {eval_alignment.size}."
+    )
+
+
+def _predict_binned_rate_parts(
+    model: MINT,
+    spikes: list[torch.Tensor],
+    dataset: str,
+    *,
+    keep: np.ndarray | None,
+    eval_bin_size_ms: int,
+    likelihood_neuron_mask: torch.Tensor | None = None,
+    batch_size: int = 32,
+) -> tuple[np.ndarray, np.ndarray]:
+    n_heldout = heldout_count(dataset)
+    heldout_batches: list[np.ndarray] = []
+    heldin_batches: list[np.ndarray] = []
+    for start in range(0, len(spikes), batch_size):
+        batch = spikes[start : start + batch_size]
+        x_hat, _ = model.predict_spike_trials(
+            batch,
+            likelihood_neuron_mask=likelihood_neuron_mask,
+            verbose=False,
+        )
+        x_eval = [item[:, keep] for item in x_hat] if keep is not None else x_hat
+        heldout_batches.append(
+            _binned_counts_from_state(
+                x_eval,
+                0,
+                n_heldout,
+                eval_bin_size_ms,
+                model.Delta,
+                model.Ts * 1000.0,
+            ).astype(np.float32, copy=False)
+        )
+        heldin_batches.append(
+            _binned_counts_from_state(
+                x_eval,
+                n_heldout,
+                x_eval[0].shape[0],
+                eval_bin_size_ms,
+                model.Delta,
+                model.Ts * 1000.0,
+            ).astype(np.float32, copy=False)
+        )
+    return np.concatenate(heldout_batches, axis=0), np.concatenate(heldin_batches, axis=0)
+
+
+def _load_mc_rtt_mat_train_rate_windows(
+    model: MINT,
+    train_split: str,
+    eval_bin_size_ms: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    T, TrialInfo = MintMatFile(model.settings.data_path, "mc_rtt").load()
+    if train_split == "train":
+        split_labels = {"train"}
+    elif train_split == "trainval":
+        split_labels = {"train", "val"}
+    else:
+        raise ValueError(f"MC_RTT MAT train rates do not support split '{train_split}'.")
+
+    sample_period_ms = model.Ts * 1000.0
+    bin_samples_float = float(eval_bin_size_ms) / float(sample_period_ms)
+    bin_samples = int(round(bin_samples_float))
+    if bin_samples <= 0 or not np.isclose(bin_samples, bin_samples_float):
+        raise ValueError(
+            f"eval_bin_size_ms={eval_bin_size_ms} is not an integer number of "
+            f"samples at {sample_period_ms:g} ms/sample."
+        )
+
+    alignment = np.asarray(list(model.settings.test_alignment), dtype=np.int64)
+    n_heldout = heldout_count("mc_rtt")
+    pieces: list[np.ndarray] = []
+    for trial_idx in range(TrialInfo.n_trials):
+        if str(TrialInfo["split"][trial_idx]) not in split_labels:
+            continue
+        start_idx = find_time_index(T["time"], float(TrialInfo["start_time"][trial_idx]))
+        sample_idx = start_idx + alignment
+        rates_hz = np.nan_to_num(
+            T["autolfads_rates"][:, sample_idx],
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
+        counts = bin_data(torch.as_tensor(rates_hz, dtype=TORCH_DTYPE), bin_samples, "mean")
+        counts = counts.cpu().numpy().T * (float(eval_bin_size_ms) / 1000.0)
+        pieces.append(counts.astype(np.float32, copy=False))
+
+    if not pieces:
+        raise ValueError(f"MC_RTT MAT train-rate export found no trials for split '{train_split}'.")
+    rates = np.stack(pieces, axis=0)
+    return rates[:, :, :n_heldout], rates[:, :, n_heldout:]
+
+
 def _binned_counts_from_state(
     x_hat: list[torch.Tensor],
     start: int,
@@ -471,7 +618,6 @@ def _resolve_target_h5(path: str | None) -> Path:
         Path("data/real/nlb/eval_data_test.h5"),
         Path("data/real/eval_data_test.h5"),
         Path("data/eval_data_test.h5"),
-        Path("../mint/data/eval_data_test.h5"),
     ]
     for candidate in candidates:
         if candidate.exists():
@@ -482,6 +628,71 @@ def _resolve_target_h5(path: str | None) -> Path:
 def _read_target_spikes(path: Path, dataset: str) -> np.ndarray:
     with h5py.File(path, "r") as handle:
         return handle[dataset]["eval_spikes_heldout"][()].astype(float)
+
+
+def _score_full_nlb_metrics(
+    *,
+    target_path: Path,
+    dataset: str,
+    eval_rates_heldout: np.ndarray,
+    eval_rates_heldin: np.ndarray,
+    train_rates_heldout: np.ndarray | None,
+    train_rates_heldin: np.ndarray | None,
+    co_bps: float,
+) -> dict[str, float]:
+    metrics = {"co-bps": float(co_bps)}
+    try:
+        from nlb_tools.evaluation import eval_psth, speed_tp_correlation, velocity_decoding
+    except ImportError:
+        return metrics
+
+    with h5py.File(target_path, "r") as handle:
+        if dataset not in handle:
+            return metrics
+        group = handle[dataset]
+        eval_rates = np.concatenate([eval_rates_heldin, eval_rates_heldout], axis=-1).astype(float, copy=False)
+        if dataset == "dmfc_rsg" and "eval_behavior" in group:
+            metrics["tp corr"] = float(
+                speed_tp_correlation(
+                    group["eval_spikes_heldout"][()].astype(float),
+                    eval_rates,
+                    group["eval_behavior"][()].astype(float),
+                )
+            )
+        elif (
+            train_rates_heldout is not None
+            and train_rates_heldin is not None
+            and "train_behavior" in group
+            and "eval_behavior" in group
+        ):
+            train_rates = np.concatenate([train_rates_heldin, train_rates_heldout], axis=-1).astype(float, copy=False)
+            if "train_decode_mask" in group:
+                train_decode_mask = group["train_decode_mask"][()]
+                eval_decode_mask = group["eval_decode_mask"][()]
+            else:
+                train_decode_mask = np.full(train_rates.shape[0], True)[:, None]
+                eval_decode_mask = np.full(eval_rates.shape[0], True)[:, None]
+            metrics["vel R2"] = float(
+                velocity_decoding(
+                    train_rates,
+                    group["train_behavior"][()].astype(float),
+                    train_decode_mask,
+                    eval_rates,
+                    group["eval_behavior"][()].astype(float),
+                    eval_decode_mask,
+                )
+            )
+        if "psth" in group and "eval_cond_idx" in group:
+            jitter = group["eval_jitter"][()] if "eval_jitter" in group else None
+            metrics["psth R2"] = float(
+                eval_psth(
+                    group["psth"][()].astype(float),
+                    eval_rates,
+                    group["eval_cond_idx"][()],
+                    jitter=jitter,
+                )
+            )
+    return metrics
 
 
 def _make_run_dir(config: ExperimentConfig, dataset: str) -> Path:
@@ -502,8 +713,11 @@ def _write_run_artifacts(
     n_eval_trials: int,
     eval_rates_heldout: np.ndarray,
     eval_rates_heldin: np.ndarray,
+    train_rates_heldout: np.ndarray | None,
+    train_rates_heldin: np.ndarray | None,
     target: np.ndarray,
     score: float,
+    full_metrics: dict[str, float],
 ) -> MINTNLBResult:
     config_path = run_dir / "config.json"
     metrics_path = run_dir / "metrics.json"
@@ -520,6 +734,7 @@ def _write_run_artifacts(
         "n_train_units": int(n_train_units),
         "n_eval_trials": int(n_eval_trials),
     }
+    metrics.update({key: float(value) for key, value in full_metrics.items()})
     if isinstance(config.model, MINTConfig) and config.model.train_source == "lfads":
         metrics.update(
             {
@@ -534,20 +749,27 @@ def _write_run_artifacts(
         )
     _write_json(config_path, experiment_config_to_dict(config))
     _write_json(metrics_path, metrics)
-    np.savez_compressed(
-        predictions_path,
-        pred_rates=eval_rates_heldout.astype(np.float32),
-        target_spikes=target.astype(np.float32),
-        pred_rates_heldin=eval_rates_heldin.astype(np.float32),
-    )
+    prediction_arrays = {
+        "pred_rates": eval_rates_heldout.astype(np.float32),
+        "target_spikes": target.astype(np.float32),
+        "pred_rates_heldin": eval_rates_heldin.astype(np.float32),
+    }
+    if train_rates_heldout is not None and train_rates_heldin is not None:
+        prediction_arrays["train_rates_heldout"] = train_rates_heldout.astype(np.float32)
+        prediction_arrays["train_rates_heldin"] = train_rates_heldin.astype(np.float32)
+    np.savez_compressed(predictions_path, **prediction_arrays)
     with h5py.File(submission_path, "w") as handle:
         group = handle.create_group(dataset)
         group.create_dataset("eval_rates_heldin", data=eval_rates_heldin.astype(np.float32), compression="gzip")
         group.create_dataset("eval_rates_heldout", data=eval_rates_heldout.astype(np.float32), compression="gzip")
+        if train_rates_heldout is not None and train_rates_heldin is not None:
+            group.create_dataset("train_rates_heldin", data=train_rates_heldin.astype(np.float32), compression="gzip")
+            group.create_dataset("train_rates_heldout", data=train_rates_heldout.astype(np.float32), compression="gzip")
     with csv_path.open("w", newline="") as handle:
         writer = csv.DictWriter(
             handle,
             fieldnames=["dataset", "train_split", "train_source", "n_train_units", "n_eval_trials", "co_bps"],
+            extrasaction="ignore",
         )
         writer.writeheader()
         writer.writerow(metrics)
@@ -560,6 +782,11 @@ def _write_run_artifacts(
                 f"- Train split: `{train_split}`",
                 f"- Train source: `{metrics['train_source']}`",
                 f"- co-BPS: `{score:.12g}`",
+                *[
+                    f"- {key}: `{value:.12g}`"
+                    for key, value in full_metrics.items()
+                    if key != "co-bps"
+                ],
                 f"- Predictions: `{predictions_path.name}`",
                 f"- EvalAI rates: `{submission_path.name}`",
             ]
@@ -569,6 +796,7 @@ def _write_run_artifacts(
     return MINTNLBResult(
         run_dir=run_dir,
         co_bps=float(score),
+        metrics={key: float(value) for key, value in full_metrics.items()},
         metrics_path=metrics_path,
         predictions_path=predictions_path,
         submission_path=submission_path,

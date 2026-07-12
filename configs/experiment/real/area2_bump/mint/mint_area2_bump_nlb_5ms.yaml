@@ -12,9 +12,9 @@ model:
   train_source: nwb
   train_split: trainval
   nlb_neural_state_defaults: true
-  nwb_root: ../mint/data/dandi
-  mat_data_root: ../mint/data
-  target_h5: ../mint/data/eval_data_test.h5
+  nwb_root: data/real/nlb/dandi
+  mat_data_root: data/mint
+  target_h5: data/real/nlb/eval_data_test.h5
   eval_bin_size_ms: 5
   n_candidates: null
   window_length: null

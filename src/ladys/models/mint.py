@@ -446,6 +446,7 @@ class MINT(BaseDynamicsModel):
         S: Sequence[Tensor],
         return_aux: bool = False,
         likelihood_neuron_mask: Optional[Tensor] = None,
+        verbose: bool = True,
     ):
         """Predict neural states for trials shaped ``(neurons, time)``."""
 
@@ -509,7 +510,8 @@ class MINT(BaseDynamicsModel):
             C_hat.append(c_hat)
             K_hat.append(k_hat)
             Alpha_hat.append(alpha_hat)
-            print(f"Completed trial {tr + 1}")
+            if verbose:
+                print(f"Completed trial {tr + 1}")
 
         if return_aux:
             return X_hat, Z_hat, C_hat, K_hat, Alpha_hat

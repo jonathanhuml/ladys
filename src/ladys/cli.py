@@ -143,7 +143,9 @@ def run_command(args: argparse.Namespace) -> int:
         result = run_mint_nlb(config)
         print(f"Wrote LaDyS run: {result.run_dir}")
         print("Metrics:")
-        print(f"  co_bps: {result.co_bps:.6g}")
+        for key, value in sorted(result.metrics.items()):
+            display = "nan" if not math.isfinite(value) else f"{value:.6g}"
+            print(f"  {key}: {display}")
         print(f"  predictions: {result.predictions_path}")
         print(f"  submission_h5: {result.submission_path}")
         return 0
