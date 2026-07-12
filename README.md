@@ -139,6 +139,10 @@ ladys run -c configs/experiment/real/mc_rtt/langevin_flow/langevin_flow_mc_rtt_n
 ladys run -c configs/experiment/real/dmfc_rsg/langevin_flow/langevin_flow_dmfc_rsg_nlb_5ms.yaml
 ```
 
+Note: LangevinFlow should be run with longer training budgets for meaningful
+results. The NLB YAMLs use released-scale epoch counts, and short runs such as
+20 epochs are only diagnostics to confirm that optimization is moving.
+
 Synthetic Lorenz configs are also included:
 
 ```bash

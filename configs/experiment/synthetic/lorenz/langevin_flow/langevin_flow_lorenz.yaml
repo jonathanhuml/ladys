@@ -35,7 +35,7 @@ model:
   posterior_logvar_max: 5.0
   sample_train: true
   sample_eval: false
-  prediction_samples: 5
+  prediction_samples: 50
   optimization:
     name: gradient
     optimizer: Adam
@@ -47,6 +47,6 @@ preprocessing:
   observations: null
 
 trainer:
-  epochs: 200
+  epochs: 1000
   batch_size: 4
   device: cpu

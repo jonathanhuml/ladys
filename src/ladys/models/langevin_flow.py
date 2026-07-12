@@ -231,6 +231,15 @@ class LangevinFlow(BaseDynamicsModel):
     locally coupled oscillator potential, and a one-layer Transformer decoder
     reads the whole latent sequence into Poisson firing rates.
 
+    ## Training Budget
+
+    LangevinFlow needs longer training runs than the quick smoke-test settings
+    used for development. For reproduction-style runs, prefer the YAML
+    experiment budgets: the NLB configs use the released-scale epoch counts,
+    and the Lorenz config is set to a longer default. Short runs such as 20
+    epochs are useful only for checking that the loss and co-bps move in the
+    right direction.
+
     ## Assumptions
 
     LangevinFlow expects nonnegative spike counts. On synthetic datasets the
