@@ -15,6 +15,7 @@ nav:
       - GPFA: models/gpfa.md
       - ILQR-VAE: models/ilqr_vae.md
       - Kalman: models/kalman.md
+      - LangevinFlow: models/langevin_flow.md
       - LFADS: models/lfads.md
       - MINT: models/mint.md
       - NDT: models/ndt.md
