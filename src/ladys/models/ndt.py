@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import math
-from typing import Literal
+from typing import Any, Literal, Optional
 
 import torch
 from pydantic import Field, model_validator
 from torch import Tensor, nn
 import torch.nn.functional as F
 
+from ladys.metrics import (
+    EvaluationAdapter,
+    EvaluationResult,
+    NLBCoSmoothingAdapter,
+    compute_available_metrics,
+)
 from ladys.models.base import BaseDynamicsModel, BaseModelConfig, OptimizationConfig
-from ladys.types import LossOutput, ModelOutput, observations_from_batch
+from ladys.types import LossOutput, ModelOutput, move_batch_to_device, observations_from_batch
 
 
 UNMASKED_LABEL = -100.0
@@ -23,6 +29,9 @@ class NDTConfig(BaseModelConfig):
 
     name: Literal["ndt"] = "ndt"
     objective: str = "masked_poisson_nll"
+    output_neurons: Optional[int] = None
+    output_mode: Literal["auto", "heldin", "heldin_heldout"] = "auto"
+    fwd_steps: int = 0
     context_forward: int = 4
     context_backward: int = 8
     context_wrap_initial: bool = False
@@ -53,8 +62,11 @@ class NDTConfig(BaseModelConfig):
     mask_random_ratio: float = 0.5
     mask_max_span: int = 1
     mask_span_expand_prob: float = 0.0
+    mask_span_ramp_start: int = 0
+    mask_span_ramp_end: int = 0
     use_zero_mask: bool = True
     topk_loss_fraction: float = 1.0
+    nlb_decoder: Literal["direct", "latents"] = "direct"
     optimization: OptimizationConfig = Field(
         default_factory=lambda: OptimizationConfig(
             name="gradient",
@@ -67,6 +79,10 @@ class NDTConfig(BaseModelConfig):
 
     @model_validator(mode="after")
     def validate_dimensions(self) -> "NDTConfig":
+        if self.output_neurons is not None and self.output_neurons < 1:
+            raise ValueError("output_neurons must be positive when provided.")
+        if self.fwd_steps < 0:
+            raise ValueError("fwd_steps must be nonnegative.")
         if self.embed_dim < 0:
             raise ValueError("embed_dim must be nonnegative.")
         if self.num_heads < 1:
@@ -91,14 +107,62 @@ class NDTConfig(BaseModelConfig):
             raise ValueError("mask_max_span must be positive.")
         if not 0.0 <= self.mask_span_expand_prob <= 1.0:
             raise ValueError("mask_span_expand_prob must be in [0, 1].")
+        if self.mask_span_ramp_start < 0 or self.mask_span_ramp_end < 0:
+            raise ValueError("mask_span_ramp_start/end must be nonnegative.")
         if not 0.0 < self.topk_loss_fraction <= 1.0:
             raise ValueError("topk_loss_fraction must be in (0, 1].")
         return self
 
     def build(self, n_neurons: int, n_time: int) -> "NDT":
+        output_neurons = self.output_neurons or n_neurons
+        return self._build(
+            n_neurons=n_neurons,
+            n_time=n_time,
+            output_neurons=output_neurons,
+            fwd_steps=self.fwd_steps,
+        )
+
+    def build_from_data(self, data: Any) -> "NDT":
+        n_neurons = int(data.n_neurons)
+        n_time = int(data.n_time)
+        output_neurons = self.output_neurons
+        fwd_steps = self.fwd_steps
+        if output_neurons is None:
+            output_neurons = n_neurons
+            if self.output_mode != "heldin":
+                train_dataset = data.train_dataset
+                if train_dataset is None:
+                    raise RuntimeError("DataModule.setup() must run before build_from_data().")
+                heldout = getattr(train_dataset, "raw_spikes", None)
+                if heldout is not None:
+                    output_neurons = n_neurons + int(heldout.shape[-1])
+                    heldin_forward = getattr(train_dataset, "heldin_forward_spikes", None)
+                    heldout_forward = getattr(train_dataset, "heldout_forward_spikes", None)
+                    if heldin_forward is not None and heldout_forward is not None:
+                        fwd_steps = fwd_steps or int(heldin_forward.shape[1])
+                elif self.output_mode == "heldin_heldout":
+                    raise ValueError(
+                        "output_mode='heldin_heldout' requires a dataset with raw_spikes."
+                    )
+        return self._build(
+            n_neurons=n_neurons,
+            n_time=n_time,
+            output_neurons=output_neurons,
+            fwd_steps=fwd_steps,
+        )
+
+    def _build(
+        self,
+        n_neurons: int,
+        n_time: int,
+        output_neurons: int,
+        fwd_steps: int,
+    ) -> "NDT":
         return NDT(
             n_neurons=n_neurons,
             n_time=n_time,
+            output_neurons=output_neurons,
+            fwd_steps=fwd_steps,
             context_forward=self.context_forward,
             context_backward=self.context_backward,
             context_wrap_initial=self.context_wrap_initial,
@@ -129,8 +193,11 @@ class NDTConfig(BaseModelConfig):
             mask_random_ratio=self.mask_random_ratio,
             mask_max_span=self.mask_max_span,
             mask_span_expand_prob=self.mask_span_expand_prob,
+            mask_span_ramp_start=self.mask_span_ramp_start,
+            mask_span_ramp_end=self.mask_span_ramp_end,
             use_zero_mask=self.use_zero_mask,
             topk_loss_fraction=self.topk_loss_fraction,
+            nlb_decoder=self.nlb_decoder,
             objective=self.objective,
         )
 
@@ -165,6 +232,8 @@ class NDT(BaseDynamicsModel):
         self,
         n_neurons: int,
         n_time: int,
+        output_neurons: int | None = None,
+        fwd_steps: int = 0,
         context_forward: int = 4,
         context_backward: int = 8,
         context_wrap_initial: bool = False,
@@ -195,13 +264,19 @@ class NDT(BaseDynamicsModel):
         mask_random_ratio: float = 0.5,
         mask_max_span: int = 1,
         mask_span_expand_prob: float = 0.0,
+        mask_span_ramp_start: int = 0,
+        mask_span_ramp_end: int = 0,
         use_zero_mask: bool = True,
         topk_loss_fraction: float = 1.0,
+        nlb_decoder: str = "direct",
         objective: str = "masked_poisson_nll",
     ) -> None:
         super().__init__()
         self.n_neurons = int(n_neurons)
         self.n_time = int(n_time)
+        self.output_neurons = int(output_neurons or n_neurons)
+        self.fwd_steps = int(fwd_steps)
+        self.total_time = self.n_time + self.fwd_steps
         self.context_forward = int(context_forward)
         self.context_backward = int(context_backward)
         self.context_wrap_initial = bool(context_wrap_initial)
@@ -232,24 +307,34 @@ class NDT(BaseDynamicsModel):
         self.mask_random_ratio = float(mask_random_ratio)
         self.mask_max_span = int(mask_max_span)
         self.mask_span_expand_prob = float(mask_span_expand_prob)
+        self.mask_span_ramp_start = int(mask_span_ramp_start)
+        self.mask_span_ramp_end = int(mask_span_ramp_end)
         self.use_zero_mask = bool(use_zero_mask)
         self.topk_loss_fraction = float(topk_loss_fraction)
+        self.nlb_decoder = str(nlb_decoder)
         self.objective = objective
+        self.training_epoch = 0
 
-        if self.n_neurons < 1:
-            raise ValueError("n_neurons must be positive.")
+        if self.n_neurons < 1 or self.output_neurons < 1:
+            raise ValueError("n_neurons and output_neurons must be positive.")
+        if self.n_neurons > self.output_neurons:
+            raise ValueError("output_neurons must be at least n_neurons.")
         if self.n_time < 1:
             raise ValueError("n_time must be positive.")
+        if self.fwd_steps < 0:
+            raise ValueError("fwd_steps must be nonnegative.")
         if self.embed_dim < 0:
             raise ValueError("embed_dim must be nonnegative.")
         if self.linear_embedder:
-            self.model_dim = self.n_neurons if self.embed_dim == 0 else self.n_neurons * self.embed_dim
-            self.embedder: nn.Module = nn.Linear(self.n_neurons, self.model_dim)
+            self.model_dim = (
+                self.output_neurons if self.embed_dim == 0 else self.output_neurons * self.embed_dim
+            )
+            self.embedder: nn.Module = nn.Linear(self.output_neurons, self.model_dim)
         elif self.embed_dim == 0:
-            self.model_dim = self.n_neurons
+            self.model_dim = self.output_neurons
             self.embedder = nn.Identity()
         else:
-            self.model_dim = self.n_neurons * self.embed_dim
+            self.model_dim = self.output_neurons * self.embed_dim
             self.embedder = nn.Embedding(self.max_spike_count + 2, self.embed_dim)
 
         if self.model_dim % self.num_heads != 0:
@@ -260,7 +345,7 @@ class NDT(BaseDynamicsModel):
 
         self.input_scale = math.sqrt(self.model_dim)
         self.position = PositionalEncoding(
-            n_time=self.n_time,
+            n_time=self.total_time,
             model_dim=self.model_dim,
             dropout=self.dropout_embedding,
             learnable=self.learnable_position,
@@ -294,6 +379,9 @@ class NDT(BaseDynamicsModel):
         if self.fixup_init:
             self.fixup_initialization()
 
+    def set_training_epoch(self, epoch: int) -> None:
+        self.training_epoch = int(epoch)
+
     def forward(self, x: Tensor) -> ModelOutput:
         return self._forward(x, should_mask=self.training)
 
@@ -303,12 +391,11 @@ class NDT(BaseDynamicsModel):
         output: ModelOutput,
         epoch: int = 0,
     ) -> LossOutput:
-        target = observations_from_batch(batch).to(device=self.device, dtype=output.rates.dtype)
-        mask = output.extras.get("loss_mask")
-        if mask is None:
-            mask = torch.ones_like(target, dtype=torch.bool, device=target.device)
-        else:
-            mask = mask.to(device=target.device, dtype=torch.bool)
+        target = self._reconstruction_target(batch, output.extras["log_rates"]).to(
+            device=self.device,
+            dtype=output.rates.dtype,
+        )
+        mask = self._loss_mask_for_target(batch, output, target)
 
         if self.lograte:
             log_rates = output.extras["log_rates"].to(device=target.device, dtype=target.dtype)
@@ -349,6 +436,13 @@ class NDT(BaseDynamicsModel):
         finally:
             self.train(was_training)
 
+    def evaluation_adapter(self, task: str) -> EvaluationAdapter | None:
+        if task != "nlb":
+            return None
+        if self.output_neurons > self.n_neurons and self.nlb_decoder == "direct":
+            return NDTNLBAdapter()
+        return NLBCoSmoothingAdapter(feature_source="latents")
+
     def _forward(self, x: Tensor, should_mask: bool) -> ModelOutput:
         if x.ndim != 3:
             raise ValueError("NDT expects input shape (batch, time, neurons).")
@@ -361,7 +455,8 @@ class NDT(BaseDynamicsModel):
 
         x = x.to(device=self.device, dtype=torch.float32)
         masked_x, labels, loss_mask = self._mask_observations(x, should_mask=should_mask)
-        embedded = self._embed(masked_x) * self.input_scale
+        full_input = self._pad_observed(masked_x)
+        embedded = self._embed(full_input) * self.input_scale
         embedded = self.position(embedded)
         attn_mask = self._get_or_generate_context_mask(embedded)
         factors = self.transformer_encoder(embedded, mask=attn_mask)
@@ -379,18 +474,74 @@ class NDT(BaseDynamicsModel):
             extras={
                 "log_rates": log_rates,
                 "mask_labels": labels,
+                "observed_loss_mask": loss_mask,
                 "loss_mask": loss_mask,
             },
         )
 
+    def _pad_observed(self, x: Tensor) -> Tensor:
+        if x.shape[-1] < self.output_neurons:
+            x = F.pad(x, (0, self.output_neurons - x.shape[-1]), value=0.0)
+        if x.shape[1] < self.total_time:
+            x = F.pad(x, (0, 0, 0, self.total_time - x.shape[1]), value=0.0)
+        return x
+
+    def _reconstruction_target(
+        self,
+        batch: Tensor | dict[str, Tensor],
+        log_rates: Tensor,
+    ) -> Tensor:
+        observed = observations_from_batch(batch)
+        if isinstance(batch, dict) and "heldout_spikes" in batch:
+            heldout = batch["heldout_spikes"]
+            total_neurons = observed.shape[-1] + heldout.shape[-1]
+            if log_rates.shape[-1] >= total_neurons:
+                target = torch.cat([observed, heldout], dim=-1)
+                if (
+                    "heldin_forward_spikes" in batch
+                    and "heldout_forward_spikes" in batch
+                    and log_rates.shape[1] > target.shape[1]
+                ):
+                    forward = torch.cat(
+                        [batch["heldin_forward_spikes"], batch["heldout_forward_spikes"]],
+                        dim=-1,
+                    )
+                    target = torch.cat([target, forward], dim=1)
+                return target
+        return observed
+
+    def _loss_mask_for_target(
+        self,
+        batch: Tensor | dict[str, Tensor],
+        output: ModelOutput,
+        target: Tensor,
+    ) -> Tensor:
+        observed_mask = output.extras["observed_loss_mask"].to(
+            device=target.device,
+            dtype=torch.bool,
+        )
+        if not self.training:
+            return torch.ones_like(target, dtype=torch.bool)
+        if target.shape == observed_mask.shape:
+            return observed_mask
+
+        mask = torch.zeros_like(target, dtype=torch.bool)
+        mask[:, : self.n_time, : self.n_neurons] = observed_mask
+        if isinstance(batch, dict) and "heldout_spikes" in batch:
+            n_heldout = int(batch["heldout_spikes"].shape[-1])
+            mask[:, : self.n_time, self.n_neurons : self.n_neurons + n_heldout] = True
+            if target.shape[1] > self.n_time:
+                mask[:, self.n_time :, :] = True
+        return mask
+
     def _build_decoder(self) -> nn.Module:
         if self.decoder_layers == 1:
-            layers: list[nn.Module] = [nn.Linear(self.model_dim, self.n_neurons)]
+            layers: list[nn.Module] = [nn.Linear(self.model_dim, self.output_neurons)]
         else:
             layers = [nn.Linear(self.model_dim, 16), nn.ReLU()]
             for _ in range(self.decoder_layers - 2):
                 layers.extend([nn.Linear(16, 16), nn.ReLU()])
-            layers.append(nn.Linear(16, self.n_neurons))
+            layers.append(nn.Linear(16, self.output_neurons))
         if not self.lograte:
             layers.append(nn.ReLU())
         return nn.Sequential(*layers)
@@ -440,10 +591,11 @@ class NDT(BaseDynamicsModel):
         batch, time, neurons = x.shape
         ratio = self.mask_ratio
         width = 1
+        expand_prob = self._current_mask_span_expand_prob()
         should_expand = (
             self.mask_max_span > 1
-            and self.mask_span_expand_prob > 0.0
-            and torch.rand((), device=x.device).item() < self.mask_span_expand_prob
+            and expand_prob > 0.0
+            and torch.rand((), device=x.device).item() < expand_prob
         )
         if should_expand:
             width = int(torch.randint(1, self.mask_max_span + 1, (), device=x.device).item())
@@ -473,6 +625,15 @@ class NDT(BaseDynamicsModel):
             mask[flat_index] = True
             mask = mask.reshape(batch, time, neurons)
         return mask
+
+    def _current_mask_span_expand_prob(self) -> float:
+        if self.mask_span_ramp_end > self.mask_span_ramp_start:
+            progress = (
+                (float(self.training_epoch) - float(self.mask_span_ramp_start))
+                / float(self.mask_span_ramp_end - self.mask_span_ramp_start)
+            )
+            return max(0.0, min(1.0, progress))
+        return self.mask_span_expand_prob
 
     def _get_or_generate_context_mask(self, src: Tensor) -> Tensor | None:
         if self.full_context:
@@ -534,6 +695,49 @@ class NDT(BaseDynamicsModel):
             module.linear2.weight.data.mul_(scale)
             module.self_attn.out_proj.weight.data.mul_(scale)
             module.self_attn.in_proj_weight.data.mul_(scale)
+
+
+class NDTNLBAdapter(EvaluationAdapter):
+    """Direct held-out NLB scorer for NDT full readouts."""
+
+    task = "nlb"
+
+    def evaluate(
+        self,
+        model: BaseDynamicsModel,
+        loader: Any,
+        device: torch.device,
+    ) -> EvaluationResult:
+        predictions: list[Tensor] = []
+        targets: list[Tensor] = []
+
+        with torch.no_grad():
+            for batch in loader:
+                batch = move_batch_to_device(batch, device)
+                x = observations_from_batch(batch)
+                if not isinstance(batch, dict) or "heldout_spikes" not in batch:
+                    raise TypeError("NLB evaluation requires heldout_spikes in dict batches.")
+                rates = model.predict_rates(x)
+                target = batch["heldout_spikes"]
+                n_heldin = x.shape[-1]
+                n_heldout = target.shape[-1]
+                pred = rates[:, : target.shape[1], n_heldin : n_heldin + n_heldout]
+                if pred.shape != target.shape:
+                    raise ValueError(
+                        "NDT direct NLB predictions have shape "
+                        f"{tuple(pred.shape)}, expected {tuple(target.shape)}."
+                    )
+                predictions.append(pred.detach().cpu())
+                targets.append(target.detach().cpu())
+
+        pred_dict: dict[str, Tensor] = {"rates": torch.cat(predictions, dim=0)}
+        target_dict: dict[str, Tensor] = {"spikes": torch.cat(targets, dim=0)}
+        metrics = compute_available_metrics(pred_dict, target_dict)
+        return EvaluationResult(
+            metrics=metrics,
+            predictions={key: value.numpy() for key, value in pred_dict.items()},
+            targets={key: value.numpy() for key, value in target_dict.items()},
+        )
 
 
 class PositionalEncoding(nn.Module):

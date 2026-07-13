@@ -1,5 +1,7 @@
 name: ndt
 objective: masked_poisson_nll
+output_mode: auto
+fwd_steps: 0
 context_forward: 4
 context_backward: 8
 context_wrap_initial: false
@@ -30,11 +32,18 @@ mask_token_ratio: 1.0
 mask_random_ratio: 0.5
 mask_max_span: 1
 mask_span_expand_prob: 0.0
+mask_span_ramp_start: 0
+mask_span_ramp_end: 0
 use_zero_mask: true
 topk_loss_fraction: 1.0
+nlb_decoder: direct
 optimization:
   name: gradient
-  optimizer: Adam
+  optimizer: AdamW
   lr: 1.0e-3
-  weight_decay: 0.0
+  weight_decay: 5.0e-5
   gradient_clip: 200.0
+  lr_scheduler: warmup_cosine
+  warmup_steps: 2
+  total_steps: 20
+  scheduler_step: epoch

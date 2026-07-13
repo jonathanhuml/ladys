@@ -93,6 +93,17 @@ def make_random_params(
     seed: int = 0,
     spatial_std: float = 1.0,
     nu: float = 20.0,
+    first_step_std: float | None = None,
+    uf_sigma: float | None = None,
+    dynamics_sigma: float | None = None,
+    bh_sigma: float = 0.0,
+    input_sigma: float | None = None,
+    readout_sigma: float | None = None,
+    bias_mean: float = 0.0,
+    bias_sigma: float = 0.0,
+    gain_mean: float = 1.0,
+    gain_sigma: float = 0.0,
+    covariance_jitter_sigma: float = 0.0,
 ) -> TutorialParams:
     """Initialize iLQR-VAE parameters for a new dataset.
 
@@ -106,25 +117,35 @@ def make_random_params(
     rng = np.random.default_rng(seed)
     n_beg = latent_dim // input_dim
     n_controls = n_time + n_beg - 1
-    dyn_sigma = 0.1 / np.sqrt(float(latent_dim))
-    input_sigma = 1.0 / np.sqrt(float(input_dim))
-    readout_sigma = 1.0 / np.sqrt(float(latent_dim))
+    first_step_std = spatial_std if first_step_std is None else first_step_std
+    uf_sigma = 0.0 if uf_sigma is None else uf_sigma
+    dyn_sigma = 0.1 / np.sqrt(float(latent_dim)) if dynamics_sigma is None else dynamics_sigma
+    input_sigma = 1.0 / np.sqrt(float(input_dim)) if input_sigma is None else input_sigma
+    readout_sigma = (
+        1.0 / np.sqrt(float(latent_dim)) if readout_sigma is None else readout_sigma
+    )
     return TutorialParams(
         spatial_stds=np.full((1, input_dim), spatial_std, dtype=np.float64),
         nu=float(nu),
-        first_step=np.full((1, input_dim), spatial_std, dtype=np.float64),
-        uf=np.zeros((latent_dim, latent_dim), dtype=np.float64),
+        first_step=np.full((1, input_dim), first_step_std, dtype=np.float64),
+        uf=rng.normal(scale=uf_sigma, size=(latent_dim, latent_dim)).astype(np.float64),
         wh=rng.normal(scale=dyn_sigma, size=(latent_dim, latent_dim)).astype(np.float64),
         uh=rng.normal(scale=dyn_sigma, size=(latent_dim, latent_dim)).astype(np.float64),
-        bh=np.zeros((1, latent_dim), dtype=np.float64),
+        bh=rng.normal(scale=bh_sigma, size=(1, latent_dim)).astype(np.float64),
         b=rng.normal(scale=input_sigma, size=(input_dim, latent_dim)).astype(np.float64),
         c=rng.normal(scale=readout_sigma, size=(n_neurons, latent_dim)).astype(np.float64),
-        bias=np.zeros((1, n_neurons), dtype=np.float64),
-        gain=np.ones((1, n_neurons), dtype=np.float64),
+        bias=rng.normal(loc=bias_mean, scale=bias_sigma, size=(1, n_neurons)).astype(np.float64),
+        gain=rng.normal(loc=gain_mean, scale=gain_sigma, size=(1, n_neurons)).astype(np.float64),
         space_cov_d=np.ones((input_dim, 1), dtype=np.float64),
-        space_cov_t=np.zeros((input_dim, input_dim), dtype=np.float64),
+        space_cov_t=rng.normal(
+            scale=covariance_jitter_sigma,
+            size=(input_dim, input_dim),
+        ).astype(np.float64),
         time_cov_d=np.ones((n_controls, 1), dtype=np.float64),
-        time_cov_t=np.zeros((n_controls, n_controls), dtype=np.float64),
+        time_cov_t=rng.normal(
+            scale=covariance_jitter_sigma,
+            size=(n_controls, n_controls),
+        ).astype(np.float64),
     )
 
 

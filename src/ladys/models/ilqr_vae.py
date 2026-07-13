@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 import torch
 from pydantic import Field
@@ -13,6 +14,7 @@ from ladys.models.base import BaseDynamicsModel, BaseModelConfig, OptimizationCo
 from ladys.models.ilqr_vae_core import ILQRVAE as TutorialILQRVAE
 from ladys.models.ilqr_vae_core import load_tutorial_params
 from ladys.models.ilqr_vae_core import make_random_params
+from ladys.models.ilqr_vae_core.params import TutorialParams
 from ladys.metrics import poisson_negative_log_likelihood
 from ladys.types import LossOutput, ModelOutput, observations_from_batch
 
@@ -39,7 +41,11 @@ class ILQRVAEConfig(BaseModelConfig):
     name: Literal["ilqr_vae"] = "ilqr_vae"
     objective: Literal["posterior_control", "ilqr_vae_elbo"] = "posterior_control"
     params_path: Optional[str] = "data/real/ilqr_vae/final_params.bin"
-    initialization: Literal["pretrained", "random"] = "pretrained"
+    initialization: Literal["pretrained", "random", "checkpoint_transfer"] = "pretrained"
+    template_params_path: Optional[str] = None
+    random_init_profile: Literal["default", "tutorial_mc_maze"] = "default"
+    readout_bias_initialization: Literal["none", "empirical_rates"] = "none"
+    empirical_rate_floor_hz: float = 1.0e-3
     latent_dim: int = 20
     input_dim: int = 5
     init_seed: int = 0
@@ -60,11 +66,20 @@ class ILQRVAEConfig(BaseModelConfig):
     )
 
     def build(self, n_neurons: int, n_time: int) -> "ILQRVAE":
+        model_neurons = n_neurons
+        if (
+            self.initialization in {"random", "checkpoint_transfer"}
+            and self.output_neuron_start is not None
+        ):
+            output_stop = self.output_neuron_start + (self.output_neurons or 0)
+            model_neurons = max(model_neurons, output_stop)
         return ILQRVAE(
-            n_neurons=n_neurons,
+            n_neurons=model_neurons,
             n_time=n_time,
             params_path=self.params_path,
             initialization=self.initialization,
+            template_params_path=self.template_params_path,
+            random_init_profile=self.random_init_profile,
             latent_dim=self.latent_dim,
             input_dim=self.input_dim,
             init_seed=self.init_seed,
@@ -82,6 +97,22 @@ class ILQRVAEConfig(BaseModelConfig):
             dt=self.dt,
             objective=self.objective,
         )
+
+    def build_from_data(self, data: Any) -> "ILQRVAE":
+        model = self.build(n_neurons=data.n_neurons, n_time=data.n_time)
+        if self.readout_bias_initialization == "empirical_rates":
+            train_dataset = getattr(data, "train_dataset", None)
+            full_spikes = _full_spikes_from_dataset(train_dataset)
+            if full_spikes is None:
+                raise ValueError(
+                    "readout_bias_initialization='empirical_rates' requires a train dataset "
+                    "with held-in spikes and held-out/raw spikes."
+                )
+            model.initialize_readout_bias_from_counts(
+                full_spikes,
+                rate_floor_hz=self.empirical_rate_floor_hz,
+            )
+        return model
 
 
 class ILQRVAE(BaseDynamicsModel):
@@ -153,6 +184,8 @@ class ILQRVAE(BaseDynamicsModel):
         n_time: int,
         params_path: Optional[str],
         initialization: str = "pretrained",
+        template_params_path: Optional[str] = None,
+        random_init_profile: str = "default",
         latent_dim: int = 20,
         input_dim: int = 5,
         init_seed: int = 0,
@@ -175,6 +208,10 @@ class ILQRVAE(BaseDynamicsModel):
         self.n_time = int(n_time)
         self.params_path = None if params_path is None else str(params_path)
         self.initialization = initialization
+        self.template_params_path = (
+            None if template_params_path is None else str(template_params_path)
+        )
+        self.random_init_profile = random_init_profile
         self.latent_dim = int(latent_dim)
         self.input_dim = int(input_dim)
         self.init_seed = int(init_seed)
@@ -196,14 +233,22 @@ class ILQRVAE(BaseDynamicsModel):
             if params_path is None:
                 raise ValueError("params_path is required for pretrained iLQR-VAE initialization.")
             params = load_tutorial_params(Path(params_path))
-        elif initialization == "random":
+        elif initialization in {"random", "checkpoint_transfer"}:
             params = make_random_params(
                 latent_dim=self.latent_dim,
                 input_dim=self.input_dim,
                 n_neurons=self.n_neurons,
                 n_time=self.n_time,
                 seed=self.init_seed,
+                **_random_init_profile_kwargs(random_init_profile),
             )
+            if initialization == "checkpoint_transfer":
+                if template_params_path is None:
+                    raise ValueError(
+                        "template_params_path is required for checkpoint_transfer initialization."
+                    )
+                template = load_tutorial_params(Path(template_params_path))
+                params = _transfer_checkpoint_parameters(params, template)
         else:
             raise ValueError(f"unknown iLQR-VAE initialization {initialization!r}")
         self.core = TutorialILQRVAE(params, dt=self.dt, trainable=self.trainable_parameters)
@@ -263,7 +308,7 @@ class ILQRVAE(BaseDynamicsModel):
         del epoch
         x = observations_from_batch(batch)
         if self.objective == "ilqr_vae_elbo":
-            return self._elbo_loss(x, output)
+            return self._elbo_loss(self._training_observations(batch, x), output)
 
         target = batch.get("raw_spikes", x) if isinstance(batch, dict) else x
         if output.rates is None:
@@ -318,6 +363,43 @@ class ILQRVAE(BaseDynamicsModel):
             objective=self.objective,
         )
 
+    def _training_observations(self, batch: Tensor | dict[str, Tensor], x: Tensor) -> Tensor:
+        if not isinstance(batch, dict):
+            return x
+        heldout = batch.get("heldout_spikes")
+        if heldout is None:
+            heldout = batch.get("raw_spikes")
+        if heldout is None:
+            return x
+        if x.shape[:-1] != heldout.shape[:-1]:
+            return x
+        return torch.cat([x, heldout.to(device=x.device, dtype=x.dtype)], dim=-1)
+
+    def initialize_readout_bias_from_counts(
+        self,
+        spikes: Tensor,
+        *,
+        rate_floor_hz: float = 1.0e-3,
+    ) -> None:
+        if spikes.ndim != 3:
+            raise ValueError(
+                f"expected spikes with shape trials x time x neurons, got {tuple(spikes.shape)}"
+            )
+        if int(spikes.shape[-1]) != self.core.n_neurons:
+            raise ValueError(
+                f"empirical readout initialization expected {self.core.n_neurons} neurons, "
+                f"got {int(spikes.shape[-1])}."
+            )
+        with torch.no_grad():
+            mean_counts = spikes.to(
+                dtype=self.core.bias.dtype,
+                device=self.core.bias.device,
+            ).mean(dim=(0, 1))
+            gain = self.core._positive(self.core.gain.reshape(-1))
+            rate_hz = torch.clamp(mean_counts / self.dt, min=float(rate_floor_hz))
+            bias = torch.log(torch.clamp(rate_hz / gain - 1.0e-3, min=float(rate_floor_hz)))
+            self.core.bias.copy_(bias.reshape_as(self.core.bias))
+
     def _dynamics_regularizer(self) -> Tensor:
         if self.dynamics_regularizer <= 0.0:
             return self.core.c.new_zeros(())
@@ -326,3 +408,65 @@ class ILQRVAE(BaseDynamicsModel):
 
     def project_parameters(self) -> None:
         self.core.project_parameters()
+
+
+def _random_init_profile_kwargs(profile: str) -> dict[str, float]:
+    if profile == "default":
+        return {}
+    if profile == "tutorial_mc_maze":
+        return {
+            "spatial_std": 1.0,
+            "nu": 20.0,
+            "first_step_std": 1.0,
+            "uf_sigma": 0.0035,
+            "dynamics_sigma": 0.01,
+            "bh_sigma": 0.01,
+            "input_sigma": 1.0 / (15.0**0.5),
+            "readout_sigma": 0.01,
+            "bias_mean": 1.0,
+            "bias_sigma": 0.01,
+            "gain_mean": 1.0,
+            "gain_sigma": 0.01,
+            "covariance_jitter_sigma": 0.01,
+        }
+    raise ValueError(f"unknown iLQR-VAE random_init_profile {profile!r}")
+
+
+def _transfer_checkpoint_parameters(params: TutorialParams, template: TutorialParams) -> TutorialParams:
+    """Copy shape-compatible non-readout parameters from a trained checkpoint."""
+
+    replacements: dict[str, Any] = {}
+    for name in (
+        "spatial_stds",
+        "nu",
+        "first_step",
+        "uf",
+        "wh",
+        "uh",
+        "bh",
+        "b",
+        "space_cov_d",
+        "space_cov_t",
+        "time_cov_d",
+        "time_cov_t",
+    ):
+        source = getattr(template, name)
+        target = getattr(params, name)
+        if name == "nu" or tuple(source.shape) == tuple(target.shape):
+            replacements[name] = source.copy() if hasattr(source, "copy") else source
+    return replace(params, **replacements)
+
+
+def _full_spikes_from_dataset(dataset: Any) -> Tensor | None:
+    if dataset is None:
+        return None
+    base = getattr(dataset, "dataset", dataset)
+    heldin = getattr(base, "spikes", getattr(dataset, "spikes", None))
+    heldout = getattr(base, "raw_spikes", None)
+    if heldin is None:
+        return None
+    if heldout is None:
+        return heldin
+    if heldin.shape[:-1] != heldout.shape[:-1]:
+        return heldin
+    return torch.cat([heldin, heldout.to(device=heldin.device, dtype=heldin.dtype)], dim=-1)

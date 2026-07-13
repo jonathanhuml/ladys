@@ -639,10 +639,17 @@ def _score_full_nlb_metrics(
     train_rates_heldout: np.ndarray | None,
     train_rates_heldin: np.ndarray | None,
     co_bps: float,
+    eval_rates_heldin_forward: np.ndarray | None = None,
+    eval_rates_heldout_forward: np.ndarray | None = None,
 ) -> dict[str, float]:
     metrics = {"co-bps": float(co_bps)}
     try:
-        from nlb_tools.evaluation import eval_psth, speed_tp_correlation, velocity_decoding
+        from nlb_tools.evaluation import (
+            bits_per_spike,
+            eval_psth,
+            speed_tp_correlation,
+            velocity_decoding,
+        )
     except ImportError:
         return metrics
 
@@ -692,6 +699,25 @@ def _score_full_nlb_metrics(
                     jitter=jitter,
                 )
             )
+        if (
+            eval_rates_heldin_forward is not None
+            and eval_rates_heldout_forward is not None
+            and "eval_spikes_heldin_forward" in group
+            and "eval_spikes_heldout_forward" in group
+        ):
+            eval_spikes_forward = np.dstack(
+                [
+                    group["eval_spikes_heldin_forward"][()].astype(float),
+                    group["eval_spikes_heldout_forward"][()].astype(float),
+                ]
+            )
+            eval_rates_forward = np.dstack(
+                [
+                    eval_rates_heldin_forward.astype(float, copy=False),
+                    eval_rates_heldout_forward.astype(float, copy=False),
+                ]
+            )
+            metrics["fp-bps"] = float(bits_per_spike(eval_rates_forward, eval_spikes_forward))
     return metrics
 
 

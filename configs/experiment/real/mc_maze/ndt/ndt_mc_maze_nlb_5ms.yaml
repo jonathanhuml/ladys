@@ -1,0 +1,69 @@
+dataset:
+  name: mc_maze
+  split: test
+  bin_size_ms: 5
+  data_path: data/real/nlb/mc_maze_test_5ms.h5
+
+model:
+  name: ndt
+  objective: masked_poisson_nll
+  output_mode: auto
+  fwd_steps: 0
+  context_forward: 64
+  context_backward: 64
+  context_wrap_initial: false
+  full_context: false
+  hidden_size: 128
+  dropout: 0.5
+  dropout_rates: 0.5
+  dropout_embedding: 0.5
+  num_heads: 2
+  num_layers: 4
+  activation: relu
+  linear_embedder: false
+  embed_dim: 0
+  learnable_position: true
+  max_spike_count: 20
+  lograte: true
+  log_rate_min: -8.0
+  log_rate_max: 8.0
+  spike_log_init: false
+  fixup_init: true
+  pre_norm: true
+  scale_norm: false
+  decoder_layers: 1
+  position_offset: true
+  mask_ratio: 0.25
+  mask_mode: timestep
+  mask_token_ratio: 0.75
+  mask_random_ratio: 0.9
+  mask_max_span: 7
+  mask_span_expand_prob: 0.0
+  mask_span_ramp_start: 3
+  mask_span_ramp_end: 5
+  use_zero_mask: true
+  topk_loss_fraction: 1.0
+  nlb_decoder: direct
+  optimization:
+    name: gradient
+    optimizer: AdamW
+    lr: 1.0e-3
+    weight_decay: 5.0e-5
+    gradient_clip: 200.0
+    lr_scheduler: warmup_cosine
+    warmup_steps: 2
+    total_steps: 20
+    scheduler_step: epoch
+
+preprocessing:
+  observations: null
+
+trainer:
+  epochs: 20
+  batch_size: 64
+  device: cpu
+
+experiment:
+  output_dir: runs
+  run_name: ndt_mc_maze_nlb_5ms
+  save_predictions: true

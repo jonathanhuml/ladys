@@ -8,6 +8,7 @@ methods can share the same outer training/reporting contract.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+import math
 from typing import Iterable
 
 import numpy as np
@@ -27,6 +28,10 @@ class OptimizationStrategy(ABC):
 
     def on_epoch_start(self, model: BaseDynamicsModel, epoch: int) -> None:
         """Hook before an epoch starts."""
+
+        set_epoch = getattr(model, "set_training_epoch", None)
+        if callable(set_epoch):
+            set_epoch(epoch)
 
     def on_epoch_end(self, model: BaseDynamicsModel, epoch: int) -> None:
         """Hook after an epoch ends."""
@@ -88,6 +93,10 @@ class GradientStrategy(OptimizationStrategy):
         scheduler_patience: int = 10,
         scheduler_threshold: float = 0.0,
         scheduler_min_lr: float = 1e-5,
+        sqrt_decay_scale: float = 1.0,
+        warmup_steps: int = 0,
+        total_steps: int | None = None,
+        scheduler_step: str = "batch",
     ) -> None:
         self.optimizer_name = optimizer
         self.lr = lr
@@ -98,8 +107,12 @@ class GradientStrategy(OptimizationStrategy):
         self.scheduler_patience = scheduler_patience
         self.scheduler_threshold = scheduler_threshold
         self.scheduler_min_lr = scheduler_min_lr
+        self.sqrt_decay_scale = float(sqrt_decay_scale)
+        self.warmup_steps = int(warmup_steps)
+        self.total_steps = None if total_steps is None else int(total_steps)
+        self.scheduler_step = str(scheduler_step)
         self.optimizer: torch.optim.Optimizer | None = None
-        self.scheduler: ReduceLROnPlateau | None = None
+        self.scheduler: ReduceLROnPlateau | LambdaLR | None = None
 
     def setup(self, model: BaseDynamicsModel) -> None:
         optimizer_cls = getattr(torch.optim, self.optimizer_name)
@@ -110,6 +123,16 @@ class GradientStrategy(OptimizationStrategy):
         )
         self.scheduler = None
         if self.lr_scheduler_name is None:
+            return
+        if self.lr_scheduler_name == "sqrt_decay":
+            scale = max(self.sqrt_decay_scale, 1.0e-12)
+            self.scheduler = LambdaLR(
+                self.optimizer,
+                lr_lambda=lambda step: 1.0 / (1.0 + np.sqrt(float(step) / scale)),
+            )
+            return
+        if self.lr_scheduler_name == "warmup_cosine":
+            self.scheduler = LambdaLR(self.optimizer, lr_lambda=self._warmup_cosine_factor)
             return
         if self.lr_scheduler_name != "ReduceLROnPlateau":
             raise ValueError(f"Unsupported lr_scheduler '{self.lr_scheduler_name}'.")
@@ -143,10 +166,16 @@ class GradientStrategy(OptimizationStrategy):
         if hasattr(model, "on_before_optimizer_step"):
             model.on_before_optimizer_step(self.optimizer, epoch)
         self.optimizer.step()
+        if isinstance(self.scheduler, LambdaLR):
+            self._step_lambda_scheduler("batch")
         if hasattr(model, "project_parameters"):
             model.project_parameters()
 
         return StepResult.from_loss(loss, batch_size=int(x.shape[0]))
+
+    def on_epoch_end(self, model: BaseDynamicsModel, epoch: int) -> None:
+        del model, epoch
+        self._step_lambda_scheduler("epoch")
 
     def on_validation_end(
         self,
@@ -155,8 +184,21 @@ class GradientStrategy(OptimizationStrategy):
         valid_result: StepResult | None,
     ) -> None:
         del model, epoch
-        if self.scheduler is not None and valid_result is not None:
+        if isinstance(self.scheduler, ReduceLROnPlateau) and valid_result is not None:
             self.scheduler.step(valid_result.loss)
+
+    def _step_lambda_scheduler(self, step_kind: str) -> None:
+        if isinstance(self.scheduler, LambdaLR) and self.scheduler_step == step_kind:
+            self.scheduler.step()
+
+    def _warmup_cosine_factor(self, step: int) -> float:
+        step = max(int(step), 1)
+        warmup = max(self.warmup_steps, 0)
+        total = max(self.total_steps or warmup + 1, warmup + 1)
+        if warmup > 0 and step <= warmup:
+            return float(step) / float(warmup)
+        progress = min(1.0, max(0.0, float(step - warmup) / float(total - warmup)))
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
 
 
 class FullBatchGradientStrategy(OptimizationStrategy):

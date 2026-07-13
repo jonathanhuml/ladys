@@ -15,6 +15,7 @@ from .params import TutorialParams
 
 Solver = Literal["adam", "lbfgs", "ilqr"]
 RateMode = Literal["likelihood", "pre_sample"]
+_MAX_LOG_RATE = 12.0
 
 
 @dataclass(frozen=True)
@@ -342,9 +343,9 @@ class ILQRVAE(torch.nn.Module):
 
         linear = latents @ self.c.T + self.bias
         if mode == "pre_sample":
-            return torch.exp(linear)
+            return _safe_exp(linear)
         if mode == "likelihood":
-            return self._positive(self.gain) * (1e-3 + torch.exp(linear))
+            return self._positive(self.gain) * (1e-3 + _safe_exp(linear))
         raise ValueError(f"unknown rate mode {mode!r}")
 
     def poisson_nll(
@@ -462,7 +463,7 @@ class ILQRVAE(torch.nn.Module):
         bias = self.bias[:, :held_in_neurons]
         gain = self._positive(self.gain[:, :held_in_neurons])
         linear = latents @ c.T + bias
-        rates = (self.dt * gain * (1e-3 + torch.exp(linear))).clamp_min(1e-12)
+        rates = (self.dt * gain * (1e-3 + _safe_exp(linear))).clamp_min(1e-12)
         obs = spikes[: latents.shape[1], :held_in_neurons].unsqueeze(0).to(rates.dtype)
         logp = torch.sum(obs * torch.log(rates) - rates)
         if include_constants:
@@ -621,7 +622,7 @@ class ILQRVAE(torch.nn.Module):
         bias = self.bias[:, :held_in_neurons]
         gain = self._positive(self.gain[:, :held_in_neurons])
         linear = state @ c.T + bias
-        rates = (self.dt * gain * (1e-3 + torch.exp(linear))).clamp_min(1e-12)
+        rates = (self.dt * gain * (1e-3 + _safe_exp(linear))).clamp_min(1e-12)
         nll = torch.sum(rates - spikes_t * torch.log(rates))
         if include_constants:
             nll = nll + torch.sum(torch.lgamma(spikes_t + 1.0))
@@ -638,13 +639,15 @@ class ILQRVAE(torch.nn.Module):
         bias = self.bias[:, :held_in_neurons]
         gain = self._positive(self.gain[:, :held_in_neurons])
         linear = state @ c.T + bias
-        exp_linear = torch.exp(linear)
+        active = (linear <= _MAX_LOG_RATE).to(linear.dtype)
+        exp_linear = _safe_exp(linear)
+        exp_deriv = exp_linear * active
         link = 1e-3 + exp_linear
-        tmp1 = self.dt * gain * exp_linear
-        tmp2 = spikes_t * exp_linear / link
+        tmp1 = self.dt * gain * exp_deriv
+        tmp2 = spikes_t * exp_deriv / link
         grad = (tmp1 - tmp2) @ c
 
-        d2_log_link = exp_linear * 1e-3 / (link**2)
+        d2_log_link = active * exp_linear * 1e-3 / (link**2)
         weights = (tmp1 - spikes_t * d2_log_link).reshape(-1)
         hess = (c.T * weights) @ c
         return grad, hess
@@ -836,9 +839,12 @@ class ILQRVAE(torch.nn.Module):
     ) -> tuple[list[tuple[_TapeStep, torch.Tensor, torch.Tensor]], float, float]:
         flxx = torch.zeros(self.n_latent, self.n_latent, dtype=self.c.dtype, device=self.c.device)
         flx = torch.zeros(1, self.n_latent, dtype=self.c.dtype, device=self.c.device)
+        eye_u = torch.eye(self.n_input, dtype=self.c.dtype, device=self.c.device)
 
         delta = 1.0
         mu = 0.0
+        regularization_attempts = 0
+        max_regularization_attempts = 64
         while True:
             vxx = flxx
             vx = flx
@@ -855,23 +861,28 @@ class ILQRVAE(torch.nn.Module):
                 qxx = step.rlxx + step.a @ vxx @ at
                 quu = step.rluu + step.b @ vxx @ bt
                 quu = 0.5 * (quu + quu.T)
-                qtuu = quu + mu * (step.b @ bt)
+                qtuu = quu + mu * eye_u
                 try:
-                    min_eval = float(torch.linalg.eigvalsh(qtuu).min().detach().cpu())
+                    cholesky, info = torch.linalg.cholesky_ex(qtuu)
+                    is_pos_def = bool((info == 0).all().detach().cpu())
                 except RuntimeError:
-                    delta, mu = _increase_regularization(delta, mu)
-                    restart = True
-                    break
-                if not min_eval > 1e-8:
+                    is_pos_def = False
+                if not is_pos_def:
+                    regularization_attempts += 1
+                    if regularization_attempts > max_regularization_attempts:
+                        raise RuntimeError("iLQR backward pass did not find a positive definite Q_uu.")
                     delta, mu = _increase_regularization(delta, mu)
                     restart = True
                     break
 
                 qux = step.rlux + step.b @ vxx @ at
                 try:
-                    feedback = -torch.linalg.solve(qtuu, qux).T
-                    feedforward = -torch.linalg.solve(qtuu, qu.T).T
+                    feedback = -torch.cholesky_solve(qux, cholesky).T
+                    feedforward = -torch.cholesky_solve(qu.T, cholesky).T
                 except RuntimeError:
+                    regularization_attempts += 1
+                    if regularization_attempts > max_regularization_attempts:
+                        raise RuntimeError("iLQR backward pass failed to solve regularized Q_uu.")
                     delta, mu = _increase_regularization(delta, mu)
                     restart = True
                     break
@@ -1024,6 +1035,10 @@ def _increase_regularization(delta: float, mu: float) -> tuple[float, float]:
     delta = max(2.0, 2.0 * delta)
     mu = max(1e-6, mu * delta)
     return delta, mu
+
+
+def _safe_exp(linear: torch.Tensor) -> torch.Tensor:
+    return torch.exp(torch.clamp(linear, max=_MAX_LOG_RATE))
 
 
 def _maybe_record_trace(

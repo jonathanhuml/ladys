@@ -49,6 +49,7 @@ from ladys.models import (
     GPFAConfig,
     ILQRVAEConfig,
     KalmanConfig,
+    LangevinFlowConfig,
     LFADSConfig,
     MINTConfig,
     NDTConfig,
@@ -75,6 +76,7 @@ MODEL_CONFIGS = {
     "gpfa": GPFAConfig,
     "ilqr_vae": ILQRVAEConfig,
     "kalman": KalmanConfig,
+    "langevin_flow": LangevinFlowConfig,
     "lfads": LFADSConfig,
     "mint": MINTConfig,
     "ndt": NDTConfig,
@@ -87,7 +89,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--models",
         nargs="+",
-        default=["bgpfa", "cassm", "gpfa", "ilqr_vae", "kalman", "lfads", "mint", "ndt"],
+        default=[
+            "bgpfa",
+            "cassm",
+            "gpfa",
+            "ilqr_vae",
+            "kalman",
+            "langevin_flow",
+            "lfads",
+            "mint",
+            "ndt",
+            "stndt",
+        ],
     )
     parser.add_argument("--neurons", type=int, default=100)
     parser.add_argument("--seed", type=int, default=1)
@@ -636,7 +649,7 @@ def build_model_config(
         if args.mint_causal:
             model_data["causal"] = True
         return BaseModelConfig.from_dict(model_data)
-    if model_name in {"lfads", "ndt", "stndt"}:
+    if model_name in {"langevin_flow", "lfads", "ndt", "stndt"}:
         if model_data is not None:
             return BaseModelConfig.from_dict(model_data)
         return MODEL_CONFIGS[model_name]()
