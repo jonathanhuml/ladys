@@ -42,7 +42,12 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from ladys.datasets import LorenzDataset, LorenzDatasetConfig
+from ladys.datasets import (
+    ChaoticRNNDataset,
+    ChaoticRNNDatasetConfig,
+    LorenzDataset,
+    LorenzDatasetConfig,
+)
 from ladys.models import (
     BGPFAConfig,
     CASSMConfig,
@@ -102,10 +107,28 @@ def parse_args() -> argparse.Namespace:
             "stndt",
         ],
     )
+    parser.add_argument(
+        "--dataset",
+        choices=["lorenz", "chaotic_rnn"],
+        default="lorenz",
+        help="Synthetic dataset to benchmark.",
+    )
     parser.add_argument("--neurons", type=int, default=100)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--num-inits", type=int, default=10)
+    parser.add_argument(
+        "--num-conditions",
+        type=int,
+        default=None,
+        help="Chaotic-RNN conditions. Defaults to --num-inits.",
+    )
+    parser.add_argument(
+        "--hidden-units",
+        type=int,
+        default=None,
+        help="Chaotic-RNN hidden units. Defaults to max(--neurons, 50).",
+    )
     parser.add_argument("--num-trials", type=int, default=10)
     parser.add_argument("--num-steps", type=int, default=100)
     parser.add_argument("--burn-steps", type=int, default=1000)
@@ -129,6 +152,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="CASSM sparse projection dimension. Defaults to min(20, neurons).",
+    )
+    parser.add_argument(
+        "--cassm-lr",
+        type=float,
+        default=None,
+        help="Override the CASSM optimizer learning rate.",
     )
     parser.add_argument(
         "--gpfa-latent-dim",
@@ -165,6 +194,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1e-1,
         help="Learning rate for BGPFA held-out latent inference.",
+    )
+    parser.add_argument(
+        "--ilqr-max-iter",
+        type=int,
+        default=5,
+        help="Inner posterior-control iterations for iLQR-VAE synthetic benchmarks.",
     )
     parser.add_argument(
         "--mint-n-candidates",
@@ -227,7 +262,7 @@ def main() -> None:
             raise KeyError(f"Unknown model '{model_name}'. Choices: {sorted(MODEL_CONFIGS)}")
 
         print(
-            f"Running model={model_name}, neurons={args.neurons}, "
+            f"Running dataset={args.dataset}, model={model_name}, neurons={args.neurons}, "
             f"seed={args.seed}, epochs={args.epochs}"
         )
         case_rows, case_trace_rows = run_case(args, model_name, output_dir)
@@ -254,19 +289,13 @@ def run_case(
     model_dir = output_dir / "models" / model_name
     model_dir.mkdir(parents=True, exist_ok=True)
 
-    dataset_config = LorenzDatasetConfig(
-        neurons=args.neurons,
-        num_inits=args.num_inits,
-        num_trials=args.num_trials,
-        num_steps=args.num_steps,
-        burn_steps=args.burn_steps,
-        seed=args.seed,
-    )
-    train_ds, test_ds = LorenzDataset.make_splits(dataset_config)
+    dataset_config = build_synthetic_dataset_config(args)
+    train_ds, test_ds = make_synthetic_splits(dataset_config)
     preprocessing = build_preprocessing_config(
         model_name,
         args.experiment_config_dir,
         args.preprocessing_mode,
+        args.dataset,
         args.neurons,
     )
     train_ds = PreprocessedDataset(train_ds, preprocessing)
@@ -423,12 +452,48 @@ def run_case(
     return rows, trace_rows
 
 
+def build_synthetic_dataset_config(
+    args: argparse.Namespace,
+) -> LorenzDatasetConfig | ChaoticRNNDatasetConfig:
+    if args.dataset == "lorenz":
+        return LorenzDatasetConfig(
+            neurons=args.neurons,
+            num_inits=args.num_inits,
+            num_trials=args.num_trials,
+            num_steps=args.num_steps,
+            burn_steps=args.burn_steps,
+            seed=args.seed,
+        )
+    if args.dataset == "chaotic_rnn":
+        num_conditions = args.num_inits if args.num_conditions is None else args.num_conditions
+        hidden_units = args.hidden_units if args.hidden_units is not None else max(args.neurons, 50)
+        return ChaoticRNNDatasetConfig(
+            neurons=args.neurons,
+            hidden_units=max(hidden_units, args.neurons),
+            num_conditions=num_conditions,
+            num_trials=args.num_trials,
+            num_steps=args.num_steps,
+            seed=args.seed,
+        )
+    raise KeyError(args.dataset)
+
+
+def make_synthetic_splits(
+    config: LorenzDatasetConfig | ChaoticRNNDatasetConfig,
+) -> tuple[LorenzDataset | ChaoticRNNDataset, LorenzDataset | ChaoticRNNDataset]:
+    if isinstance(config, LorenzDatasetConfig):
+        return LorenzDataset.make_splits(config)
+    if isinstance(config, ChaoticRNNDatasetConfig):
+        return ChaoticRNNDataset.make_splits(config)
+    raise TypeError(f"Unsupported synthetic config {type(config).__name__}.")
+
+
 def fit_mint_lorenz_library(
     model,
     dataset: PreprocessedDataset,
-    dataset_config: LorenzDatasetConfig,
+    dataset_config: LorenzDatasetConfig | ChaoticRNNDatasetConfig,
     device: str,
-    max_trials: int | None = None,
+    max_repeats_per_condition: int | None = None,
 ) -> None:
     if not hasattr(model, "fit_library"):
         raise TypeError(f"{type(model).__name__} does not expose fit_library().")
@@ -438,13 +503,15 @@ def fit_mint_lorenz_library(
     spikes = getattr(dataset, "raw_spikes", dataset.spikes)
     rates = getattr(dataset, "rates", None)
     latents = getattr(dataset, "latents", None)
-    if max_trials is not None:
-        n_subset = max(1, min(int(max_trials), int(spikes.shape[0])))
-        spikes = spikes[:n_subset]
+    condition = synthetic_condition_labels(dataset_config, int(spikes.shape[0]))
+    if max_repeats_per_condition is not None:
+        subset_idx = balanced_condition_subset_indices(condition, max_repeats_per_condition)
+        spikes = spikes[subset_idx]
+        condition = condition[subset_idx]
         if rates is not None:
-            rates = rates[:n_subset]
+            rates = rates[subset_idx]
         if latents is not None:
-            latents = latents[:n_subset]
+            latents = latents[subset_idx]
     library_source = getattr(getattr(model, "config", None), "lorenz_library_source", "smoothed_spikes")
     if library_source == "true_rates" and rates is None:
         raise AttributeError("MINT Lorenz fitting requires true training rates.")
@@ -464,9 +531,8 @@ def fit_mint_lorenz_library(
     if hasattr(model, "hyperparams"):
         model.hyperparams.trajectories_alignment = range(0, n_time)
 
-    n_conditions = min(max(int(dataset_config.num_inits), 1), int(n_trials))
-    condition = np.arange(n_trials, dtype=np.int64) % n_conditions
     if hasattr(model, "hyperparams"):
+        n_conditions = int(np.unique(condition).size)
         model.hyperparams.n_candidates = min(int(model.hyperparams.n_candidates), n_conditions)
         if model.hyperparams.n_candidates < 2:
             model.hyperparams.interp = 1
@@ -484,26 +550,26 @@ def rows_for_mint_lorenz_epochs(
     model,
     model_name: str,
     train_dataset: PreprocessedDataset,
-    dataset_config: LorenzDatasetConfig,
+    dataset_config: LorenzDatasetConfig | ChaoticRNNDatasetConfig,
     train_loader: DataLoader,
     test_loader: DataLoader,
     started: float,
 ) -> list[dict[str, str | int | float]]:
     rows = []
     cumulative_optimizer_seconds = 0.0
-    trial_counts = mint_lorenz_epoch_trial_counts(
+    repeat_counts = mint_lorenz_epoch_trial_counts(
         train_dataset,
         dataset_config,
         requested_epochs=args.epochs,
     )
-    for epoch, trial_count in enumerate(trial_counts, start=1):
+    for epoch, repeat_count in enumerate(repeat_counts, start=1):
         epoch_started = time.perf_counter()
         fit_mint_lorenz_library(
             model,
             train_dataset,
             dataset_config,
             args.device,
-            max_trials=trial_count,
+            max_repeats_per_condition=repeat_count,
         )
         optimizer_seconds = time.perf_counter() - epoch_started
         cumulative_optimizer_seconds += optimizer_seconds
@@ -550,16 +616,56 @@ def rows_for_mint_lorenz_epochs(
 
 def mint_lorenz_epoch_trial_counts(
     dataset: PreprocessedDataset,
-    dataset_config: LorenzDatasetConfig,
+    dataset_config: LorenzDatasetConfig | ChaoticRNNDatasetConfig,
     requested_epochs: int,
 ) -> list[int]:
     total_trials = len(dataset)
     if total_trials <= 0:
-        raise ValueError("MINT Lorenz fitting received an empty training split.")
-    n_conditions = min(max(int(dataset_config.num_inits), 1), total_trials)
-    available_passes = int(np.ceil(total_trials / n_conditions))
+        raise ValueError("MINT synthetic fitting received an empty training split.")
+    condition = synthetic_condition_labels(dataset_config, total_trials)
+    counts = np.bincount(condition)
+    counts = counts[counts > 0]
+    available_passes = int(np.min(counts))
     n_epochs = max(1, min(int(requested_epochs), available_passes))
-    return [min(total_trials, n_conditions * epoch) for epoch in range(1, n_epochs + 1)]
+    return list(range(1, n_epochs + 1))
+
+
+def synthetic_condition_labels(
+    dataset_config: LorenzDatasetConfig | ChaoticRNNDatasetConfig,
+    total_trials: int,
+) -> np.ndarray:
+    if isinstance(dataset_config, LorenzDatasetConfig):
+        n_conditions = min(max(int(dataset_config.num_inits), 1), int(total_trials))
+        return np.arange(total_trials, dtype=np.int64) % n_conditions
+    if isinstance(dataset_config, ChaoticRNNDatasetConfig):
+        n_train = int(dataset_config.train_fraction * dataset_config.num_trials)
+        labels = np.repeat(np.arange(dataset_config.num_conditions, dtype=np.int64), n_train)
+        if labels.shape[0] != total_trials:
+            raise ValueError(
+                "Chaotic-RNN train split shape does not match condition labels: "
+                f"{labels.shape[0]} labels for {total_trials} trials."
+            )
+        return labels
+    raise TypeError(f"Unsupported synthetic config {type(dataset_config).__name__}.")
+
+
+def balanced_condition_subset_indices(
+    condition: np.ndarray,
+    repeats_per_condition: int,
+) -> np.ndarray:
+    selected = []
+    repeats = max(1, int(repeats_per_condition))
+    for cond in np.unique(condition):
+        cond_idx = np.flatnonzero(condition == cond)
+        selected.extend(cond_idx[:repeats].tolist())
+    return np.asarray(sorted(selected), dtype=np.int64)
+
+
+def synthetic_dataset_name(
+    dataset_config: LorenzDatasetConfig | ChaoticRNNDatasetConfig,
+) -> str:
+    return str(getattr(dataset_config, "name", "synthetic"))
+
 
 
 def build_model_config(
@@ -567,7 +673,12 @@ def build_model_config(
     model_name: str,
     n_neurons: int,
 ) -> BaseModelConfig:
-    path = _lorenz_experiment_config_path(args.experiment_config_dir, model_name, n_neurons)
+    path = _synthetic_experiment_config_path(
+        args.experiment_config_dir,
+        args.dataset,
+        model_name,
+        n_neurons,
+    )
     model_data = None
     if path.exists():
         model_data = dict(load_yaml(path)["model"])
@@ -588,8 +699,23 @@ def build_model_config(
                 f"projection_dim={projection_dim}."
             )
         if model_data is None:
-            return CASSMConfig(projection_dim=projection_dim)
+            if args.cassm_lr is None:
+                return CASSMConfig(projection_dim=projection_dim)
+            return CASSMConfig(
+                projection_dim=projection_dim,
+                optimization={
+                    "name": "gradient",
+                    "optimizer": "Adam",
+                    "lr": args.cassm_lr,
+                    "weight_decay": 0.0,
+                    "gradient_clip": 300.0,
+                },
+            )
         model_data["projection_dim"] = projection_dim
+        if args.cassm_lr is not None:
+            optimization = dict(model_data.get("optimization", {}))
+            optimization["lr"] = args.cassm_lr
+            model_data["optimization"] = optimization
         return BaseModelConfig.from_dict(model_data)
     if model_name == "gpfa":
         init_seed = args.seed if args.gpfa_init_seed is None else args.gpfa_init_seed
@@ -616,12 +742,14 @@ def build_model_config(
             model_data["held_in_neurons"] = n_neurons
             model_data["output_neuron_start"] = 0
             model_data["output_neurons"] = n_neurons
+            model_data["max_iter"] = args.ilqr_max_iter
             return BaseModelConfig.from_dict(model_data)
         return ILQRVAEConfig(
             objective="ilqr_vae_elbo",
             params_path=None,
             initialization="random",
             trainable_parameters=True,
+            max_iter=args.ilqr_max_iter,
             held_in_neurons=n_neurons,
             output_neuron_start=0,
             output_neurons=n_neurons,
@@ -636,8 +764,8 @@ def build_model_config(
         )
     if model_name == "mint":
         if model_data is None:
-            model_data = {"name": "mint", "dataset": "lorenz"}
-        model_data["dataset"] = "lorenz"
+            model_data = {"name": "mint", "dataset": args.dataset}
+        model_data["dataset"] = args.dataset
         if args.mint_n_candidates is not None:
             model_data["n_candidates"] = args.mint_n_candidates
         if args.mint_window_length is not None:
@@ -649,7 +777,13 @@ def build_model_config(
         if args.mint_causal:
             model_data["causal"] = True
         return BaseModelConfig.from_dict(model_data)
-    if model_name in {"langevin_flow", "lfads", "ndt", "stndt"}:
+    if model_name == "lfads":
+        if model_data is not None:
+            return BaseModelConfig.from_dict(model_data)
+        if args.dataset == "chaotic_rnn":
+            return LFADSConfig(dt=0.01)
+        return LFADSConfig()
+    if model_name in {"langevin_flow", "ndt", "stndt"}:
         if model_data is not None:
             return BaseModelConfig.from_dict(model_data)
         return MODEL_CONFIGS[model_name]()
@@ -660,20 +794,22 @@ def build_preprocessing_config(
     model_name: str,
     config_dir: str,
     preprocessing_mode: str = "model",
+    dataset_name: str = "lorenz",
     n_neurons: int | None = None,
 ) -> PreprocessingConfig:
     if preprocessing_mode == "none":
         return PreprocessingConfig()
 
-    path = _lorenz_experiment_config_path(config_dir, model_name, n_neurons)
+    path = _synthetic_experiment_config_path(config_dir, dataset_name, model_name, n_neurons)
     if not path.exists():
         return PreprocessingConfig()
     data = load_yaml(path)
     return PreprocessingConfig.model_validate(data.get("preprocessing", {}))
 
 
-def _lorenz_experiment_config_path(
+def _synthetic_experiment_config_path(
     config_dir: str,
+    dataset_name: str,
     model_name: str,
     n_neurons: int | None = None,
 ) -> Path:
@@ -683,15 +819,15 @@ def _lorenz_experiment_config_path(
         candidates.append(
             root
             / "synthetic"
-            / "lorenz"
+            / dataset_name
             / model_name
-            / f"{model_name}_lorenz_{n_neurons}.yaml"
+            / f"{model_name}_{dataset_name}_{n_neurons}.yaml"
         )
     candidates.extend(
         [
-            root / "synthetic" / "lorenz" / model_name / f"{model_name}_lorenz.yaml",
-        root / "lorenz" / model_name / f"{model_name}_lorenz.yaml",
-        root / f"{model_name}_lorenz.yaml",
+            root / "synthetic" / dataset_name / model_name / f"{model_name}_{dataset_name}.yaml",
+            root / dataset_name / model_name / f"{model_name}_{dataset_name}.yaml",
+            root / f"{model_name}_{dataset_name}.yaml",
         ]
     )
     for path in candidates:
@@ -728,6 +864,15 @@ def evaluate_rate_mse(
             spikes = _input_spikes(batch, use_raw_spikes).to(torch_device)
             rates = batch["rates"].to(torch_device)
             pred = model.predict_rates(spikes)
+            if type(model).__name__ == "LFADS":
+                dt = batch.get("dt") if isinstance(batch, dict) else None
+                if dt is None:
+                    dt = torch.as_tensor(getattr(model, "dt", 1.0), device=pred.device)
+                else:
+                    dt = dt.to(device=pred.device, dtype=pred.dtype)
+                while dt.ndim < pred.ndim:
+                    dt = dt.unsqueeze(-1)
+                pred = pred * dt
             loss = torch.mean((pred - rates) ** 2)
             losses.append(float(loss.detach().cpu()))
             weights.append(int(spikes.shape[0]))

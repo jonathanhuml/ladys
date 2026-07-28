@@ -191,11 +191,12 @@ class MINTConfig(BaseModelConfig):
     trajectory library. The NLB runner writes EvalAI-style held-out rate
     submissions and reports co-smoothing bits/spike.
 
-    For the synthetic Lorenz task, LaDyS builds the MINT trajectory library from
-    repeated training trials. The default `lorenz_library_source="smoothed_spikes"`
-    estimates library rates by Gaussian-smoothing training spikes and averaging
-    by initial condition. `lorenz_library_source="true_rates"` is an oracle
-    sanity-check mode only and should not be used for fair method comparisons.
+    For synthetic Lorenz and chaotic-RNN tasks, LaDyS builds the MINT trajectory
+    library from repeated training trials. The default
+    `lorenz_library_source="smoothed_spikes"` estimates library rates by
+    Gaussian-smoothing training spikes and averaging by condition.
+    `lorenz_library_source="true_rates"` is an oracle sanity-check mode only
+    and should not be used for fair method comparisons.
     The default Lorenz split repeats the same initial-condition trajectories
     across train and validation trials, so this benchmark measures denoising of
     seen trajectories rather than interpolation to unseen trajectories.
@@ -203,7 +204,14 @@ class MINTConfig(BaseModelConfig):
 
     name: Literal["mint"] = "mint"
     objective: str = "mint_likelihood_recursion"
-    dataset: Literal["area2_bump", "dmfc_rsg", "mc_maze", "mc_rtt", "lorenz"] = "mc_maze"
+    dataset: Literal[
+        "area2_bump",
+        "chaotic_rnn",
+        "dmfc_rsg",
+        "mc_maze",
+        "mc_rtt",
+        "lorenz",
+    ] = "mc_maze"
     train_source: Literal["h5", "lfads", "mat", "nwb"] = "nwb"
     train_split: Literal["auto", "train", "trainval"] = "trainval"
     nlb_neural_state_defaults: bool = True
@@ -260,13 +268,14 @@ class MINT(BaseDynamicsModel):
     command dispatches MINT NLB configs through `ladys.mint_nlb`, which writes a
     hidden-test H5 submission and a `report.md` with co-BPS.
 
-    ## Lorenz datasets
+    ## Synthetic datasets
 
-    The synthetic Lorenz adapter is a LaDyS-specific trajectory builder. With
-    the default `lorenz_library_source="smoothed_spikes"`, the library is
-    estimated from training spikes by Gaussian smoothing and condition averaging.
-    This keeps the comparison non-oracular while still matching MINT's
-    assumption that useful trajectory templates are learned before inference.
+    The synthetic Lorenz and chaotic-RNN adapters are LaDyS-specific trajectory
+    builders. With the default `lorenz_library_source="smoothed_spikes"`, the
+    library is estimated from training spikes by Gaussian smoothing and
+    condition averaging. This keeps the comparison non-oracular while still
+    matching MINT's assumption that useful trajectory templates are learned
+    before inference.
 
     The `true_rates` library source is intentionally exposed for debugging. It
     reproduces an oracle/template-retrieval sanity check, not a fair method
@@ -860,6 +869,21 @@ def get_mint_config(dataset: str) -> Tuple[Settings, HyperParams]:
         hp.dmfc_set_go_weight = 4.0
     elif dataset == "lorenz":
         settings.Ts = 0.2
+        settings.trial_alignment = range(0, 100)
+        settings.test_alignment = range(0, 100)
+        hp.trajectories_alignment = range(0, 100)
+        hp.min_lambda = 1e-3
+        hp.sigma = 2
+        hp.Delta = 1
+        hp.window_length = 6
+        hp.n_candidates = 4
+        hp.causal = False
+        hp.interp_within_trajectories = False
+        hp.n_neural_dims = None
+        hp.n_cond_dims = None
+        hp.n_trial_dims = None
+    elif dataset == "chaotic_rnn":
+        settings.Ts = 0.01
         settings.trial_alignment = range(0, 100)
         settings.test_alignment = range(0, 100)
         hp.trajectories_alignment = range(0, 100)
@@ -1627,7 +1651,7 @@ def fit_trajectories(S, Z, condition, settings, hyperparams):
         vel, labels = preprocess_behavior(Z, settings)
         rates = [item[4:] * settings.Ts * hyperparams.Delta for item in Z]
         return rates, vel, labels
-    if settings.task == "lorenz":
+    if settings.task in {"chaotic_rnn", "lorenz"}:
         source = getattr(settings, "lorenz_library_source", "smoothed_spikes")
         if source == "true_rates":
             rate_trials = [item.to(TORCH_DTYPE) for item in Z]
