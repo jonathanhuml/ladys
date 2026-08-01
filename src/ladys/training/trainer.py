@@ -40,6 +40,7 @@ class Trainer:
         train_loader: Iterable,
         valid_loader: Iterable | None = None,
         epoch_metrics: Mapping[str, Callable[[BaseDynamicsModel], float]] | None = None,
+        epoch_callback: Callable[[EpochReport], None] | None = None,
     ) -> list[EpochReport]:
         device = torch.device(self.config.device)
         model.to(device)
@@ -63,6 +64,8 @@ class Trainer:
                 metrics=metrics,
             )
             self.history.append(report)
+            if epoch_callback is not None:
+                epoch_callback(report)
 
         return self.history
 

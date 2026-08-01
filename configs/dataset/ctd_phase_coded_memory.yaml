@@ -1,0 +1,11 @@
+name: ctd_phase_coded_memory
+task: phase_coded_memory
+data_path: data/synthetic/ctd/canonical/phase_coded_memory.h5
+dt: 1.0
+metadata:
+  n_neurons_heldin: 500
+  n_neurons_heldout: 100
+  total_neurons: 600
+  total_trials: 5000
+  train_trials: 4000
+  valid_trials: 1000

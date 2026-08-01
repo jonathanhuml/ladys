@@ -11,6 +11,8 @@ from torch.utils.data import DataLoader
 from ladys.datasets import (
     ChaoticRNNDataset,
     ChaoticRNNDatasetConfig,
+    CTDDataset,
+    CTDDatasetConfig,
     LorenzDataset,
     LorenzDatasetConfig,
     NLBDataset,
@@ -316,6 +318,37 @@ def test_chaotic_rnn_dataset_contract():
 
     sample = train_ds[0]
     assert set(sample) == {"spikes", "rates", "latents", "dt"}
+
+
+def test_ctd_dataset_loads_generated_h5_contract(tmp_path: Path):
+    path = tmp_path / "ctd.h5"
+    train_spikes = np.arange(3 * 4 * 5, dtype=np.float32).reshape(3, 4, 5)
+    valid_spikes = np.arange(2 * 4 * 5, dtype=np.float32).reshape(2, 4, 5)
+    train_activity = train_spikes + 0.5
+    valid_activity = valid_spikes + 0.5
+    train_latents = np.ones((3, 4, 2), dtype=np.float32)
+    valid_latents = np.ones((2, 4, 2), dtype=np.float32) * 2
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset("train_recon_data", data=train_spikes)
+        handle.create_dataset("valid_recon_data", data=valid_spikes)
+        handle.create_dataset("train_activity", data=train_activity)
+        handle.create_dataset("valid_activity", data=valid_activity)
+        handle.create_dataset("train_latents", data=train_latents)
+        handle.create_dataset("valid_latents", data=valid_latents)
+
+    config = CTDDatasetConfig(
+        name="ctd_nbff",
+        task="nbff",
+        data_path=path,
+        dt=0.01,
+    )
+    train_ds, valid_ds = CTDDataset.make_splits(config)
+
+    assert train_ds.spikes.shape == train_spikes.shape
+    assert valid_ds.rates.shape == valid_activity.shape
+    assert train_ds.latents.shape == train_latents.shape
+    assert train_ds[0]["dt"].item() == pytest.approx(0.01)
+    assert set(train_ds[0]) == {"spikes", "rates", "latents", "dt"}
 
 
 def test_nlb_dataset_loads_grouped_20ms_h5(tmp_path: Path):

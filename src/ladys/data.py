@@ -11,6 +11,8 @@ from torch.utils.data import DataLoader, Dataset
 from ladys.datasets import (
     ChaoticRNNDataset,
     ChaoticRNNDatasetConfig,
+    CTDDataset,
+    CTDDatasetConfig,
     LorenzDataset,
     LorenzDatasetConfig,
     NLBDataset,
@@ -22,6 +24,12 @@ from ladys.preprocessing import PreprocessedDataset, PreprocessingConfig
 DATASET_CONFIGS: dict[str, type[BaseModel]] = {
     "area2_bump": NLBDatasetConfig,
     "chaotic_rnn": ChaoticRNNDatasetConfig,
+    "ctd": CTDDatasetConfig,
+    "ctd_chaotic_delayed_matching": CTDDatasetConfig,
+    "ctd_multitask": CTDDatasetConfig,
+    "ctd_nbff": CTDDatasetConfig,
+    "ctd_phase_coded_memory": CTDDatasetConfig,
+    "ctd_random_target": CTDDatasetConfig,
     "dmfc_rsg": NLBDatasetConfig,
     "lorenz": LorenzDatasetConfig,
     "mc_maze": NLBDatasetConfig,
@@ -52,6 +60,8 @@ def make_dataset_splits(config: BaseModel) -> tuple[Dataset, Dataset]:
 
     if isinstance(config, ChaoticRNNDatasetConfig):
         return ChaoticRNNDataset.make_splits(config)
+    if isinstance(config, CTDDatasetConfig):
+        return CTDDataset.make_splits(config)
     if isinstance(config, LorenzDatasetConfig):
         return LorenzDataset.make_splits(config)
     if isinstance(config, NLBDatasetConfig):

@@ -5,6 +5,7 @@ from ladys.datasets.chaotic_rnn import (
     ChaoticRNNDatasetConfig,
     generate_chaotic_rnn_data,
 )
+from ladys.datasets.ctd import CTDDataset, CTDDatasetConfig, load_ctd_h5
 from ladys.datasets.lorenz import LorenzDataset, LorenzDatasetConfig, generate_lorenz_data
 from ladys.datasets.mc_maze import MCMazeDataset, MCMazeDatasetConfig
 from ladys.datasets.nlb import (
@@ -17,6 +18,8 @@ from ladys.datasets.nlb import (
 __all__ = [
     "ChaoticRNNDataset",
     "ChaoticRNNDatasetConfig",
+    "CTDDataset",
+    "CTDDatasetConfig",
     "LorenzDataset",
     "LorenzDatasetConfig",
     "MCMazeDataset",
@@ -26,5 +29,6 @@ __all__ = [
     "NLBDatasetConfig",
     "generate_chaotic_rnn_data",
     "generate_lorenz_data",
+    "load_ctd_h5",
     "prepare_nlb_data",
 ]

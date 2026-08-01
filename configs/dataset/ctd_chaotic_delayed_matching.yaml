@@ -1,0 +1,13 @@
+name: ctd_chaotic_delayed_matching
+task: chaotic_delayed_matching
+data_path: data/synthetic/ctd/canonical/chaotic_delayed_matching.h5
+dt: 1.0
+metadata:
+  n_neurons_heldin: 64
+  n_neurons_heldout: 32
+  total_neurons: 96
+  total_trials: 2000
+  train_trials: 1600
+  valid_trials: 400
+  num_steps: 1050
+  latent_dim: 200

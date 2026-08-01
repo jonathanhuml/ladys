@@ -435,7 +435,7 @@ class MINT(BaseDynamicsModel):
         if x.ndim != 3:
             raise ValueError("MINT expects batched spikes with shape (batch, time, neurons).")
         spikes = [trial.T.contiguous() for trial in x]
-        rates, _ = self.predict_spike_trials(spikes)
+        rates, _ = self.predict_spike_trials(spikes, verbose=False)
         return ModelOutput(rates=torch.stack([item.T for item in rates], dim=0))
 
     def loss(

@@ -1,0 +1,13 @@
+name: ctd_nbff
+task: nbff
+data_path: data/synthetic/ctd/canonical/nbff.h5
+dt: 1.0
+metadata:
+  n_neurons_heldin: 50
+  n_neurons_heldout: 10
+  total_neurons: 60
+  total_trials: 1000
+  train_trials: 800
+  valid_trials: 200
+  num_steps: 500
+  latent_dim: 64

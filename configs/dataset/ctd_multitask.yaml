@@ -1,0 +1,13 @@
+name: ctd_multitask
+task: multitask
+data_path: data/synthetic/ctd/canonical/multitask.h5
+dt: 1.0
+metadata:
+  n_neurons_heldin: 50
+  n_neurons_heldout: 10
+  total_neurons: 60
+  total_trials: 7500
+  train_trials: 6000
+  valid_trials: 1500
+  num_steps: 320
+  latent_dim: 128
