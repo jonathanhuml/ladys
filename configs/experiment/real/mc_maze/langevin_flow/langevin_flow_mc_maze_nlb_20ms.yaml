@@ -4,6 +4,7 @@ dataset:
   bin_size_ms: 20
   data_path: data/real/nlb/mc_maze_test_20ms.h5
   input_mode: heldin
+  include_forward: true
 
 model:
   name: langevin_flow
@@ -15,8 +16,8 @@ model:
   gamma: 0.55
   langevin_step: 0.01
   potential_groups: 4
-  potential_kernel_size: 7
-  transformer_heads: 4
+  potential_kernel_size: 3
+  transformer_heads: 2
   transformer_feedforward: 512
   coordinated_dropout_rate: 0.5
   kl_weight: 0.1

@@ -104,6 +104,25 @@ def main() -> int:
         type=Path,
         help="Optional LaDyS model state_dict to load before training one config.",
     )
+    parser.add_argument(
+        "--resume-snapshot",
+        type=Path,
+        help=(
+            "Resume one config from a snapshot written by --snapshot-every. "
+            "The snapshot stores model weights, best NLB metrics so far, and the global epoch."
+        ),
+    )
+    parser.add_argument(
+        "--snapshot-every",
+        type=int,
+        default=0,
+        help="Write a resumable model snapshot every N epochs. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--snapshot-dir",
+        type=Path,
+        help="Directory for --snapshot-every outputs. Defaults to <output-dir>/_snapshots.",
+    )
     parser.add_argument("--run-name-suffix", default="")
     args = parser.parse_args()
 
@@ -116,6 +135,10 @@ def main() -> int:
         paths = [DEFAULT_CONFIGS[dataset] for dataset in args.datasets]
     if args.checkpoint is not None and len(paths) != 1:
         raise ValueError("--checkpoint can only be used with exactly one config.")
+    if args.resume_snapshot is not None and len(paths) != 1:
+        raise ValueError("--resume-snapshot can only be used with exactly one config.")
+    if args.checkpoint is not None and args.resume_snapshot is not None:
+        raise ValueError("--checkpoint and --resume-snapshot are mutually exclusive.")
 
     rows: list[dict[str, Any]] = []
     for path in paths:
@@ -136,6 +159,9 @@ def main() -> int:
                 patience_evals=args.patience_evals,
                 progress_every=args.progress_every,
                 checkpoint=args.checkpoint if stage_index == 0 else None,
+                resume_snapshot=args.resume_snapshot if stage_index == 0 else None,
+                snapshot_every=args.snapshot_every,
+                snapshot_dir=args.snapshot_dir,
                 checkpoint_state=checkpoint_state,
                 stage_name=stage_name,
             )
@@ -296,6 +322,9 @@ def run_config(
     patience_evals: int,
     progress_every: int,
     checkpoint: Path | None,
+    resume_snapshot: Path | None,
+    snapshot_every: int = 0,
+    snapshot_dir: Path | None = None,
     checkpoint_state: dict[str, torch.Tensor] | None = None,
     stage_name: str | None = None,
 ) -> dict[str, Any]:
@@ -303,14 +332,25 @@ def run_config(
     experiment._set_seeds()
     experiment.data.setup()
     model = experiment.build_model()
+    dataset = str(config.dataset.name)
+    start_epoch = 0
+    resume_data: dict[str, Any] | None = None
     if checkpoint_state is not None:
         model.load_state_dict(checkpoint_state)
+    elif resume_snapshot is not None:
+        if resume_snapshot.exists():
+            resume_data = torch.load(resume_snapshot, map_location="cpu")
+            state_dict = resume_data.get("model_state_dict", resume_data)
+            model.load_state_dict(state_dict)
+            start_epoch = int(resume_data.get("epoch", 0))
+            print(f"{dataset} resume_snapshot={resume_snapshot} start_epoch={start_epoch}", flush=True)
+        else:
+            print(f"{dataset} resume_snapshot_missing={resume_snapshot} starting_fresh", flush=True)
     elif checkpoint is not None:
         model.load_state_dict(torch.load(checkpoint, map_location="cpu"))
     strategy = build_strategy(config.model.optimization)
     trainer = Trainer(config.trainer)
     device = torch.device(config.trainer.device)
-    dataset = str(config.dataset.name)
     best: dict[str, Any] = {
         "epoch": 0,
         "co_bps": float("-inf"),
@@ -318,7 +358,17 @@ def run_config(
         "full": None,
         "metrics": {},
     }
+    if resume_data is not None:
+        best.update(
+            {
+                "epoch": int(resume_data.get("best_epoch", 0)),
+                "co_bps": float(resume_data.get("best_co_bps", float("-inf"))),
+                "state_dict": resume_data.get("best_state_dict"),
+                "metrics": dict(resume_data.get("best_metrics", {})),
+            }
+        )
     evals_since_improvement = 0
+    snapshot_path = _snapshot_path(config, snapshot_dir or (Path(config.output_dir) / "_snapshots"))
 
     def callback(report) -> None:
         nonlocal evals_since_improvement
@@ -333,6 +383,21 @@ def run_config(
                 f"seconds={report.seconds:.3g} mask_span_expand_prob={ramp:.6g}",
                 flush=True,
             )
+        if snapshot_every > 0 and epoch % int(snapshot_every) == 0:
+            _write_training_snapshot(
+                path=snapshot_path,
+                epoch=epoch,
+                model=model,
+                strategy=strategy,
+                best=best,
+                config=config,
+                target_h5=target_h5,
+                eval_every=eval_every,
+                progress_every=progress_every,
+                checkpoint=checkpoint,
+                stage_name=stage_name,
+            )
+            print(f"{dataset} epoch={epoch} snapshot={snapshot_path}", flush=True)
         if not should_eval:
             return
         full = evaluate_full_nlb(
@@ -372,6 +437,8 @@ def run_config(
             train_loader=experiment.data.train_loader(shuffle=True),
             valid_loader=None,
             epoch_callback=callback,
+            start_epoch=start_epoch,
+            strategy_state=None if resume_data is None else resume_data.get("strategy_state"),
         )
     except StopTraining:
         history = trainer.history
@@ -393,6 +460,22 @@ def run_config(
                 "metrics": dict(full.full_metrics),
             }
         )
+    elif best["full"] is None:
+        model.load_state_dict(best["state_dict"])
+        full = evaluate_full_nlb(
+            model=model,
+            data=experiment.data,
+            device=device,
+            dataset=dataset,
+            target_h5=target_h5,
+        )
+        best.update(
+            {
+                "co_bps": float(full.full_metrics.get("co-bps", float("nan"))),
+                "full": full,
+                "metrics": dict(full.full_metrics),
+            }
+        )
 
     model.load_state_dict(best["state_dict"])
     run_dir = experiment._make_run_dir()
@@ -406,6 +489,8 @@ def run_config(
         "eval_every": int(eval_every),
         "progress_every": int(progress_every),
         "checkpoint": None if checkpoint is None else str(checkpoint),
+        "resume_snapshot": None if resume_snapshot is None else str(resume_snapshot),
+        "start_epoch": int(start_epoch),
     }
     if stage_name is not None:
         metadata["stage"] = stage_name
@@ -416,6 +501,50 @@ def run_config(
         "_best_state_dict": best["state_dict"],
         **metadata,
     }
+
+
+def _snapshot_path(config: ExperimentConfig, snapshot_dir: Path) -> Path:
+    run_name = config.run_name or f"{config.dataset.name}_{config.model.name}"
+    safe = "".join(char if char.isalnum() or char in ("-", "_", ".") else "_" for char in run_name)
+    return snapshot_dir / f"{safe}_latest.pt"
+
+
+def _write_training_snapshot(
+    *,
+    path: Path,
+    epoch: int,
+    model: torch.nn.Module,
+    strategy: Any,
+    best: dict[str, Any],
+    config: ExperimentConfig,
+    target_h5: Path,
+    eval_every: int,
+    progress_every: int,
+    checkpoint: Path | None,
+    stage_name: str | None,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.tmp")
+    torch.save(
+        {
+            "epoch": int(epoch),
+            "model_state_dict": _clone_state_dict_cpu(model.state_dict()),
+            "best_epoch": int(best.get("epoch", 0)),
+            "best_co_bps": float(best.get("co_bps", float("-inf"))),
+            "best_state_dict": best.get("state_dict"),
+            "best_metrics": dict(best.get("metrics", {})),
+            "strategy_state": strategy.state_dict() if hasattr(strategy, "state_dict") else {},
+            "dataset": str(config.dataset.name),
+            "run_name": config.run_name,
+            "target_h5": str(target_h5),
+            "eval_every": int(eval_every),
+            "progress_every": int(progress_every),
+            "checkpoint": None if checkpoint is None else str(checkpoint),
+            "stage": stage_name,
+        },
+        tmp,
+    )
+    tmp.replace(path)
 
 
 def _write_summary(output_dir: Path, rows: list[dict[str, Any]]) -> None:

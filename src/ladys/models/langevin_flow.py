@@ -82,6 +82,7 @@ class LangevinFlowConfig(BaseModelConfig):
     name: Literal["langevin_flow"] = "langevin_flow"
     objective: str = "langevin_flow_elbo"
     hidden_size: int = 64
+    initialization: Literal["ladys", "upstream"] = "ladys"
     output_neurons: Optional[int] = None
     output_mode: Literal["auto", "heldin", "heldin_heldout"] = "auto"
     fwd_steps: int = 0
@@ -89,18 +90,18 @@ class LangevinFlowConfig(BaseModelConfig):
     gamma: float = 0.55
     langevin_step: float = 0.01
     potential_groups: int = 4
-    potential_kernel_size: int = 7
-    transformer_heads: int = 4
+    potential_kernel_size: int = 3
+    transformer_heads: int = 2
     transformer_feedforward: int = 512
     coordinated_dropout_rate: float = 0.5
     kl_weight: float = 0.1
     kl_warmup_epochs: int = 500
     weight_decay_warmup_epochs: int = 500
     velocity_prior_var: float = 0.1
-    log_rate_min: float = -8.0
-    log_rate_max: float = 8.0
-    posterior_logvar_min: float = math.log(1e-4)
-    posterior_logvar_max: float = 5.0
+    log_rate_min: Optional[float] = -8.0
+    log_rate_max: Optional[float] = 8.0
+    posterior_logvar_min: Optional[float] = math.log(1e-4)
+    posterior_logvar_max: Optional[float] = 5.0
     sample_train: bool = True
     sample_eval: bool = False
     prediction_samples: int = 1
@@ -178,6 +179,21 @@ class LangevinFlowConfig(BaseModelConfig):
                     include_forward = bool(getattr(dataset_config, "include_forward", False))
                     heldin_forward = getattr(train_dataset, "heldin_forward_spikes", None)
                     heldout_forward = getattr(train_dataset, "heldout_forward_spikes", None)
+                    if include_forward and (
+                        heldin_forward is None or heldout_forward is None
+                    ):
+                        valid_dataset = getattr(data, "valid_dataset", None)
+                        if valid_dataset is not None:
+                            heldin_forward = getattr(
+                                valid_dataset,
+                                "heldin_forward_spikes",
+                                heldin_forward,
+                            )
+                            heldout_forward = getattr(
+                                valid_dataset,
+                                "heldout_forward_spikes",
+                                heldout_forward,
+                            )
                     if include_forward and heldin_forward is not None and heldout_forward is not None:
                         fwd_steps = fwd_steps or int(heldin_forward.shape[1])
                 elif self.output_mode == "heldin_heldout":
@@ -204,6 +220,7 @@ class LangevinFlowConfig(BaseModelConfig):
             n_time=n_time,
             output_neurons=output_neurons,
             hidden_size=self.hidden_size,
+            initialization=self.initialization,
             fwd_steps=fwd_steps,
             dropout=self.dropout,
             gamma=self.gamma,
@@ -269,6 +286,7 @@ class LangevinFlow(BaseDynamicsModel):
         n_time: int,
         output_neurons: int,
         hidden_size: int = 64,
+        initialization: Literal["ladys", "upstream"] = "ladys",
         fwd_steps: int = 0,
         dropout: float = 0.05,
         gamma: float = 0.55,
@@ -282,10 +300,10 @@ class LangevinFlow(BaseDynamicsModel):
         kl_warmup_epochs: int = 500,
         weight_decay_warmup_epochs: int = 500,
         velocity_prior_var: float = 0.1,
-        log_rate_min: float = -8.0,
-        log_rate_max: float = 8.0,
-        posterior_logvar_min: float = math.log(1e-4),
-        posterior_logvar_max: float = 5.0,
+        log_rate_min: float | None = -8.0,
+        log_rate_max: float | None = 8.0,
+        posterior_logvar_min: float | None = math.log(1e-4),
+        posterior_logvar_max: float | None = 5.0,
         sample_train: bool = True,
         sample_eval: bool = False,
         prediction_samples: int = 1,
@@ -296,6 +314,7 @@ class LangevinFlow(BaseDynamicsModel):
         self.n_time = int(n_time)
         self.output_neurons = int(output_neurons)
         self.hidden_size = int(hidden_size)
+        self.initialization = initialization
         self.fwd_steps = int(fwd_steps)
         self.dropout_rate = float(dropout)
         self.gamma = float(gamma)
@@ -305,10 +324,14 @@ class LangevinFlow(BaseDynamicsModel):
         self.kl_warmup_epochs = int(kl_warmup_epochs)
         self.weight_decay_warmup_epochs = int(weight_decay_warmup_epochs)
         self.velocity_prior_var = float(velocity_prior_var)
-        self.log_rate_min = float(log_rate_min)
-        self.log_rate_max = float(log_rate_max)
-        self.posterior_logvar_min = float(posterior_logvar_min)
-        self.posterior_logvar_max = float(posterior_logvar_max)
+        self.log_rate_min = None if log_rate_min is None else float(log_rate_min)
+        self.log_rate_max = None if log_rate_max is None else float(log_rate_max)
+        self.posterior_logvar_min = (
+            None if posterior_logvar_min is None else float(posterior_logvar_min)
+        )
+        self.posterior_logvar_max = (
+            None if posterior_logvar_max is None else float(posterior_logvar_max)
+        )
         self.sample_train = bool(sample_train)
         self.sample_eval = bool(sample_eval)
         self.prediction_samples = int(prediction_samples)
@@ -334,7 +357,8 @@ class LangevinFlow(BaseDynamicsModel):
         self.dropout = nn.Dropout(p=self.dropout_rate)
         self.register_buffer("_train_step", torch.zeros((), dtype=torch.long))
 
-        self.reset_parameters()
+        if self.initialization == "ladys":
+            self.reset_parameters()
 
     def reset_parameters(self) -> None:
         for module in self.modules():
@@ -454,7 +478,7 @@ class LangevinFlow(BaseDynamicsModel):
         noise_std = math.sqrt(noise_var)
         for t in range(1, total_steps):
             if t < self.n_time:
-                hidden_input = observ[:, t]
+                hidden_input = observ[:, t - 1]
             else:
                 hidden_input = observ[:, -1]
             hidden = self.dropout(self.encoder(hidden_input, hidden))
@@ -464,7 +488,9 @@ class LangevinFlow(BaseDynamicsModel):
 
         latents = torch.stack(latent_steps, dim=1)
         decoded = self.decoder(latents)
-        log_rates = self.readout(decoded).clamp(self.log_rate_min, self.log_rate_max)
+        log_rates = self.readout(decoded)
+        if self.log_rate_min is not None or self.log_rate_max is not None:
+            log_rates = log_rates.clamp(min=self.log_rate_min, max=self.log_rate_max)
         rates = torch.exp(log_rates)
         return ModelOutput(
             rates=rates,
@@ -555,7 +581,9 @@ class LangevinFlow(BaseDynamicsModel):
         return self.kl_weight * min(progress, 1.0)
 
     def _clamp_logvar(self, logvar: Tensor) -> Tensor:
-        return logvar.clamp(self.posterior_logvar_min, self.posterior_logvar_max)
+        if self.posterior_logvar_min is None and self.posterior_logvar_max is None:
+            return logvar
+        return logvar.clamp(min=self.posterior_logvar_min, max=self.posterior_logvar_max)
 
     @staticmethod
     def _reparameterize(mean: Tensor, logvar: Tensor, sample: bool) -> Tensor:

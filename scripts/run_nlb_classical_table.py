@@ -444,6 +444,7 @@ def build_config(
         preprocessing = PreprocessingConfig(observations=None)
         batch_size = 64
     elif method == "langevin_flow":
+        dataset_config.include_forward = True
         overrides = LANGEVIN_FLOW_DATASET_OVERRIDES[dataset]
         model = LangevinFlowConfig(
             hidden_size=280,
@@ -453,8 +454,8 @@ def build_config(
             gamma=overrides["gamma"],
             langevin_step=0.01,
             potential_groups=4,
-            potential_kernel_size=7,
-            transformer_heads=4,
+            potential_kernel_size=3,
+            transformer_heads=2,
             transformer_feedforward=512,
             coordinated_dropout_rate=overrides["coordinated_dropout_rate"],
             kl_weight=0.1,

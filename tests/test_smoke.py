@@ -234,6 +234,69 @@ def test_langevin_flow_prediction_samples_average_log_rates():
     assert torch.allclose(rates, torch.full_like(x, 4.0))
 
 
+def test_langevin_flow_upstream_parity_defaults_and_recurrent_inputs():
+    config = LangevinFlowConfig()
+    assert config.potential_kernel_size == 3
+    assert config.transformer_heads == 2
+
+    model = config.build(n_neurons=2, n_time=3)
+    assert model.potential.kernel_size == 3
+    assert model.decoder.self_attn.num_heads == 2
+
+    class RecordingGRUCell(torch.nn.Module):
+        def __init__(self, hidden_size):
+            super().__init__()
+            self.hidden_size = hidden_size
+            self.calls = []
+
+        def forward(self, input, hidden=None):
+            del hidden
+            self.calls.append(input.detach().clone())
+            return input.new_zeros(input.shape[0], self.hidden_size)
+
+    recorder = RecordingGRUCell(model.hidden_size)
+    model.encoder = recorder
+    model.eval()
+    x = torch.arange(6, dtype=torch.float32).reshape(1, 3, 2)
+
+    model._forward(x, sample=False)
+
+    assert len(recorder.calls) == 3
+    assert torch.equal(recorder.calls[0], x[:, 0])
+    assert torch.equal(recorder.calls[1], x[:, 0])
+    assert torch.equal(recorder.calls[2], x[:, 1])
+
+
+def test_langevin_flow_uses_valid_forward_steps_when_train_forward_missing():
+    class DatasetConfig:
+        include_forward = True
+
+    class TrainDataset:
+        config = DatasetConfig()
+        heldin_spikes = torch.zeros(2, 3, 4)
+        raw_spikes = torch.zeros(2, 3, 2)
+        heldin_forward_spikes = None
+        heldout_forward_spikes = None
+
+    class ValidDataset:
+        heldin_forward_spikes = torch.zeros(2, 5, 4)
+        heldout_forward_spikes = torch.zeros(2, 5, 2)
+
+    class Data:
+        n_neurons = 4
+        n_time = 3
+        train_dataset = TrainDataset()
+        valid_dataset = ValidDataset()
+
+    model = LangevinFlowConfig(
+        hidden_size=8,
+        transformer_feedforward=16,
+    ).build_from_data(Data())
+
+    assert model.fwd_steps == 5
+    assert model.output_neurons == 6
+
+
 def test_gradient_strategy_reduce_on_plateau_scheduler():
     x = torch.zeros(1, 2, 3)
     config = LangevinFlowConfig(

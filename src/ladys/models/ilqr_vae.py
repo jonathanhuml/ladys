@@ -52,6 +52,11 @@ class ILQRVAEConfig(BaseModelConfig):
     solver: Literal["ilqr", "lbfgs", "adam"] = "ilqr"
     max_iter: int = 100
     lr: Optional[float] = None
+    control_hessian_mode: Literal["true", "fisher", "clamped"] = "true"
+    ilqr_failure_fallback: Literal["none", "adam", "lbfgs"] = "adam"
+    ilqr_fallback_max_iter: int = 25
+    ilqr_fallback_lr: Optional[float] = None
+    differentiate_controls: bool = False
     trainable_parameters: bool = False
     n_posterior_samples: int = 1
     include_elbo_constants: bool = True
@@ -86,6 +91,11 @@ class ILQRVAEConfig(BaseModelConfig):
             solver=self.solver,
             max_iter=self.max_iter,
             lr=self.lr,
+            control_hessian_mode=self.control_hessian_mode,
+            ilqr_failure_fallback=self.ilqr_failure_fallback,
+            ilqr_fallback_max_iter=self.ilqr_fallback_max_iter,
+            ilqr_fallback_lr=self.ilqr_fallback_lr,
+            differentiate_controls=self.differentiate_controls,
             trainable_parameters=self.trainable_parameters,
             n_posterior_samples=self.n_posterior_samples,
             include_elbo_constants=self.include_elbo_constants,
@@ -192,6 +202,11 @@ class ILQRVAE(BaseDynamicsModel):
         solver: str = "ilqr",
         max_iter: int = 100,
         lr: Optional[float] = None,
+        control_hessian_mode: str = "true",
+        ilqr_failure_fallback: str = "adam",
+        ilqr_fallback_max_iter: int = 25,
+        ilqr_fallback_lr: Optional[float] = None,
+        differentiate_controls: bool = False,
         trainable_parameters: bool = False,
         n_posterior_samples: int = 1,
         include_elbo_constants: bool = True,
@@ -218,6 +233,11 @@ class ILQRVAE(BaseDynamicsModel):
         self.solver = solver
         self.max_iter = int(max_iter)
         self.lr = lr
+        self.control_hessian_mode = str(control_hessian_mode)
+        self.ilqr_failure_fallback = str(ilqr_failure_fallback)
+        self.ilqr_fallback_max_iter = int(ilqr_fallback_max_iter)
+        self.ilqr_fallback_lr = ilqr_fallback_lr
+        self.differentiate_controls = bool(differentiate_controls)
         self.trainable_parameters = bool(trainable_parameters)
         self.n_posterior_samples = int(n_posterior_samples)
         self.include_elbo_constants = bool(include_elbo_constants)
@@ -251,13 +271,18 @@ class ILQRVAE(BaseDynamicsModel):
                 params = _transfer_checkpoint_parameters(params, template)
         else:
             raise ValueError(f"unknown iLQR-VAE initialization {initialization!r}")
-        self.core = TutorialILQRVAE(params, dt=self.dt, trainable=self.trainable_parameters)
+        self.core = TutorialILQRVAE(
+            params,
+            dt=self.dt,
+            trainable=self.trainable_parameters,
+            control_hessian_mode=self.control_hessian_mode,
+        )
 
     def forward(self, x: Tensor) -> ModelOutput:
         if x.ndim != 3:
             raise ValueError(f"expected input shape batch x time x neurons, got {tuple(x.shape)}")
 
-        held_in = self.held_in_neurons or int(x.shape[-1])
+        held_in = self._observed_neurons_for_input(x)
         output_start = self.output_neuron_start if self.output_neuron_start is not None else 0
         output_stop = (
             self.core.n_neurons
@@ -270,14 +295,18 @@ class ILQRVAE(BaseDynamicsModel):
         latents = []
         controls = []
         eval_counts = []
+        fallback_counts = []
         objectives = []
         for trial in x:
-            result = self.core.infer_controls(
+            differentiable = (
+                self.objective == "ilqr_vae_elbo"
+                and self.differentiate_controls
+                and torch.is_grad_enabled()
+            )
+            result, used_fallback = self._infer_controls_with_fallback(
                 trial.detach(),
-                held_in_neurons=held_in,
-                solver=self.solver,
-                max_iter=self.max_iter,
-                lr=self.lr,
+                held_in,
+                differentiable=differentiable,
             )
             observed_latents = self.core.observation_latents(
                 result.latents,
@@ -290,6 +319,7 @@ class ILQRVAE(BaseDynamicsModel):
             latents.append(observed_latents.to(x.dtype))
             controls.append(result.controls)
             eval_counts.append(len(result.loss_history))
+            fallback_counts.append(1.0 if used_fallback else 0.0)
             objectives.append(result.loss_history[-1] if result.loss_history else float("nan"))
 
         return ModelOutput(
@@ -299,9 +329,57 @@ class ILQRVAE(BaseDynamicsModel):
                 "controls": torch.stack(controls, dim=0),
                 "full_rates": torch.stack(full_rates, dim=0),
                 "ilqr_evaluations": torch.tensor(eval_counts, dtype=torch.float32, device=x.device),
+                "inference_fallbacks": torch.tensor(
+                    fallback_counts,
+                    dtype=torch.float32,
+                    device=x.device,
+                ),
                 "posterior_objective": torch.tensor(objectives, dtype=torch.float32, device=x.device),
             },
         )
+
+    def _infer_controls_with_fallback(
+        self,
+        trial: Tensor,
+        held_in: int,
+        *,
+        differentiable: bool = False,
+    ):
+        try:
+            return (
+                self.core.infer_controls(
+                    trial,
+                    held_in_neurons=held_in,
+                    solver=self.solver,
+                    max_iter=self.max_iter,
+                    lr=self.lr,
+                    differentiable=differentiable,
+                ),
+                False,
+            )
+        except RuntimeError as exc:
+            message = str(exc)
+            is_ilqr_failure = (
+                "iLQR backward pass" in message
+                or "iLQR line search" in message
+            )
+            if (
+                self.solver != "ilqr"
+                or self.ilqr_failure_fallback == "none"
+                or not is_ilqr_failure
+            ):
+                raise
+            return (
+                self.core.infer_controls(
+                    trial,
+                    held_in_neurons=held_in,
+                    solver=self.ilqr_failure_fallback,
+                    max_iter=self.ilqr_fallback_max_iter,
+                    lr=self.ilqr_fallback_lr,
+                    differentiable=False,
+                ),
+                True,
+            )
 
     def loss(
         self,
@@ -323,6 +401,7 @@ class ILQRVAE(BaseDynamicsModel):
             named_terms={
                 "poisson_nll": total,
                 "mean_ilqr_evaluations": output.extras["ilqr_evaluations"].mean(),
+                "mean_inference_fallbacks": output.extras["inference_fallbacks"].mean(),
                 "mean_posterior_objective": output.extras["posterior_objective"].mean(),
             },
             objective=self.objective,
@@ -332,15 +411,14 @@ class ILQRVAE(BaseDynamicsModel):
         controls = output.extras.get("controls")
         if not isinstance(controls, Tensor):
             raise RuntimeError("ILQR-VAE ELBO requires posterior controls from forward().")
-        held_in = self.held_in_neurons or int(x.shape[-1])
+        held_in = self._observed_neurons_for_input(x)
         losses = []
         elbos = []
         for trial, trial_controls in zip(x, controls):
             trial = trial.to(dtype=self.core.c.dtype, device=self.core.c.device)
-            trial_controls = trial_controls.detach().to(
-                dtype=self.core.c.dtype,
-                device=self.core.c.device,
-            )
+            if not self.differentiate_controls:
+                trial_controls = trial_controls.detach()
+            trial_controls = trial_controls.to(dtype=self.core.c.dtype, device=self.core.c.device)
             elbo = self.core.elbo_from_controls(
                 trial_controls,
                 trial,
@@ -362,10 +440,20 @@ class ILQRVAE(BaseDynamicsModel):
                 "elbo": torch.stack(elbos).mean(),
                 "dynamics_regularizer": regularizer,
                 "mean_ilqr_evaluations": output.extras["ilqr_evaluations"].mean(),
+                "mean_inference_fallbacks": output.extras["inference_fallbacks"].mean(),
                 "mean_posterior_objective": output.extras["posterior_objective"].mean(),
             },
             objective=self.objective,
         )
+
+    def loss_forward_observations(
+        self,
+        batch: Tensor | dict[str, Tensor],
+        x: Tensor,
+    ) -> Tensor:
+        if self.objective != "ilqr_vae_elbo":
+            return x
+        return self._training_observations(batch, x)
 
     def _training_observations(self, batch: Tensor | dict[str, Tensor], x: Tensor) -> Tensor:
         if not isinstance(batch, dict):
@@ -378,6 +466,12 @@ class ILQRVAE(BaseDynamicsModel):
         if x.shape[:-1] != heldout.shape[:-1]:
             return x
         return torch.cat([x, heldout.to(device=x.device, dtype=x.dtype)], dim=-1)
+
+    def _observed_neurons_for_input(self, x: Tensor) -> int:
+        configured = self.held_in_neurons or int(x.shape[-1])
+        if self.objective == "ilqr_vae_elbo" and int(x.shape[-1]) > configured:
+            return int(x.shape[-1])
+        return configured
 
     def initialize_readout_bias_from_counts(
         self,

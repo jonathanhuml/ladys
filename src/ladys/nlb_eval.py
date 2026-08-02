@@ -160,6 +160,8 @@ def evaluate_model_nlb_submission(
 
     if not _looks_like_nlb_config(dataset_config):
         return None
+    if getattr(dataset_config, "max_trials", None) is not None:
+        return None
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

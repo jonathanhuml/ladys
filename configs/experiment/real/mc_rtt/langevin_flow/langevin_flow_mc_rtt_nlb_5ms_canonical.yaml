@@ -1,8 +1,8 @@
 dataset:
-  name: mc_maze
+  name: mc_rtt
   split: test
   bin_size_ms: 5
-  data_path: data/real/nlb/mc_maze_test_5ms.h5
+  data_path: data/real/nlb/mc_rtt_test_5ms.h5
   input_mode: heldin
   include_forward: true
 
@@ -10,6 +10,7 @@ model:
   name: langevin_flow
   objective: langevin_flow_elbo
   hidden_size: 280
+  initialization: ladys
   output_mode: auto
   fwd_steps: 0
   dropout: 0.05
@@ -19,11 +20,17 @@ model:
   potential_kernel_size: 3
   transformer_heads: 2
   transformer_feedforward: 512
-  coordinated_dropout_rate: 0.5
+  coordinated_dropout_rate: 0.3
   kl_weight: 0.1
   kl_warmup_epochs: 500
   weight_decay_warmup_epochs: 500
   velocity_prior_var: 0.1
+  log_rate_min: -8.0
+  log_rate_max: 8.0
+  posterior_logvar_min: -9.210340371976182
+  posterior_logvar_max: 5.0
+  sample_train: true
+  sample_eval: false
   prediction_samples: 50
   optimization:
     name: gradient
@@ -41,6 +48,11 @@ preprocessing:
   observations: null
 
 trainer:
-  epochs: 2000
+  epochs: 6000
   batch_size: 64
-  device: cpu
+  device: cuda
+
+experiment:
+  output_dir: runs/langevin_flow_canonical_20260802
+  run_name: langevin_flow_mc_rtt_nlb_5ms_canonical
+  save_predictions: true

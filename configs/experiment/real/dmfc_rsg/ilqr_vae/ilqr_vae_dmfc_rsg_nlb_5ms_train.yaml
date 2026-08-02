@@ -18,8 +18,9 @@ model:
   input_dim: 15
   init_seed: 0
   solver: ilqr
-  max_iter: 5
+  max_iter: 2
   lr: null
+  differentiate_controls: false
   trainable_parameters: true
   n_posterior_samples: 1
   include_elbo_constants: true

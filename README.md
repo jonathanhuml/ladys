@@ -124,6 +124,13 @@ ladys run -c configs/experiment/real/mc_maze/ilqr_vae/ilqr_vae_mc_maze_nlb_5ms.y
 ladys score-nlb --run-dir runs/ilqr_vae_mc_maze_nlb_5ms
 ```
 
+The canonical iLQR-VAE NLB reproduction is the MC Maze 5 ms config above. It
+reaches co-bps `0.3532`, velocity R2 `0.8991`, and PSTH R2 `0.5877`, compared
+with the public NLB MC Maze row `0.356`, `0.884`, and `0.606`. The Area2,
+DMFC, and MC RTT iLQR-VAE configs are active trainable reproduction attempts
+and should not be reported as reproduced until their full NLB metrics are
+available.
+
 GPFA uses the same real-data path with its NLB adapter:
 
 ```bash

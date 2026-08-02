@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import math
-from typing import Iterable
+from typing import Any, Iterable, Mapping
 
 import numpy as np
 import torch
@@ -25,6 +25,17 @@ class OptimizationStrategy(ABC):
 
     def setup(self, model: BaseDynamicsModel) -> None:
         """Initialize optimizer state."""
+
+    def state_dict(self) -> dict[str, Any]:
+        """Return optimizer/scheduler state for resumable training."""
+
+        return {}
+
+    def load_state_dict(self, state: Mapping[str, Any]) -> None:
+        """Restore optimizer/scheduler state after setup."""
+
+    def advance_to_epoch(self, epoch: int) -> None:
+        """Advance epoch-scoped scheduler state when no saved state exists."""
 
     def on_epoch_start(self, model: BaseDynamicsModel, epoch: int) -> None:
         """Hook before an epoch starts."""
@@ -74,6 +85,7 @@ class OptimizationStrategy(ABC):
     ) -> StepResult:
         with torch.no_grad():
             x = observations_from_batch(batch)
+            x = _loss_forward_observations(model, batch, x)
             output = model(x)
             loss = model.loss(batch, output, epoch=epoch)
             return StepResult.from_loss(loss, batch_size=int(x.shape[0]))
@@ -145,6 +157,35 @@ class GradientStrategy(OptimizationStrategy):
             min_lr=self.scheduler_min_lr,
         )
 
+    def state_dict(self) -> dict[str, Any]:
+        return {
+            "optimizer": None if self.optimizer is None else self.optimizer.state_dict(),
+            "scheduler": None if self.scheduler is None else self.scheduler.state_dict(),
+        }
+
+    def load_state_dict(self, state: Mapping[str, Any]) -> None:
+        if self.optimizer is not None and state.get("optimizer") is not None:
+            self.optimizer.load_state_dict(state["optimizer"])
+        if self.scheduler is not None and state.get("scheduler") is not None:
+            self.scheduler.load_state_dict(state["scheduler"])
+
+    def advance_to_epoch(self, epoch: int) -> None:
+        if (
+            self.optimizer is None
+            or not isinstance(self.scheduler, LambdaLR)
+            or self.scheduler_step != "epoch"
+        ):
+            return
+        epoch = max(int(epoch), 0)
+        for group, base_lr, lr_lambda in zip(
+            self.optimizer.param_groups,
+            self.scheduler.base_lrs,
+            self.scheduler.lr_lambdas,
+        ):
+            group["lr"] = float(base_lr) * float(lr_lambda(epoch))
+        self.scheduler.last_epoch = epoch
+        self.scheduler._last_lr = [group["lr"] for group in self.optimizer.param_groups]
+
     def step(
         self,
         model: BaseDynamicsModel,
@@ -156,6 +197,7 @@ class GradientStrategy(OptimizationStrategy):
 
         model.train()
         x = observations_from_batch(batch)
+        x = _loss_forward_observations(model, batch, x)
         output = model(x)
         loss = model.loss(batch, output, epoch=epoch)
 
@@ -244,6 +286,7 @@ class FullBatchGradientStrategy(OptimizationStrategy):
     ) -> StepResult:
         model.train()
         x = observations_from_batch(batch)
+        x = _loss_forward_observations(model, batch, x)
         output = model(x)
         loss = model.loss(batch, output, epoch=epoch)
 
@@ -502,6 +545,7 @@ class InferenceOnlyStrategy(OptimizationStrategy):
         epoch: int,
     ) -> StepResult:
         x = observations_from_batch(batch)
+        x = _loss_forward_observations(model, batch, x)
         output = model(x)
         loss = model.loss(batch, output, epoch=epoch)
         return StepResult.from_loss(loss, batch_size=int(x.shape[0]))
@@ -520,6 +564,17 @@ def build_strategy(config: OptimizationConfig) -> OptimizationStrategy:
     if config.name == "inference_only":
         return InferenceOnlyStrategy(**kwargs)
     raise KeyError(f"Unknown optimization strategy '{config.name}'.")
+
+
+def _loss_forward_observations(
+    model: BaseDynamicsModel,
+    batch: Tensor | dict[str, Tensor],
+    x: Tensor,
+) -> Tensor:
+    hook = getattr(model, "loss_forward_observations", None)
+    if callable(hook):
+        return hook(batch, x)
+    return x
 
 
 def _concat_batches(batches: list[Tensor | dict[str, Tensor]]) -> Tensor | dict[str, Tensor]:

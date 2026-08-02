@@ -15,6 +15,7 @@ from .params import TutorialParams
 
 Solver = Literal["adam", "lbfgs", "ilqr"]
 RateMode = Literal["likelihood", "pre_sample"]
+ControlHessianMode = Literal["true", "fisher", "clamped"]
 _MAX_LOG_RATE = 12.0
 
 
@@ -56,10 +57,12 @@ class ILQRVAE(torch.nn.Module):
         *,
         dt: float = 5e-3,
         trainable: bool = False,
+        control_hessian_mode: ControlHessianMode = "true",
     ) -> None:
         super().__init__()
         self.dt = dt
         self.trainable = bool(trainable)
+        self.control_hessian_mode = control_hessian_mode
         self.n_latent = params.wh.shape[0]
         self.n_input = params.b.shape[0]
         if self.n_latent % self.n_input != 0:
@@ -132,6 +135,7 @@ class ILQRVAE(torch.nn.Module):
         solver: Solver = "lbfgs",
         max_iter: int = 200,
         lr: float | None = None,
+        differentiable: bool = False,
         include_constants: bool = False,
         trace_every: int | None = None,
     ) -> InferenceResult:
@@ -160,61 +164,77 @@ class ILQRVAE(torch.nn.Module):
         trace_losses: list[float] = []
         trace_controls: list[torch.Tensor] = []
 
+        final_controls: torch.Tensor | None = None
         if solver == "lbfgs":
-            self._infer_lbfgs(
-                controls,
-                obs,
-                held_in_neurons=held_in_neurons,
-                history=history,
-                max_iter=max_iter,
-                lr=1.0 if lr is None else lr,
-                include_constants=include_constants,
-                trace_every=trace_every,
-                trace_evaluations=trace_evaluations,
-                trace_losses=trace_losses,
-                trace_controls=trace_controls,
-            )
-        elif solver == "adam":
-            self._infer_adam(
-                controls,
-                obs,
-                held_in_neurons=held_in_neurons,
-                history=history,
-                max_iter=max_iter,
-                lr=0.03 if lr is None else lr,
-                include_constants=include_constants,
-                trace_every=trace_every,
-                trace_evaluations=trace_evaluations,
-                trace_losses=trace_losses,
-                trace_controls=trace_controls,
-            )
-        elif solver == "ilqr":
-            with torch.no_grad():
-                controls.requires_grad_(False)
-                self._infer_ilqr(
+            with torch.enable_grad():
+                self._infer_lbfgs(
                     controls,
                     obs,
                     held_in_neurons=held_in_neurons,
                     history=history,
                     max_iter=max_iter,
+                    lr=1.0 if lr is None else lr,
                     include_constants=include_constants,
                     trace_every=trace_every,
                     trace_evaluations=trace_evaluations,
                     trace_losses=trace_losses,
                     trace_controls=trace_controls,
                 )
+        elif solver == "adam":
+            with torch.enable_grad():
+                self._infer_adam(
+                    controls,
+                    obs,
+                    held_in_neurons=held_in_neurons,
+                    history=history,
+                    max_iter=max_iter,
+                    lr=0.03 if lr is None else lr,
+                    include_constants=include_constants,
+                    trace_every=trace_every,
+                    trace_evaluations=trace_evaluations,
+                    trace_losses=trace_losses,
+                    trace_controls=trace_controls,
+                )
+        elif solver == "ilqr":
+            if differentiable:
+                with torch.enable_grad():
+                    controls.requires_grad_(False)
+                    final_controls = self._infer_ilqr_unrolled(
+                        controls,
+                        obs,
+                        held_in_neurons=held_in_neurons,
+                        history=history,
+                        max_iter=max_iter,
+                        include_constants=include_constants,
+                        trace_every=trace_every,
+                        trace_evaluations=trace_evaluations,
+                        trace_losses=trace_losses,
+                        trace_controls=trace_controls,
+                    )
+            else:
+                with torch.no_grad():
+                    controls.requires_grad_(False)
+                    self._infer_ilqr(
+                        controls,
+                        obs,
+                        held_in_neurons=held_in_neurons,
+                        history=history,
+                        max_iter=max_iter,
+                        include_constants=include_constants,
+                        trace_every=trace_every,
+                        trace_evaluations=trace_evaluations,
+                        trace_losses=trace_losses,
+                        trace_controls=trace_controls,
+                    )
         else:
             raise ValueError(f"unknown solver {solver!r}")
 
-        with torch.no_grad():
+        if final_controls is None:
             final_controls = controls.detach()
+        if differentiable and solver == "ilqr":
             latents = self.integrate(final_controls)
-            if solver == "ilqr":
-                final_objective = self.ilqr_objective
-            else:
-                final_objective = self.posterior_objective
             final_loss = float(
-                final_objective(
+                self.ilqr_objective(
                     final_controls,
                     obs,
                     held_in_neurons=held_in_neurons,
@@ -223,6 +243,24 @@ class ILQRVAE(torch.nn.Module):
                 .detach()
                 .cpu()
             )
+        else:
+            with torch.no_grad():
+                final_controls = final_controls.detach()
+                latents = self.integrate(final_controls)
+                if solver == "ilqr":
+                    final_objective = self.ilqr_objective
+                else:
+                    final_objective = self.posterior_objective
+                final_loss = float(
+                    final_objective(
+                        final_controls,
+                        obs,
+                        held_in_neurons=held_in_neurons,
+                        include_constants=include_constants,
+                    )
+                    .detach()
+                    .cpu()
+                )
         if not trace_controls or not torch.equal(trace_controls[-1].to(final_controls.device), final_controls):
             trace_evaluations.append(len(history))
             trace_losses.append(final_loss)
@@ -648,7 +686,14 @@ class ILQRVAE(torch.nn.Module):
         grad = (tmp1 - tmp2) @ c
 
         d2_log_link = active * exp_linear * 1e-3 / (link**2)
-        weights = (tmp1 - spikes_t * d2_log_link).reshape(-1)
+        if self.control_hessian_mode == "fisher":
+            weights = tmp1.reshape(-1)
+        else:
+            weights = (tmp1 - spikes_t * d2_log_link).reshape(-1)
+            if self.control_hessian_mode == "clamped":
+                weights = weights.clamp_min(1.0e-12)
+            elif self.control_hessian_mode != "true":
+                raise ValueError(f"unknown control_hessian_mode {self.control_hessian_mode!r}")
         hess = (c.T * weights) @ c
         return grad, hess
 
@@ -685,7 +730,7 @@ class ILQRVAE(torch.nn.Module):
                 held_in_neurons=held_in_neurons,
                 include_constants=include_constants,
             )
-            loss.backward()
+            loss.backward(inputs=[controls])
             loss_value = float(loss.detach().cpu())
             history.append(loss_value)
             _maybe_record_trace(
@@ -727,7 +772,7 @@ class ILQRVAE(torch.nn.Module):
                 held_in_neurons=held_in_neurons,
                 include_constants=include_constants,
             )
-            loss.backward()
+            loss.backward(inputs=[controls])
             loss_value = float(loss.detach().cpu())
             if loss_value < best_loss:
                 best_loss = loss_value
@@ -803,6 +848,71 @@ class ILQRVAE(torch.nn.Module):
                 include_constants=include_constants,
             )
             controls.copy_(next_controls)
+
+    def _infer_ilqr_unrolled(
+        self,
+        controls: torch.Tensor,
+        spikes: torch.Tensor,
+        *,
+        held_in_neurons: int,
+        history: list[float],
+        max_iter: int,
+        include_constants: bool,
+        trace_every: int | None,
+        trace_evaluations: list[int],
+        trace_losses: list[float],
+        trace_controls: list[torch.Tensor],
+    ) -> torch.Tensor:
+        """Run the analytic iLQR updates while preserving a gradient graph.
+
+        The published implementation differentiates through the iLQR posterior
+        mean with an implicit control adjoint. For short training solves
+        (`max_iter=2` in the tutorial), unrolling the analytic updates gives
+        LaDyS a practical gradient path through the recognition mean while
+        preserving the existing detached iLQR path for evaluation.
+        """
+
+        current = controls
+        prev_loss = 1e9
+        for iteration in range(max_iter + 1):
+            loss_tensor = self.ilqr_objective(
+                current,
+                spikes,
+                held_in_neurons=held_in_neurons,
+                include_constants=include_constants,
+            )
+            loss = float(loss_tensor.detach().cpu())
+            history.append(loss)
+            _maybe_record_trace(
+                current,
+                loss,
+                evaluation=len(history),
+                trace_every=trace_every,
+                trace_evaluations=trace_evaluations,
+                trace_losses=trace_losses,
+                trace_controls=trace_controls,
+            )
+            pct_change = abs((loss - prev_loss) / prev_loss)
+            if pct_change < 1e-6:
+                break
+            prev_loss = loss
+            if iteration == max_iter:
+                break
+
+            tape = self._ilqr_tape(current, spikes, held_in_neurons=held_in_neurons)
+            gains, df1, df2 = self._ilqr_backward(tape)
+            current = self._ilqr_linesearch(
+                current,
+                spikes,
+                tape,
+                gains,
+                f0=loss,
+                df1=df1,
+                df2=df2,
+                held_in_neurons=held_in_neurons,
+                include_constants=include_constants,
+            )
+        return current
 
     def _ilqr_tape(
         self,

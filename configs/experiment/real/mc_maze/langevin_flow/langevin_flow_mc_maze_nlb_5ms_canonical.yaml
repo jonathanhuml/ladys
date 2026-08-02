@@ -10,6 +10,7 @@ model:
   name: langevin_flow
   objective: langevin_flow_elbo
   hidden_size: 280
+  initialization: ladys
   output_mode: auto
   fwd_steps: 0
   dropout: 0.05
@@ -24,6 +25,12 @@ model:
   kl_warmup_epochs: 500
   weight_decay_warmup_epochs: 500
   velocity_prior_var: 0.1
+  log_rate_min: -8.0
+  log_rate_max: 8.0
+  posterior_logvar_min: -9.210340371976182
+  posterior_logvar_max: 5.0
+  sample_train: true
+  sample_eval: false
   prediction_samples: 50
   optimization:
     name: gradient
@@ -42,5 +49,10 @@ preprocessing:
 
 trainer:
   epochs: 2000
-  batch_size: 64
-  device: cpu
+  batch_size: 256
+  device: cuda
+
+experiment:
+  output_dir: runs/langevin_flow_canonical_20260802
+  run_name: langevin_flow_mc_maze_nlb_5ms_canonical
+  save_predictions: true

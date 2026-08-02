@@ -42,12 +42,18 @@ class Trainer:
         valid_loader: Iterable | None = None,
         epoch_metrics: Mapping[str, Callable[[BaseDynamicsModel], float]] | None = None,
         epoch_callback: Callable[[EpochReport], None] | None = None,
+        start_epoch: int = 0,
+        strategy_state: Mapping[str, object] | None = None,
     ) -> list[EpochReport]:
         device = torch.device(self.config.device)
         model.to(device)
         strategy.setup(model)
+        if strategy_state is not None:
+            strategy.load_state_dict(strategy_state)
+        elif int(start_epoch) > 0:
+            strategy.advance_to_epoch(int(start_epoch))
 
-        for epoch in range(self.config.epochs):
+        for epoch in range(int(start_epoch), self.config.epochs):
             start = time.perf_counter()
             strategy.on_epoch_start(model, epoch)
             train_results = strategy.train_epoch(model, train_loader, epoch, device)
