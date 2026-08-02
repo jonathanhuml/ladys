@@ -4,6 +4,7 @@ set -uo pipefail
 REPO_DIR="${REPO_DIR:-/home/jon/ladys}"
 OUTPUT_DIR="${OUTPUT_DIR:-$REPO_DIR/runs/ctd_500trials_5000neurons_benchmark_20260731}"
 DATASET_CONFIG_DIR="${DATASET_CONFIG_DIR:-configs/dataset_500trials_5000neurons}"
+DATASETS="${DATASETS:-lower}"
 MODELS="${MODELS:-psth smoothing gpfa kalman cassm ndt stndt lfads mint bgpfa langevin_flow}"
 EXPECTED_CASES="${EXPECTED_CASES:-44}"
 MAX_CASE_SECONDS="${MAX_CASE_SECONDS:-14400}"
@@ -73,7 +74,7 @@ launch_benchmark() {
   CUDA_VISIBLE_DEVICES=0 \
   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
   nohup "$PYTHON_BIN" scripts/benchmark_ctd_rate_mse.py \
-    --datasets lower \
+    --datasets $DATASETS \
     --models $MODELS \
     --dataset-config-dir "$DATASET_CONFIG_DIR" \
     --output-dir "$OUTPUT_DIR" \
@@ -88,7 +89,7 @@ launch_benchmark() {
     --retry-errors \
     >> "$LOG_PATH" 2>&1 < /dev/null &
   printf '%s\n' "$!" > "$PID_FILE"
-  log "launched pid=$(cat "$PID_FILE") output_dir=$OUTPUT_DIR models=$MODELS dataset_config_dir=$DATASET_CONFIG_DIR"
+  log "launched pid=$(cat "$PID_FILE") output_dir=$OUTPUT_DIR datasets=$DATASETS models=$MODELS dataset_config_dir=$DATASET_CONFIG_DIR"
 }
 
 if [[ -x "$WATCHDOG" ]]; then

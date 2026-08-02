@@ -394,6 +394,104 @@ def test_nlb_dataset_uses_train_tensors_when_available(tmp_path: Path):
     assert valid_ds[0]["spikes"].mean().item() == pytest.approx(3.0)
 
 
+def test_nlb_dataset_full_observed_mode_uses_full_train_and_zero_filled_eval(tmp_path: Path):
+    path = tmp_path / "nlb_full_observed.h5"
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset("train_spikes_heldin", data=np.ones((3, 4, 2), dtype=np.float32))
+        handle.create_dataset("train_spikes_heldout", data=np.ones((3, 4, 1), dtype=np.float32) * 2)
+        handle.create_dataset(
+            "train_spikes_heldin_forward",
+            data=np.ones((3, 2, 2), dtype=np.float32) * 3,
+        )
+        handle.create_dataset(
+            "train_spikes_heldout_forward",
+            data=np.ones((3, 2, 1), dtype=np.float32) * 4,
+        )
+        handle.create_dataset("eval_spikes_heldin", data=np.ones((2, 4, 2), dtype=np.float32) * 5)
+        handle.create_dataset("eval_spikes_heldout", data=np.ones((2, 4, 1), dtype=np.float32) * 6)
+        handle.create_dataset(
+            "eval_spikes_heldin_forward",
+            data=np.ones((2, 2, 2), dtype=np.float32) * 7,
+        )
+        handle.create_dataset(
+            "eval_spikes_heldout_forward",
+            data=np.ones((2, 2, 1), dtype=np.float32) * 8,
+        )
+
+    config = NLBDatasetConfig(
+        name="mc_maze",
+        data_path=str(path),
+        bin_size_ms=5,
+        input_mode="full_observed",
+        include_forward=True,
+    )
+    train_ds, valid_ds = NLBDataset.make_splits(config)
+
+    assert train_ds.spikes.shape == (3, 6, 3)
+    assert valid_ds.spikes.shape == (2, 6, 3)
+    assert train_ds.spikes[:, :4, 2].mean().item() == pytest.approx(2.0)
+    assert train_ds.spikes[:, 4:, 2].mean().item() == pytest.approx(4.0)
+    assert valid_ds.spikes[:, :4, 2].sum().item() == pytest.approx(0.0)
+    assert valid_ds.spikes[:, 4:].sum().item() == pytest.approx(0.0)
+    assert valid_ds.reconstruction_spikes[:, :4, 2].mean().item() == pytest.approx(6.0)
+    assert valid_ds.reconstruction_spikes[:, 4:, 2].mean().item() == pytest.approx(8.0)
+    assert "reconstruction_spikes" in train_ds[0]
+
+
+def test_nlb_dataset_heldin_full_reconstruction_mode_uses_heldin_input_full_target(
+    tmp_path: Path,
+):
+    path = tmp_path / "nlb_heldin_full_reconstruction.h5"
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset("train_spikes_heldin", data=np.ones((3, 4, 2), dtype=np.float32))
+        handle.create_dataset("train_spikes_heldout", data=np.ones((3, 4, 1), dtype=np.float32) * 2)
+        handle.create_dataset(
+            "train_spikes_heldin_forward",
+            data=np.ones((3, 2, 2), dtype=np.float32) * 3,
+        )
+        handle.create_dataset(
+            "train_spikes_heldout_forward",
+            data=np.ones((3, 2, 1), dtype=np.float32) * 4,
+        )
+        handle.create_dataset("eval_spikes_heldin", data=np.ones((2, 4, 2), dtype=np.float32) * 5)
+        handle.create_dataset("eval_spikes_heldout", data=np.ones((2, 4, 1), dtype=np.float32) * 6)
+        handle.create_dataset(
+            "eval_spikes_heldin_forward",
+            data=np.ones((2, 2, 2), dtype=np.float32) * 7,
+        )
+        handle.create_dataset(
+            "eval_spikes_heldout_forward",
+            data=np.ones((2, 2, 1), dtype=np.float32) * 8,
+        )
+
+    config = NLBDatasetConfig(
+        name="mc_maze",
+        data_path=str(path),
+        bin_size_ms=5,
+        input_mode="heldin_full_reconstruction",
+        include_forward=True,
+    )
+    train_ds, valid_ds = NLBDataset.make_splits(config)
+
+    assert train_ds.spikes.shape == (3, 4, 2)
+    assert valid_ds.spikes.shape == (2, 4, 2)
+    assert train_ds.reconstruction_spikes.shape == (3, 6, 3)
+    assert valid_ds.reconstruction_spikes.shape == (2, 6, 3)
+    assert valid_ds.spikes.mean().item() == pytest.approx(5.0)
+    assert valid_ds.reconstruction_spikes[:, :4, 2].mean().item() == pytest.approx(6.0)
+    assert valid_ds.reconstruction_spikes[:, 4:, 2].mean().item() == pytest.approx(8.0)
+    assert "reconstruction_spikes" in valid_ds[0]
+
+    legacy = NLBDatasetConfig(
+        name="mc_maze",
+        data_path=str(path),
+        bin_size_ms=5,
+        input_mode="lfads_torch",
+        include_forward=True,
+    )
+    assert legacy.input_mode == "heldin_full_reconstruction"
+
+
 def test_gpfa_nlb_adapter_fits_heldout_decoder(tmp_path: Path):
     path = tmp_path / "gpfa_nlb.h5"
     rng = np.random.default_rng(0)
@@ -502,6 +600,78 @@ def test_langevin_flow_nlb_adapter_scores_direct_heldout_slice(tmp_path: Path):
     assert np.isfinite(result.metrics["co_bps"])
 
 
+def test_lfads_nlb_adapter_scores_direct_heldout_slice(tmp_path: Path):
+    path = tmp_path / "lfads_nlb.h5"
+    rng = np.random.default_rng(0)
+    train_heldin = rng.poisson(0.5, size=(5, 6, 3)).astype(np.float32)
+    train_heldout = rng.poisson(0.3, size=(5, 6, 2)).astype(np.float32)
+    train_heldin_forward = rng.poisson(0.4, size=(5, 2, 3)).astype(np.float32)
+    train_heldout_forward = rng.poisson(0.2, size=(5, 2, 2)).astype(np.float32)
+    eval_heldin = rng.poisson(0.5, size=(2, 6, 3)).astype(np.float32)
+    eval_heldout = rng.poisson(0.3, size=(2, 6, 2)).astype(np.float32)
+    eval_heldin_forward = rng.poisson(0.4, size=(2, 2, 3)).astype(np.float32)
+    eval_heldout_forward = rng.poisson(0.2, size=(2, 2, 2)).astype(np.float32)
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset("train_spikes_heldin", data=train_heldin)
+        handle.create_dataset("train_spikes_heldout", data=train_heldout)
+        handle.create_dataset("train_spikes_heldin_forward", data=train_heldin_forward)
+        handle.create_dataset("train_spikes_heldout_forward", data=train_heldout_forward)
+        handle.create_dataset("eval_spikes_heldin", data=eval_heldin)
+        handle.create_dataset("eval_spikes_heldout", data=eval_heldout)
+        handle.create_dataset("eval_spikes_heldin_forward", data=eval_heldin_forward)
+        handle.create_dataset("eval_spikes_heldout_forward", data=eval_heldout_forward)
+
+    config = NLBDatasetConfig(
+        name="mc_maze",
+        data_path=str(path),
+        bin_size_ms=5,
+        input_mode="heldin_full_reconstruction",
+        include_forward=True,
+    )
+    train_ds, valid_ds = NLBDataset.make_splits(config)
+    data = type(
+        "Data",
+        (),
+        {
+            "n_neurons": train_ds.spikes.shape[-1],
+            "n_time": train_ds.spikes.shape[1],
+            "train_dataset": train_ds,
+        },
+    )()
+    model = LFADSConfig(
+        generator_dim=12,
+        inferred_input_dim=2,
+        factor_dim=5,
+        g0_encoder_dim=6,
+        controller_encoder_dim=6,
+        controller_dim=6,
+        keep_prob=1.0,
+        readout_neurons=train_heldin.shape[-1] + train_heldout.shape[-1],
+        output_neuron_start=train_heldin.shape[-1],
+        output_neurons=train_heldout.shape[-1],
+        reconstruction_time_steps=train_heldin.shape[1] + train_heldin_forward.shape[1],
+        controller_lag=1,
+        dt=0.005,
+    ).build_from_data(data)
+    batch = next(iter(DataLoader(train_ds, batch_size=2)))
+    output = model(batch["spikes"])
+    loss = model.loss(batch, output)
+    assert output.rates.shape[-1] == train_heldin.shape[-1] + train_heldout.shape[-1]
+    assert output.rates.shape[1] == train_heldin.shape[1] + train_heldin_forward.shape[1]
+    assert loss.total.ndim == 0
+
+    result = evaluate_model(
+        model,
+        DataLoader(valid_ds, batch_size=2),
+        train_loader=DataLoader(train_ds, batch_size=5),
+    )
+
+    assert result.predictions["rates"].shape == eval_heldout.shape
+    assert result.targets["spikes"].shape == eval_heldout.shape
+    assert "co_bps" in result.metrics
+    assert np.isfinite(result.metrics["co_bps"])
+
+
 def test_stndt_nlb_adapter_scores_direct_heldout_slice(tmp_path: Path):
     path = tmp_path / "stndt_nlb.h5"
     rng = np.random.default_rng(0)
@@ -539,6 +709,63 @@ def test_stndt_nlb_adapter_scores_direct_heldout_slice(tmp_path: Path):
     output = model(batch["spikes"])
     loss = model.loss(batch, output)
     assert output.rates.shape[-1] == train_heldin.shape[-1] + train_heldout.shape[-1]
+    assert loss.total.ndim == 0
+
+    result = evaluate_model(
+        model,
+        DataLoader(valid_ds, batch_size=2),
+        train_loader=DataLoader(train_ds, batch_size=5),
+    )
+
+    assert result.predictions["rates"].shape == eval_heldout.shape
+    assert result.targets["spikes"].shape == eval_heldout.shape
+    assert "co_bps" in result.metrics
+    assert np.isfinite(result.metrics["co_bps"])
+
+
+def test_stndt_nlb_adapter_scores_full_observed_heldout_slice(tmp_path: Path):
+    path = tmp_path / "stndt_nlb_full_observed.h5"
+    rng = np.random.default_rng(1)
+    train_heldin = rng.poisson(0.5, size=(5, 8, 4)).astype(np.float32)
+    train_heldout = (train_heldin[..., :2] + 0.1).astype(np.float32)
+    eval_heldin = rng.poisson(0.5, size=(2, 8, 4)).astype(np.float32)
+    eval_heldout = (eval_heldin[..., :2] + 0.1).astype(np.float32)
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset("train_spikes_heldin", data=train_heldin)
+        handle.create_dataset("train_spikes_heldout", data=train_heldout)
+        handle.create_dataset("eval_spikes_heldin", data=eval_heldin)
+        handle.create_dataset("eval_spikes_heldout", data=eval_heldout)
+
+    config = NLBDatasetConfig(
+        name="mc_maze",
+        data_path=str(path),
+        bin_size_ms=5,
+        input_mode="full_observed",
+    )
+    train_ds, valid_ds = NLBDataset.make_splits(config)
+    data = type(
+        "Data",
+        (),
+        {
+            "n_neurons": train_ds.spikes.shape[-1],
+            "n_time": train_ds.spikes.shape[1],
+            "train_dataset": train_ds,
+        },
+    )()
+    model = STNDTConfig(
+        hidden_size=18,
+        num_layers=1,
+        num_heads=2,
+        dropout=0.0,
+        dropout_rates=0.0,
+        dropout_embedding=0.0,
+        do_contrast=False,
+    ).build_from_data(data)
+    batch = next(iter(DataLoader(train_ds, batch_size=2)))
+    output = model(batch["spikes"])
+    loss = model.loss(batch, output)
+    assert batch["spikes"].shape[-1] == train_heldin.shape[-1] + train_heldout.shape[-1]
+    assert output.rates.shape[-1] == batch["spikes"].shape[-1]
     assert loss.total.ndim == 0
 
     result = evaluate_model(

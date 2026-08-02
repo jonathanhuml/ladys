@@ -131,6 +131,7 @@ class NLBCoSmoothingAdapter(EvaluationAdapter):
         poisson_max_iter: int = 100,
         poisson_eta_clip: float = 20.0,
         prediction_floor: float = 1e-9,
+        target: Literal["heldout", "heldin"] = "heldout",
     ) -> None:
         self.feature_source = feature_source
         self.decoder = decoder
@@ -138,6 +139,7 @@ class NLBCoSmoothingAdapter(EvaluationAdapter):
         self.poisson_max_iter = int(poisson_max_iter)
         self.poisson_eta_clip = float(poisson_eta_clip)
         self.prediction_floor = float(prediction_floor)
+        self.target = target
         self.decoder_weight: Tensor | None = None
         self.direct_prediction = False
 
@@ -157,7 +159,7 @@ class NLBCoSmoothingAdapter(EvaluationAdapter):
                 batch = move_batch_to_device(batch, device)
                 x = observations_from_batch(batch)
                 output = None if self.feature_source == "predict_rates" else model(x)
-                target = _nlb_target_from_batch(batch)
+                target = _nlb_target_from_batch(batch, target=self.target)
                 if (
                     self._allow_direct_prediction()
                     and output is not None
@@ -245,7 +247,7 @@ class NLBCoSmoothingAdapter(EvaluationAdapter):
                 batch = move_batch_to_device(batch, device)
                 x = observations_from_batch(batch)
                 output = None if self.feature_source == "predict_rates" else model(x)
-                target = _nlb_target_from_batch(batch)
+                target = _nlb_target_from_batch(batch, target=self.target)
                 prediction = self._predict_from_output(output, target, model=model, x=x)
                 predictions.append(prediction.detach().cpu())
                 targets.append(target.detach().cpu())
@@ -436,9 +438,18 @@ def _default_adapter(task: EvaluationTaskName) -> EvaluationAdapter:
     return SyntheticEvaluationAdapter()
 
 
-def _nlb_target_from_batch(batch: Tensor | dict[str, Tensor]) -> Tensor:
+def _nlb_target_from_batch(
+    batch: Tensor | dict[str, Tensor],
+    target: Literal["heldout", "heldin"] = "heldout",
+) -> Tensor:
     if not isinstance(batch, dict):
         raise TypeError("NLB evaluation requires dict batches with heldout_spikes.")
+    if target == "heldin":
+        if "heldin_spikes" in batch:
+            return batch["heldin_spikes"]
+        if "spikes" in batch:
+            return batch["spikes"]
+        raise KeyError("NLB batch is missing heldin_spikes/spikes.")
     if "heldout_spikes" in batch:
         return batch["heldout_spikes"]
     if "raw_spikes" in batch:

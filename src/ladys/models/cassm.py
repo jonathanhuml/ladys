@@ -10,7 +10,7 @@ from torch import Tensor
 
 from ladys.models.base import BaseDynamicsModel, BaseModelConfig, OptimizationConfig
 from ladys.models._filtering_core import ComputationAwareFilterSmoother
-from ladys.types import LossOutput, ModelOutput
+from ladys.types import LossOutput, ModelOutput, observations_from_batch
 
 
 @BaseModelConfig.register
@@ -25,6 +25,9 @@ class CASSMConfig(BaseModelConfig):
     save_model: bool = False
     use_dense_projection: bool = False
     health_checks: bool = True
+    nlb_feature_source: Literal["latents", "rates", "predict_rates"] = "latents"
+    nlb_decoder: Literal["ridge", "poisson"] = "ridge"
+    nlb_ridge_alpha: float = 500.0
     optimization: OptimizationConfig = Field(
         default_factory=lambda: OptimizationConfig(
             name="gradient",
@@ -45,6 +48,9 @@ class CASSMConfig(BaseModelConfig):
             save_model=self.save_model,
             use_dense_projection=self.use_dense_projection,
             health_checks=self.health_checks,
+            nlb_feature_source=self.nlb_feature_source,
+            nlb_decoder=self.nlb_decoder,
+            nlb_ridge_alpha=self.nlb_ridge_alpha,
             objective=self.objective,
         )
 
@@ -80,6 +86,9 @@ class CASSM(BaseDynamicsModel):
         save_model: bool = False,
         use_dense_projection: bool = False,
         health_checks: bool = True,
+        nlb_feature_source: str = "latents",
+        nlb_decoder: str = "ridge",
+        nlb_ridge_alpha: float = 500.0,
         objective: str = "cassm_elbo",
     ) -> None:
         super().__init__()
@@ -94,6 +103,9 @@ class CASSM(BaseDynamicsModel):
         self.save_model = bool(save_model)
         self.use_dense_projection = bool(use_dense_projection)
         self.health_checks = bool(health_checks)
+        self.nlb_feature_source = str(nlb_feature_source)
+        self.nlb_decoder = str(nlb_decoder)
+        self.nlb_ridge_alpha = float(nlb_ridge_alpha)
         self.objective = objective
 
         self.core = ComputationAwareFilterSmoother(
@@ -115,6 +127,13 @@ class CASSM(BaseDynamicsModel):
 
         self._sync_core_device(self.device)
         x = x.to(device=self.device, dtype=self.core.obs_noise_values.dtype)
+        if not self.training:
+            state_means, obs_vars = self.core.filter(x, return_type="prediction")
+            return ModelOutput(
+                rates=state_means[..., 0::2].clamp_min(0.0),
+                latents=state_means,
+                extras={"obs_vars": obs_vars},
+            )
         loss = self.core(x)
         return ModelOutput(extras={"loss": loss})
 
@@ -124,12 +143,29 @@ class CASSM(BaseDynamicsModel):
         output: ModelOutput,
         epoch: int = 0,
     ) -> LossOutput:
-        total = output.extras["loss"]
+        total = output.extras.get("loss")
+        if total is None:
+            x = observations_from_batch(batch).to(
+                device=self.device,
+                dtype=self.core.obs_noise_values.dtype,
+            )
+            total = self.core(x)
         return LossOutput(
             total=total,
             named_terms={"cassm_elbo": total},
             objective=self.objective,
         )
+
+    def evaluation_adapter(self, task: str):
+        if task == "nlb":
+            from ladys.metrics import NLBCoSmoothingAdapter
+
+            return NLBCoSmoothingAdapter(
+                feature_source=self.nlb_feature_source,
+                decoder=self.nlb_decoder,
+                ridge_alpha=self.nlb_ridge_alpha,
+            )
+        return None
 
     @torch.no_grad()
     def predict_rates(self, x: Tensor) -> Tensor:

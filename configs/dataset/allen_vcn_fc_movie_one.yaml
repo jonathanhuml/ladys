@@ -1,0 +1,3 @@
+name: allen_vcn_fc_movie_one
+data_path: data/real/allen_vcn/allen_vcn_low_trial_20ms.h5
+group: fc_movie_one

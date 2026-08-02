@@ -77,6 +77,16 @@ ladys list datasets
 ladys list models
 ```
 
+Config files are split by how reusable they are. `configs/model/*.yaml` files
+are generic model presets that should not depend on a specific dataset's neuron
+count, time bins, held-out slice, or NLB split. `configs/dataset/*.yaml` files
+are reusable dataset presets. Fully runnable, benchmark-specific settings live
+under `configs/experiment/...` because they intentionally combine a dataset,
+model dimensions, optimizer, trainer, preprocessing, output naming, and any
+task-specific readout slices. For example, LFADS has one generic
+`configs/model/lfads.yaml`, while the NLB reproduction settings live as complete
+experiment YAMLs under each real dataset's `lfads/` folder.
+
 Synthetic and real-data tasks share the same CLI, but use task-specific
 evaluation adapters under the hood. Synthetic datasets such as Lorenz and
 chaotic RNN expose true rates and latents, so the default adapter reports

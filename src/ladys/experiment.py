@@ -20,6 +20,7 @@ from ladys.config import ExperimentConfig, load_experiment_config
 from ladys.data import DataModule
 from ladys.metrics import EvaluationResult, evaluate_model
 from ladys.models.base import BaseDynamicsModel
+from ladys.nlb_eval import evaluate_model_nlb_submission
 from ladys.training import EpochReport, Trainer
 from ladys.training.strategies import build_strategy
 
@@ -84,23 +85,121 @@ class Experiment:
         strategy = build_strategy(self.config.model.optimization)
         train_loader = self.data.train_loader()
         valid_loader = self.data.valid_loader()
-        history = self.trainer.fit(
-            model=model,
-            strategy=strategy,
-            train_loader=train_loader,
-            valid_loader=valid_loader,
-        )
-        evaluation = evaluate_model(
-            model=model,
-            loader=valid_loader,
-            device=self.config.trainer.device,
-            train_loader=self.data.train_loader(shuffle=False),
-        )
 
         run_dir = self._make_run_dir()
-        result = self._write_artifacts(run_dir, model, history, evaluation)
-        self.result = result
-        return result
+        config_path = run_dir / "config.json"
+        history_path = run_dir / "history.csv"
+        live_metrics_path = run_dir / "live_metrics.json"
+        status_path = run_dir / "status.json"
+        best_model_path = run_dir / "best_model.pt"
+        best_metrics_path = run_dir / "best_metrics.json"
+        _write_json(config_path, experiment_config_to_dict(self.config))
+        _write_json(
+            status_path,
+            {
+                "status": "running",
+                "epochs": self.config.trainer.epochs,
+                "run_dir": run_dir,
+            },
+        )
+        best_eval: dict[str, Any] | None = None
+        last_eval: dict[str, Any] | None = None
+
+        def epoch_callback(report: EpochReport) -> None:
+            nonlocal best_eval, last_eval
+            evaluation_metrics: dict[str, float] | None = None
+            interval = int(getattr(self.config.trainer, "live_eval_interval", 0))
+            should_evaluate = interval > 0 and (
+                (report.epoch + 1) % interval == 0
+                or report.epoch + 1 == self.config.trainer.epochs
+            )
+            if should_evaluate:
+                evaluation = evaluate_model(
+                    model=model,
+                    loader=valid_loader,
+                    device=self.config.trainer.device,
+                    train_loader=self.data.train_loader(shuffle=False),
+                )
+                evaluation_metrics = evaluation.metrics
+                last_eval = {
+                    "epoch": report.epoch + 1,
+                    "metrics": evaluation_metrics,
+                }
+                report.metrics.update(
+                    {f"eval/{key}": value for key, value in evaluation_metrics.items()}
+                )
+                live_score = _live_eval_score(evaluation_metrics)
+                if live_score is not None and (
+                    best_eval is None or _is_better_live_score(live_score, best_eval["score"])
+                ):
+                    best_eval = {
+                        "epoch": report.epoch + 1,
+                        "metrics": evaluation_metrics,
+                        "score": live_score,
+                    }
+                    torch.save(model.state_dict(), best_model_path)
+                    _write_json(best_metrics_path, best_eval)
+            _write_history(history_path, self.trainer.history)
+            _write_live_metrics(
+                live_metrics_path,
+                report=report,
+                epochs=self.config.trainer.epochs,
+                evaluation_metrics=evaluation_metrics,
+                last_eval=last_eval,
+                best_eval=best_eval,
+            )
+            _write_json(
+                status_path,
+                {
+                    "status": "running",
+                    "epoch": report.epoch + 1,
+                    "epochs": self.config.trainer.epochs,
+                    "run_dir": run_dir,
+                    "last_eval": last_eval,
+                    "best_eval": best_eval,
+                },
+            )
+            print(_format_epoch_progress(report, evaluation_metrics), flush=True)
+
+        try:
+            history = self.trainer.fit(
+                model=model,
+                strategy=strategy,
+                train_loader=train_loader,
+                valid_loader=valid_loader,
+                epoch_callback=epoch_callback,
+            )
+            evaluation = evaluate_model(
+                model=model,
+                loader=valid_loader,
+                device=self.config.trainer.device,
+                train_loader=self.data.train_loader(shuffle=False),
+            )
+            result = self._write_artifacts(run_dir, model, history, evaluation)
+            _write_json(
+                status_path,
+                {
+                    "status": "complete",
+                    "epoch": self.config.trainer.epochs,
+                    "epochs": self.config.trainer.epochs,
+                    "run_dir": run_dir,
+                    "metrics": result.metrics,
+                    "last_eval": last_eval,
+                    "best_eval": best_eval,
+                },
+            )
+            self.result = result
+            return result
+        except Exception as exc:
+            _write_json(
+                status_path,
+                {
+                    "status": "failed",
+                    "error": repr(exc),
+                    "run_dir": run_dir,
+                },
+            )
+            raise
 
     def _set_seeds(self) -> None:
         seed = getattr(self.config.dataset, "seed", None)
@@ -130,19 +229,30 @@ class Experiment:
         model_path = run_dir / "model.pt"
         report_path = run_dir / "report.md"
         predictions_path = run_dir / "predictions.npz" if self.config.save_predictions else None
+        metrics = dict(evaluation.metrics)
+        nlb_full = evaluate_model_nlb_submission(
+            model=model,
+            train_loader=self.data.train_loader(shuffle=False),
+            valid_loader=self.data.valid_loader(),
+            dataset_config=self.config.dataset,
+            device=self.config.trainer.device,
+            output_dir=run_dir,
+        )
+        if nlb_full is not None:
+            metrics.update(nlb_full.metrics)
 
         _write_json(config_path, experiment_config_to_dict(self.config))
         _write_history(history_path, history)
-        _write_json(metrics_path, _json_ready(evaluation.metrics))
+        _write_json(metrics_path, _json_ready(metrics))
         torch.save(model.state_dict(), model_path)
         if predictions_path is not None:
             _write_predictions(predictions_path, evaluation)
         plot_paths = _write_history_plots(run_dir, history)
-        _write_report(report_path, self.config, history, evaluation.metrics, plot_paths)
+        _write_report(report_path, self.config, history, metrics, plot_paths)
 
         return ExperimentResult(
             run_dir=run_dir,
-            metrics=evaluation.metrics,
+            metrics=metrics,
             history=history,
             config_path=config_path,
             history_path=history_path,
@@ -204,6 +314,72 @@ def _write_history(path: Path, history: list[EpochReport]) -> None:
                     ),
                 }
             )
+
+
+def _write_live_metrics(
+    path: Path,
+    *,
+    report: EpochReport,
+    epochs: int,
+    evaluation_metrics: dict[str, float] | None,
+    last_eval: dict[str, Any] | None,
+    best_eval: dict[str, Any] | None,
+) -> None:
+    _write_json(
+        path,
+        {
+            "epoch": report.epoch + 1,
+            "epochs": epochs,
+            "seconds": report.seconds,
+            "train_loss": report.train.loss,
+            "valid_loss": None if report.valid is None else report.valid.loss,
+            "objective": report.train.objective,
+            "metrics": report.metrics,
+            "train_metrics": report.train.metrics,
+            "valid_metrics": {} if report.valid is None else report.valid.metrics,
+            "evaluation_metrics": evaluation_metrics or {},
+            "last_eval": last_eval,
+            "best_eval": best_eval,
+        },
+    )
+
+
+def _format_epoch_progress(
+    report: EpochReport,
+    evaluation_metrics: dict[str, float] | None,
+) -> str:
+    valid_loss = float("nan") if report.valid is None else report.valid.loss
+    fields = [
+        f"epoch={report.epoch + 1}",
+        f"train_loss={report.train.loss:.6g}",
+        f"valid_loss={valid_loss:.6g}",
+    ]
+    if evaluation_metrics:
+        for key, value in sorted(evaluation_metrics.items()):
+            display = "nan" if not math.isfinite(value) else f"{value:.6g}"
+            fields.append(f"{key}={display}")
+    return " ".join(fields)
+
+
+def _live_eval_score(metrics: dict[str, float]) -> dict[str, float | str] | None:
+    if "co_bps" in metrics and math.isfinite(metrics["co_bps"]):
+        return {"name": "co_bps", "value": metrics["co_bps"], "mode": "max"}
+    if "poisson_nll" in metrics and math.isfinite(metrics["poisson_nll"]):
+        return {"name": "poisson_nll", "value": metrics["poisson_nll"], "mode": "min"}
+    return None
+
+
+def _is_better_live_score(
+    score: dict[str, float | str],
+    best_score: dict[str, float | str],
+) -> bool:
+    if score["name"] != best_score["name"] or score["mode"] != best_score["mode"]:
+        return True
+    value = float(score["value"])
+    best_value = float(best_score["value"])
+    if score["mode"] == "min":
+        return value < best_value
+    return value > best_value
 
 
 def _write_history_plots(run_dir: Path, history: list[EpochReport]) -> dict[str, Path]:

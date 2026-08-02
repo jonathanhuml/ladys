@@ -19,11 +19,34 @@ from torch import Tensor
 from torch.utils.data import Dataset
 
 
-NLBCoreDataset = Literal["mc_maze", "mc_rtt", "area2_bump", "dmfc_rsg"]
+NLBCoreDataset = Literal[
+    "mc_maze",
+    "mc_maze_large",
+    "mc_maze_medium",
+    "mc_maze_small",
+    "mc_rtt",
+    "area2_bump",
+    "dmfc_rsg",
+]
 NLBSplit = Literal["val", "test"]
 NLBBinSize = Literal[5, 20]
+NLBInputMode = Literal[
+    "heldin",
+    "heldin_full_reconstruction",
+    "full_observed",
+    "autolfads",
+    "lfads_torch",
+]
 
-NLB_DATASETS: tuple[str, ...] = ("area2_bump", "mc_maze", "mc_rtt", "dmfc_rsg")
+NLB_DATASETS: tuple[str, ...] = (
+    "area2_bump",
+    "mc_maze",
+    "mc_maze_large",
+    "mc_maze_medium",
+    "mc_maze_small",
+    "mc_rtt",
+    "dmfc_rsg",
+)
 NLB_BIN_SIZES_MS: tuple[int, ...] = (5, 20)
 NLB_TARGET_H5_URL = (
     "https://media.githubusercontent.com/media/neurallatents/nlb_tools/main/data/eval_data_test.h5"
@@ -32,6 +55,9 @@ NLB_TARGET_H5_URL = (
 DATASET_TO_DANDISET: dict[str, str] = {
     "area2_bump": "000127",
     "mc_maze": "000128",
+    "mc_maze_large": "000138",
+    "mc_maze_medium": "000139",
+    "mc_maze_small": "000140",
     "mc_rtt": "000129",
     "dmfc_rsg": "000130",
 }
@@ -39,6 +65,9 @@ DATASET_TO_DANDISET: dict[str, str] = {
 DATASET_TO_TEST_NWB: dict[str, Path] = {
     "area2_bump": Path("sub-Han/sub-Han_desc-test_ecephys.nwb"),
     "mc_maze": Path("sub-Jenkins/sub-Jenkins_ses-full_desc-test_ecephys.nwb"),
+    "mc_maze_large": Path("sub-Jenkins/sub-Jenkins_ses-large_desc-test_ecephys.nwb"),
+    "mc_maze_medium": Path("sub-Jenkins/sub-Jenkins_ses-medium_desc-test_ecephys.nwb"),
+    "mc_maze_small": Path("sub-Jenkins/sub-Jenkins_ses-small_desc-test_ecephys.nwb"),
     "mc_rtt": Path("sub-Indy/sub-Indy_desc-test_ecephys.nwb"),
     "dmfc_rsg": Path("sub-Haydn/sub-Haydn_desc-test_ecephys.nwb"),
 }
@@ -46,6 +75,15 @@ DATASET_TO_TEST_NWB: dict[str, Path] = {
 DATASET_TO_TRAIN_NWB: dict[str, Path] = {
     "area2_bump": Path("sub-Han/sub-Han_desc-train_behavior+ecephys.nwb"),
     "mc_maze": Path("sub-Jenkins/sub-Jenkins_ses-full_desc-train_behavior+ecephys.nwb"),
+    "mc_maze_large": Path(
+        "sub-Jenkins/sub-Jenkins_ses-large_desc-train_behavior+ecephys.nwb"
+    ),
+    "mc_maze_medium": Path(
+        "sub-Jenkins/sub-Jenkins_ses-medium_desc-train_behavior+ecephys.nwb"
+    ),
+    "mc_maze_small": Path(
+        "sub-Jenkins/sub-Jenkins_ses-small_desc-train_behavior+ecephys.nwb"
+    ),
     "mc_rtt": Path("sub-Indy/sub-Indy_desc-train_behavior+ecephys.nwb"),
     "dmfc_rsg": Path("sub-Haydn/sub-Haydn_desc-train_ecephys.nwb"),
 }
@@ -68,16 +106,23 @@ class NLBDatasetConfig(BaseModel):
     max_trials: Optional[int] = None
     input_key: str = "eval_spikes_heldin"
     target_key: str = "eval_spikes_heldout"
+    input_mode: NLBInputMode = "heldin"
+    include_forward: bool = False
+    seed: Optional[int] = None
 
     @model_validator(mode="after")
     def _sync_legacy_bin_size(self) -> "NLBDatasetConfig":
         if self.bin_size is None:
             self.bin_size = float(self.bin_size_ms) / 1000.0
-            return self
-        bin_ms = int(round(float(self.bin_size) * 1000.0))
-        if bin_ms not in NLB_BIN_SIZES_MS:
-            raise ValueError("bin_size must correspond to 5 ms or 20 ms.")
-        self.bin_size_ms = bin_ms  # type: ignore[assignment]
+        else:
+            bin_ms = int(round(float(self.bin_size) * 1000.0))
+            if bin_ms not in NLB_BIN_SIZES_MS:
+                raise ValueError("bin_size must correspond to 5 ms or 20 ms.")
+            self.bin_size_ms = bin_ms  # type: ignore[assignment]
+        if self.input_mode == "lfads_torch":
+            self.input_mode = "heldin_full_reconstruction"  # type: ignore[assignment]
+        elif self.input_mode == "autolfads":
+            self.input_mode = "full_observed"  # type: ignore[assignment]
         return self
 
     @property
@@ -195,6 +240,40 @@ def _optional_tensor(array: np.ndarray | None) -> Tensor | None:
     return torch.from_numpy(array.copy()).float()
 
 
+def _concat_channels(left: Tensor, right: Tensor | None) -> Tensor:
+    if right is None:
+        return left
+    if left.shape[:-1] != right.shape[:-1]:
+        raise ValueError(
+            f"Cannot concatenate NLB tensors with shapes {tuple(left.shape)} "
+            f"and {tuple(right.shape)}."
+        )
+    return torch.cat([left, right.to(device=left.device, dtype=left.dtype)], dim=-1)
+
+
+def _forward_steps(heldin_forward: Tensor | None, heldout_forward: Tensor | None) -> int:
+    if heldin_forward is not None:
+        return int(heldin_forward.shape[1])
+    if heldout_forward is not None:
+        return int(heldout_forward.shape[1])
+    return 0
+
+
+def _full_observed_sequence(
+    heldin: Tensor,
+    heldout: Tensor,
+    heldin_forward: Tensor | None,
+    heldout_forward: Tensor | None,
+    *,
+    include_forward: bool,
+) -> Tensor:
+    full = _concat_channels(heldin, heldout)
+    if not include_forward or heldin_forward is None:
+        return full
+    forward = _concat_channels(heldin_forward, heldout_forward)
+    return torch.cat([full, forward.to(device=full.device, dtype=full.dtype)], dim=1)
+
+
 class NLBDataset(Dataset):
     """PyTorch Dataset for NLB held-in to held-out co-smoothing."""
 
@@ -208,17 +287,25 @@ class NLBDataset(Dataset):
         self.split = split
         self.arrays = arrays or load_nlb_h5(self.config)
         if split == "train":
-            self.spikes = self.arrays.train_heldin_spikes
+            self.heldin_spikes = self.arrays.train_heldin_spikes
             self.raw_spikes = self.arrays.train_heldout_spikes
             self.heldin_forward_spikes = self.arrays.train_heldin_forward_spikes
             self.heldout_forward_spikes = self.arrays.train_heldout_forward_spikes
         elif split == "valid":
-            self.spikes = self.arrays.eval_heldin_spikes
+            self.heldin_spikes = self.arrays.eval_heldin_spikes
             self.raw_spikes = self.arrays.eval_heldout_spikes
             self.heldin_forward_spikes = self.arrays.eval_heldin_forward_spikes
             self.heldout_forward_spikes = self.arrays.eval_heldout_forward_spikes
         else:
             raise ValueError("split must be 'train' or 'valid'.")
+        self.reconstruction_spikes = _full_observed_sequence(
+            self.heldin_spikes,
+            self.raw_spikes,
+            self.heldin_forward_spikes,
+            self.heldout_forward_spikes,
+            include_forward=bool(self.config.include_forward),
+        )
+        self.spikes = self._build_input_spikes()
 
     @classmethod
     def make_splits(
@@ -235,16 +322,52 @@ class NLBDataset(Dataset):
     def __getitem__(self, index: int) -> dict[str, Tensor]:
         item = {
             "spikes": self.spikes[index],
-            "heldin_spikes": self.spikes[index],
+            "heldin_spikes": self.heldin_spikes[index],
             "raw_spikes": self.raw_spikes[index],
             "heldout_spikes": self.raw_spikes[index],
             "dt": torch.tensor(self.arrays.dt, dtype=torch.float32),
         }
+        if self.config.input_mode in {
+            "full_observed",
+            "heldin_full_reconstruction",
+        }:
+            item["reconstruction_spikes"] = self.reconstruction_spikes[index]
         if self.heldin_forward_spikes is not None:
             item["heldin_forward_spikes"] = self.heldin_forward_spikes[index]
         if self.heldout_forward_spikes is not None:
             item["heldout_forward_spikes"] = self.heldout_forward_spikes[index]
         return item
+
+    def _build_input_spikes(self) -> Tensor:
+        if self.config.input_mode in {"heldin", "heldin_full_reconstruction"}:
+            return self.heldin_spikes
+        if self.config.input_mode != "full_observed":
+            raise ValueError(f"Unsupported NLB input_mode '{self.config.input_mode}'.")
+
+        full = _concat_channels(self.heldin_spikes, self.raw_spikes)
+        if self.split == "valid":
+            full = _concat_channels(self.heldin_spikes, torch.zeros_like(self.raw_spikes))
+
+        if not self.config.include_forward:
+            return full
+
+        forward_steps = _forward_steps(self.heldin_forward_spikes, self.heldout_forward_spikes)
+        if forward_steps == 0:
+            return full
+        if self.split == "train" and self.heldin_forward_spikes is not None:
+            forward = _concat_channels(
+                self.heldin_forward_spikes,
+                self.heldout_forward_spikes,
+            )
+        else:
+            forward = torch.zeros(
+                full.shape[0],
+                forward_steps,
+                full.shape[-1],
+                dtype=full.dtype,
+                device=full.device,
+            )
+        return torch.cat([full, forward.to(dtype=full.dtype, device=full.device)], dim=1)
 
 
 @dataclass(frozen=True)
@@ -408,7 +531,6 @@ def _default_nwb_search_roots(nwb_root: Path) -> list[Path]:
     return [
         nwb_root,
         Path("data/real/dandi"),
-        Path("../STNDT/data"),
     ]
 
 

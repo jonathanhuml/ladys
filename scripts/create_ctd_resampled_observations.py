@@ -122,6 +122,26 @@ def write_rates_and_spikes(
         recon[start:stop] = spikes
 
 
+def write_activity_resampled_rates_and_spikes(
+    src: h5py.File,
+    dst: h5py.File,
+    split: str,
+    trials: int,
+    source_neurons: np.ndarray,
+    rng: np.random.Generator,
+) -> None:
+    activity_src = src[f"{split}_activity"]
+    if trials > activity_src.shape[0]:
+        raise ValueError(f"requested {trials} {split} trials but source has {activity_src.shape[0]}")
+
+    rates = activity_src[:trials][..., source_neurons].astype(np.float32, copy=False)
+    spikes = rng.poisson(rates).astype(np.float32)
+    dst.create_dataset(f"{split}_activity", data=rates)
+    dst.create_dataset(f"{split}_recon_data", data=spikes)
+    for suffix in ["latents", "inputs", "extra", "inds"]:
+        copy_if_present(src, dst, f"{split}_{suffix}", slice(0, trials))
+
+
 def main() -> None:
     args = parse_args()
     if args.train_trials + args.valid_trials != args.total_trials:
@@ -153,24 +173,53 @@ def main() -> None:
                 out_h5.unlink()
             rng = np.random.default_rng(args.seed + 1009 * ds_index)
             with h5py.File(src_h5, "r") as src, h5py.File(out_h5, "w") as dst:
-                readout = make_readout(
-                    src["readout"][()],
-                    args.neurons,
-                    rng,
-                    args.readout_noise_scale,
-                )
-                dst.create_dataset("readout", data=readout.astype(np.float32))
-                dst.create_dataset("perm_neurons", data=np.arange(args.neurons, dtype=np.int64))
-                copy_if_present(src, dst, "orig_mean")
-                copy_if_present(src, dst, "orig_std")
-                write_rates_and_spikes(src, dst, "train", args.train_trials, readout, rng, args.chunk_trials)
-                write_rates_and_spikes(src, dst, "valid", args.valid_trials, readout, rng, args.chunk_trials)
+                source_neurons = rng.integers(0, src["readout"].shape[1], size=args.neurons)
+                if dataset_name == "ctd_chaotic_delayed_matching":
+                    # CDM's canonical activity is stored on the firing-rate scale, but
+                    # its readout does not directly parameterize exp(latents @ readout).
+                    # Resampling activity channels preserves the original rate units.
+                    readout = src["readout"][()][:, source_neurons].astype(np.float32, copy=True)
+                    dst.create_dataset("source_neurons", data=source_neurons.astype(np.int64))
+                    dst.create_dataset("readout", data=readout.astype(np.float32))
+                    dst.create_dataset("perm_neurons", data=np.arange(args.neurons, dtype=np.int64))
+                    copy_if_present(src, dst, "orig_mean")
+                    copy_if_present(src, dst, "orig_std")
+                    write_activity_resampled_rates_and_spikes(
+                        src, dst, "train", args.train_trials, source_neurons, rng
+                    )
+                    write_activity_resampled_rates_and_spikes(
+                        src, dst, "valid", args.valid_trials, source_neurons, rng
+                    )
+                else:
+                    readout = make_readout(
+                        src["readout"][()],
+                        args.neurons,
+                        rng,
+                        args.readout_noise_scale,
+                    )
+                    dst.create_dataset("readout", data=readout.astype(np.float32))
+                    dst.create_dataset("perm_neurons", data=np.arange(args.neurons, dtype=np.int64))
+                    copy_if_present(src, dst, "orig_mean")
+                    copy_if_present(src, dst, "orig_std")
+                    write_rates_and_spikes(src, dst, "train", args.train_trials, readout, rng, args.chunk_trials)
+                    write_rates_and_spikes(src, dst, "valid", args.valid_trials, readout, rng, args.chunk_trials)
             print(f"wrote: {out_h5}")
 
         old_meta = dict(cfg.get("metadata", {}))
         old_total = int(old_meta.get("total_neurons", args.neurons))
         old_heldin = int(old_meta.get("n_neurons_heldin", old_total))
         heldin = max(1, min(args.neurons - 1, round(args.neurons * old_heldin / max(old_total, 1))))
+        if dataset_name == "ctd_chaotic_delayed_matching":
+            generation_note = (
+                f"{args.total_trials}-trial/{args.neurons}-neuron derived CTD dataset; "
+                "rates sampled with replacement from canonical activity channels, "
+                "spikes~Poisson(rates)"
+            )
+        else:
+            generation_note = (
+                f"{args.total_trials}-trial/{args.neurons}-neuron derived CTD dataset; "
+                "rates=exp(latents @ sampled_readout), spikes~Poisson(rates)"
+            )
         out_cfg = {
             "name": dataset_name,
             "task": cfg.get("task", task),
@@ -186,10 +235,7 @@ def main() -> None:
                 "num_steps": int(old_meta.get("num_steps", 0)),
                 "latent_dim": int(old_meta.get("latent_dim", 0)),
                 "source_data_path": cfg["data_path"],
-                "generation_note": (
-                    f"{args.total_trials}-trial/{args.neurons}-neuron derived CTD dataset; "
-                    "rates=exp(latents @ sampled_readout), spikes~Poisson(rates)"
-                ),
+                "generation_note": generation_note,
             },
         }
         out_cfg_path = output_config_dir / f"{dataset_name}.yaml"

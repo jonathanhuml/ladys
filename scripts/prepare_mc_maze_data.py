@@ -26,8 +26,8 @@ def main() -> int:
     parser.add_argument(
         "--local-source",
         type=Path,
-        default=Path("/Users/jonathanhuml/Desktop/STNDT/data/mc_maze_val.h5"),
-        help="Existing NLB-style validation H5 to copy if present.",
+        default=Path("data/real/nlb_forward/mc_maze_test_5ms.h5"),
+        help="Existing LaDyS NLB-style H5 to copy if present.",
     )
     parser.add_argument(
         "--nwb-dir",

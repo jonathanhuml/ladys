@@ -29,6 +29,7 @@ from ladys.metrics import EvaluationResult, NLBCoSmoothingAdapter, compute_avail
 from ladys.mint_nlb import _score_full_nlb_metrics
 from ladys.models.base import BaseDynamicsModel, OptimizationConfig
 from ladys.models.baselines import PSTH, PSTHConfig, SmoothingConfig
+from ladys.models.cassm import CASSM, CASSMConfig
 from ladys.models.gpfa import GPFAConfig
 from ladys.models.kalman import KalmanConfig
 from ladys.models.ndt import NDTConfig
@@ -39,13 +40,27 @@ from ladys.types import move_batch_to_device, observations_from_batch
 
 
 DATASETS = ("area2_bump", "dmfc_rsg", "mc_maze", "mc_rtt")
-METHODS = ("gpfa", "kalman", "ndt", "psth", "smoothing")
+METHODS = ("cassm", "gpfa", "kalman", "ndt", "psth", "smoothing")
 
 GPFA_LATENT_DIMS = {
     "area2_bump": 22,
     "dmfc_rsg": 32,
     "mc_maze": 52,
     "mc_rtt": 36,
+}
+
+CASSM_PROJECTION_DIMS = {
+    "area2_bump": 20,
+    "dmfc_rsg": 20,
+    "mc_maze": 20,
+    "mc_rtt": 20,
+}
+
+CASSM_USE_DENSE_PROJECTION = {
+    "area2_bump": True,
+    "dmfc_rsg": False,
+    "mc_maze": True,
+    "mc_rtt": True,
 }
 
 NDT_BASE_DATASET_OVERRIDES = {
@@ -116,6 +131,12 @@ def main() -> int:
     parser.add_argument("--target-h5", default="data/real/nlb/eval_data_test.h5")
     parser.add_argument("--device", default="cpu")
     parser.add_argument(
+        "--cassm-ridge-alpha",
+        type=float,
+        default=None,
+        help="Ridge penalty for the CASSM latent-to-heldout NLB decoder.",
+    )
+    parser.add_argument(
         "--ndt-profile",
         choices=("base", "sweep"),
         default="sweep",
@@ -168,6 +189,7 @@ def main() -> int:
                 device=args.device,
                 train_classical=args.train_classical,
                 ndt_profile=args.ndt_profile,
+                cassm_ridge_alpha=args.cassm_ridge_alpha,
             )
             print(
                 f"Running {method} on {dataset}: epochs={config.trainer.epochs}, "
@@ -205,6 +227,7 @@ def build_config(
     device: str,
     train_classical: bool,
     ndt_profile: str = "sweep",
+    cassm_ridge_alpha: float | None = None,
 ) -> ExperimentConfig:
     dataset_config = build_dataset_config(
         dataset,
@@ -217,7 +240,35 @@ def build_config(
         },
     )
 
-    if method == "gpfa":
+    if method == "cassm":
+        dataset_config.seed = 7
+        model = CASSMConfig(
+            dt=0.005,
+            dataset_name=dataset,
+            projection_dim=CASSM_PROJECTION_DIMS[dataset],
+            save_model=False,
+            use_dense_projection=CASSM_USE_DENSE_PROJECTION[dataset],
+            health_checks=True,
+            nlb_feature_source="latents",
+            nlb_decoder="ridge",
+            nlb_ridge_alpha=500.0 if cassm_ridge_alpha is None else cassm_ridge_alpha,
+            optimization=OptimizationConfig(
+                name="gradient",
+                optimizer="Adam",
+                lr=5.0e-2,
+                weight_decay=0.0,
+                gradient_clip=300.0,
+            ),
+        )
+        preprocessing = PreprocessingConfig(
+            observations={
+                "name": "smooth_firing_rate",
+                "sampling_precision": 5.0,
+                "kern_sd_ms": 50.0,
+            }
+        )
+        batch_size = 64
+    elif method == "gpfa":
         optimization = OptimizationConfig(name="em") if train_classical else OptimizationConfig(name="inference_only")
         model = GPFAConfig(
             latent_dim=GPFA_LATENT_DIMS[dataset],
@@ -524,8 +575,16 @@ def evaluate_full_nlb(
         evaluation = adapter.evaluate(model, valid_loader, device)
         train_rates_heldout = train_eval.predictions["rates"]
         eval_rates_heldout = evaluation.predictions["rates"]
-        train_rates_heldin = collect_heldin_rates(model, train_loader, device)
-        eval_rates_heldin = collect_heldin_rates(model, valid_loader, device)
+        if isinstance(model, CASSM):
+            train_rates_heldin, eval_rates_heldin = collect_decoded_heldin_rates(
+                model,
+                train_loader,
+                valid_loader,
+                device,
+            )
+        else:
+            train_rates_heldin = collect_heldin_rates(model, train_loader, device)
+            eval_rates_heldin = collect_heldin_rates(model, valid_loader, device)
         eval_rates_heldin_forward, eval_rates_heldout_forward = collect_forward_rates(
             model,
             valid_loader,
@@ -576,6 +635,27 @@ def collect_heldin_rates(
             prediction = model.predict_rates(x)
             rates.append(prediction[:, : x.shape[1], : x.shape[-1]].detach().cpu())
     return torch.cat(rates, dim=0).numpy().astype(np.float32)
+
+
+def collect_decoded_heldin_rates(
+    model: CASSM,
+    train_loader: Iterable,
+    valid_loader: Iterable,
+    device: torch.device,
+) -> tuple[np.ndarray, np.ndarray]:
+    adapter = NLBCoSmoothingAdapter(
+        feature_source=model.nlb_feature_source,
+        decoder=model.nlb_decoder,
+        ridge_alpha=model.nlb_ridge_alpha,
+        target="heldin",
+    )
+    adapter.fit(model, train_loader, device)
+    train_eval = adapter.evaluate(model, train_loader, device)
+    valid_eval = adapter.evaluate(model, valid_loader, device)
+    return (
+        train_eval.predictions["rates"].astype(np.float32),
+        valid_eval.predictions["rates"].astype(np.float32),
+    )
 
 
 def collect_forward_rates(

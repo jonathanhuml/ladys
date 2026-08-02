@@ -266,6 +266,7 @@ class ILQRVAE(BaseDynamicsModel):
         )
 
         rates = []
+        full_rates = []
         latents = []
         controls = []
         eval_counts = []
@@ -283,7 +284,9 @@ class ILQRVAE(BaseDynamicsModel):
                 n_observed_steps=int(trial.shape[0]),
             )
             rates_hz = self.core.firing_rates(observed_latents, mode=self.rate_mode)
-            rates.append((self.dt * rates_hz[:, output_start:output_stop]).to(x.dtype))
+            full_counts = (self.dt * rates_hz).to(x.dtype)
+            full_rates.append(rates_hz.to(x.dtype))
+            rates.append(full_counts[:, output_start:output_stop])
             latents.append(observed_latents.to(x.dtype))
             controls.append(result.controls)
             eval_counts.append(len(result.loss_history))
@@ -294,6 +297,7 @@ class ILQRVAE(BaseDynamicsModel):
             latents=torch.stack(latents, dim=0),
             extras={
                 "controls": torch.stack(controls, dim=0),
+                "full_rates": torch.stack(full_rates, dim=0),
                 "ilqr_evaluations": torch.tensor(eval_counts, dtype=torch.float32, device=x.device),
                 "posterior_objective": torch.tensor(objectives, dtype=torch.float32, device=x.device),
             },

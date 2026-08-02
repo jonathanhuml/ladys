@@ -69,6 +69,8 @@ class STNDTConfig(BaseModelConfig):
     mask_random_ratio: float = 0.5
     mask_max_span: int = 1
     mask_span_expand_prob: float = 0.0
+    mask_span_ramp_start: int = 0
+    mask_span_ramp_end: int = 0
     use_zero_mask: bool = True
     topk_loss_fraction: float = 1.0
     do_contrast: bool = True
@@ -78,6 +80,8 @@ class STNDTConfig(BaseModelConfig):
     contrast_mask_random_ratio: float = 0.5
     contrast_mask_max_span: int = 1
     contrast_mask_span_expand_prob: float = 0.0
+    contrast_mask_span_ramp_start: int = 0
+    contrast_mask_span_ramp_end: int = 0
     temperature: float = 0.07
     contrast_lambda: float = 0.1
     use_contrast_projector: bool = False
@@ -135,6 +139,10 @@ class STNDTConfig(BaseModelConfig):
             raise ValueError("mask_span_expand_prob must be in [0, 1].")
         if not 0.0 <= self.contrast_mask_span_expand_prob <= 1.0:
             raise ValueError("contrast_mask_span_expand_prob must be in [0, 1].")
+        if self.mask_span_ramp_start < 0 or self.mask_span_ramp_end < 0:
+            raise ValueError("mask_span_ramp_start/end must be nonnegative.")
+        if self.contrast_mask_span_ramp_start < 0 or self.contrast_mask_span_ramp_end < 0:
+            raise ValueError("contrast_mask_span_ramp_start/end must be nonnegative.")
         if not 0.0 < self.topk_loss_fraction <= 1.0:
             raise ValueError("topk_loss_fraction must be in (0, 1].")
         if self.temperature <= 0.0:
@@ -165,7 +173,10 @@ class STNDTConfig(BaseModelConfig):
                     raise RuntimeError("DataModule.setup() must run before build_from_data().")
                 heldout = getattr(train_dataset, "raw_spikes", None)
                 if heldout is not None:
-                    output_neurons = n_neurons + int(heldout.shape[-1])
+                    dataset_config = getattr(train_dataset, "config", None)
+                    input_mode = getattr(dataset_config, "input_mode", None)
+                    if input_mode != "full_observed":
+                        output_neurons = n_neurons + int(heldout.shape[-1])
                     heldin_forward = getattr(train_dataset, "heldin_forward_spikes", None)
                     heldout_forward = getattr(train_dataset, "heldout_forward_spikes", None)
                     if heldin_forward is not None and heldout_forward is not None:
@@ -251,6 +262,8 @@ class STNDTConfig(BaseModelConfig):
             mask_random_ratio=self.mask_random_ratio,
             mask_max_span=self.mask_max_span,
             mask_span_expand_prob=self.mask_span_expand_prob,
+            mask_span_ramp_start=self.mask_span_ramp_start,
+            mask_span_ramp_end=self.mask_span_ramp_end,
             use_zero_mask=self.use_zero_mask,
             topk_loss_fraction=self.topk_loss_fraction,
             do_contrast=self.do_contrast,
@@ -260,6 +273,8 @@ class STNDTConfig(BaseModelConfig):
             contrast_mask_random_ratio=self.contrast_mask_random_ratio,
             contrast_mask_max_span=self.contrast_mask_max_span,
             contrast_mask_span_expand_prob=self.contrast_mask_span_expand_prob,
+            contrast_mask_span_ramp_start=self.contrast_mask_span_ramp_start,
+            contrast_mask_span_ramp_end=self.contrast_mask_span_ramp_end,
             temperature=self.temperature,
             contrast_lambda=self.contrast_lambda,
             use_contrast_projector=self.use_contrast_projector,
@@ -333,6 +348,8 @@ class STNDT(BaseDynamicsModel):
         mask_random_ratio: float = 0.5,
         mask_max_span: int = 1,
         mask_span_expand_prob: float = 0.0,
+        mask_span_ramp_start: int = 0,
+        mask_span_ramp_end: int = 0,
         use_zero_mask: bool = True,
         topk_loss_fraction: float = 1.0,
         do_contrast: bool = True,
@@ -342,6 +359,8 @@ class STNDT(BaseDynamicsModel):
         contrast_mask_random_ratio: float = 0.5,
         contrast_mask_max_span: int = 1,
         contrast_mask_span_expand_prob: float = 0.0,
+        contrast_mask_span_ramp_start: int = 0,
+        contrast_mask_span_ramp_end: int = 0,
         temperature: float = 0.07,
         contrast_lambda: float = 0.1,
         use_contrast_projector: bool = False,
@@ -386,6 +405,8 @@ class STNDT(BaseDynamicsModel):
         self.mask_random_ratio = float(mask_random_ratio)
         self.mask_max_span = int(mask_max_span)
         self.mask_span_expand_prob = float(mask_span_expand_prob)
+        self.mask_span_ramp_start = int(mask_span_ramp_start)
+        self.mask_span_ramp_end = int(mask_span_ramp_end)
         self.use_zero_mask = bool(use_zero_mask)
         self.topk_loss_fraction = float(topk_loss_fraction)
         self.do_contrast = bool(do_contrast)
@@ -395,6 +416,8 @@ class STNDT(BaseDynamicsModel):
         self.contrast_mask_random_ratio = float(contrast_mask_random_ratio)
         self.contrast_mask_max_span = int(contrast_mask_max_span)
         self.contrast_mask_span_expand_prob = float(contrast_mask_span_expand_prob)
+        self.contrast_mask_span_ramp_start = int(contrast_mask_span_ramp_start)
+        self.contrast_mask_span_ramp_end = int(contrast_mask_span_ramp_end)
         self.temperature = float(temperature)
         self.contrast_lambda = float(contrast_lambda)
         self.use_contrast_projector = bool(use_contrast_projector)
@@ -402,6 +425,7 @@ class STNDT(BaseDynamicsModel):
         self.contrast_layer = str(contrast_layer)
         self.nlb_decoder = str(nlb_decoder)
         self.objective = objective
+        self.training_epoch = 0
 
         if self.n_neurons < 1 or self.output_neurons < 1:
             raise ValueError("n_neurons and output_neurons must be positive.")
@@ -469,6 +493,9 @@ class STNDT(BaseDynamicsModel):
         if self.fixup_init:
             self.fixup_initialization()
 
+    def set_training_epoch(self, epoch: int) -> None:
+        self.training_epoch = int(epoch)
+
     def forward(self, x: Tensor) -> ModelOutput:
         return self._forward(x, should_mask=self.training)
 
@@ -532,7 +559,7 @@ class STNDT(BaseDynamicsModel):
     def evaluation_adapter(self, task: str) -> EvaluationAdapter | None:
         if task != "nlb":
             return None
-        if self.output_neurons > self.n_neurons and self.nlb_decoder == "direct":
+        if self.nlb_decoder == "direct":
             return STNDTNLBAdapter()
         return NLBCoSmoothingAdapter(feature_source="latents")
 
@@ -717,9 +744,7 @@ class STNDT(BaseDynamicsModel):
         mode = self.contrast_mask_mode if contrast else self.mask_mode
         ratio = self.contrast_mask_ratio if contrast else self.mask_ratio
         max_span = self.contrast_mask_max_span if contrast else self.mask_max_span
-        expand_prob = (
-            self.contrast_mask_span_expand_prob if contrast else self.mask_span_expand_prob
-        )
+        expand_prob = self._current_mask_span_expand_prob(contrast=contrast)
         width = 1
         should_expand = (
             max_span > 1
@@ -754,6 +779,23 @@ class STNDT(BaseDynamicsModel):
             mask[flat_index] = True
             mask = mask.reshape(batch, time, neurons)
         return mask
+
+    def _current_mask_span_expand_prob(self, *, contrast: bool) -> float:
+        if contrast:
+            start = self.contrast_mask_span_ramp_start
+            end = self.contrast_mask_span_ramp_end
+            fallback = self.contrast_mask_span_expand_prob
+            if end <= start:
+                start = self.mask_span_ramp_start
+                end = self.mask_span_ramp_end
+        else:
+            start = self.mask_span_ramp_start
+            end = self.mask_span_ramp_end
+            fallback = self.mask_span_expand_prob
+        if end > start:
+            progress = (float(self.training_epoch) - float(start)) / float(end - start)
+            return max(0.0, min(1.0, progress))
+        return fallback
 
     def _pad_observed(self, x: Tensor) -> Tensor:
         if x.shape[-1] < self.output_neurons:
@@ -917,7 +959,8 @@ class STNDTNLBAdapter(EvaluationAdapter):
                     raise TypeError("NLB evaluation requires heldout_spikes in dict batches.")
                 rates = model.predict_rates(x)
                 target = batch["heldout_spikes"]
-                n_heldin = x.shape[-1]
+                heldin = batch.get("heldin_spikes")
+                n_heldin = x.shape[-1] if heldin is None else heldin.shape[-1]
                 n_heldout = target.shape[-1]
                 pred = rates[:, : target.shape[1], n_heldin : n_heldin + n_heldout]
                 if pred.shape != target.shape:

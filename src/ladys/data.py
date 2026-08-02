@@ -9,6 +9,9 @@ from pydantic import BaseModel
 from torch.utils.data import DataLoader, Dataset
 
 from ladys.datasets import (
+    ALLEN_VCN_DATASETS,
+    AllenVCNDataset,
+    AllenVCNDatasetConfig,
     ChaoticRNNDataset,
     ChaoticRNNDatasetConfig,
     CTDDataset,
@@ -22,6 +25,8 @@ from ladys.preprocessing import PreprocessedDataset, PreprocessingConfig
 
 
 DATASET_CONFIGS: dict[str, type[BaseModel]] = {
+    "allen_vcn": AllenVCNDatasetConfig,
+    **{name: AllenVCNDatasetConfig for name in ALLEN_VCN_DATASETS},
     "area2_bump": NLBDatasetConfig,
     "chaotic_rnn": ChaoticRNNDatasetConfig,
     "ctd": CTDDatasetConfig,
@@ -33,6 +38,9 @@ DATASET_CONFIGS: dict[str, type[BaseModel]] = {
     "dmfc_rsg": NLBDatasetConfig,
     "lorenz": LorenzDatasetConfig,
     "mc_maze": NLBDatasetConfig,
+    "mc_maze_large": NLBDatasetConfig,
+    "mc_maze_medium": NLBDatasetConfig,
+    "mc_maze_small": NLBDatasetConfig,
     "mc_rtt": NLBDatasetConfig,
 }
 
@@ -60,6 +68,8 @@ def make_dataset_splits(config: BaseModel) -> tuple[Dataset, Dataset]:
 
     if isinstance(config, ChaoticRNNDatasetConfig):
         return ChaoticRNNDataset.make_splits(config)
+    if isinstance(config, AllenVCNDatasetConfig):
+        return AllenVCNDataset.make_splits(config)
     if isinstance(config, CTDDatasetConfig):
         return CTDDataset.make_splits(config)
     if isinstance(config, LorenzDatasetConfig):

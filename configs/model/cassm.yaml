@@ -6,6 +6,9 @@ dataset_name: null
 save_model: false
 use_dense_projection: false
 health_checks: true
+nlb_feature_source: latents
+nlb_decoder: ridge
+nlb_ridge_alpha: 500.0
 optimization:
   name: gradient
   optimizer: Adam

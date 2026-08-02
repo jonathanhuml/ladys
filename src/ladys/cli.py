@@ -62,6 +62,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--epochs", type=int, help="number of training epochs")
     run_parser.add_argument("--batch-size", type=int, help="training batch size")
     run_parser.add_argument("--device", help="PyTorch device")
+    run_parser.add_argument(
+        "--live-eval-interval",
+        type=int,
+        help="evaluate and write live metrics every N epochs; 0 disables live evaluation",
+    )
     run_parser.add_argument("--output-dir", help="directory where run folders are written")
     run_parser.add_argument("--run-name", help="run folder name")
     run_parser.add_argument(
@@ -237,6 +242,8 @@ def build_experiment_config(args: argparse.Namespace) -> ExperimentConfig:
         trainer = replace(trainer, epochs=args.epochs)
     if args.device is not None:
         trainer = replace(trainer, device=args.device)
+    if args.live_eval_interval is not None:
+        trainer = replace(trainer, live_eval_interval=args.live_eval_interval)
 
     return replace(
         config,

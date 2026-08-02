@@ -17,6 +17,7 @@ from ladys.types import StepResult, move_batch_to_device
 class TrainerConfig:
     epochs: int = 10
     device: str = "cpu"
+    live_eval_interval: int = 0
 
 
 @dataclass
