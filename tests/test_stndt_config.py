@@ -37,28 +37,28 @@ def test_stndt_nlb_experiment_configs_load():
     assert all(config.model.nlb_decoder == "direct" for config in configs)
     assert all(config.model.mask_mode == "full" for config in configs)
     assert all(config.model.contrast_mask_mode == "full" for config in configs)
-    assert [config.trainer.epochs for config in configs] == [40001, 50501, 50501, 3000]
-    assert [config.model.context_forward for config in configs] == [4, 4, 4, 46]
-    assert [config.model.context_backward for config in configs] == [8, 8, 8, 7]
+    assert [config.trainer.epochs for config in configs] == [5000, 50501, 5000, 3000]
+    assert [config.model.context_forward for config in configs] == [80, 4, 46, 46]
+    assert [config.model.context_backward for config in configs] == [32, 8, 7, 7]
     assert [config.model.dropout for config in configs] == [
+        0.15,
         0.1,
-        0.1,
-        0.1,
+        0.3,
         0.3258805092088328,
     ]
     assert [config.model.mask_token_ratio for config in configs] == [
+        0.8,
         1.0,
-        1.0,
-        1.0,
+        0.85,
         0.8355074373250815,
     ]
     assert [config.model.mask_random_ratio for config in configs] == [
+        0.95,
         0.5,
-        0.5,
-        0.5,
+        0.85,
         0.8578455430626231,
     ]
-    assert [config.model.mask_max_span for config in configs] == [1, 1, 1, 5]
+    assert [config.model.mask_max_span for config in configs] == [1, 1, 5, 5]
     assert [config.model.mask_span_ramp_start for config in configs] == [600, 8000, 8000, 8000]
     assert [config.model.mask_span_ramp_end for config in configs] == [1200, 12000, 12000, 12000]
     assert all(config.model.contrast_mask_span_ramp_start == 8000 for config in configs)

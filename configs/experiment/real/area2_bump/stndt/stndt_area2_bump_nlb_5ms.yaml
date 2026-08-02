@@ -12,14 +12,14 @@ model:
   ensemble: false
   ensemble_size: 2
   output_mode: auto
-  context_forward: 4
-  context_backward: 8
+  context_forward: 80
+  context_backward: 32
   context_wrap_initial: false
   full_context: false
   hidden_size: 128
-  dropout: 0.1
-  dropout_rates: 0.2
-  dropout_embedding: 0.2
+  dropout: 0.15
+  dropout_rates: 0.15
+  dropout_embedding: 0.15
   num_heads: 1
   num_layers: 4
   activation: relu
@@ -36,10 +36,10 @@ model:
   scale_norm: false
   decoder_layers: 1
   position_offset: false
-  mask_ratio: 0.25
+  mask_ratio: 0.3
   mask_mode: full
-  mask_token_ratio: 1.0
-  mask_random_ratio: 0.5
+  mask_token_ratio: 0.8
+  mask_random_ratio: 0.95
   mask_max_span: 1
   mask_span_expand_prob: 0.0
   mask_span_ramp_start: 600
@@ -47,16 +47,16 @@ model:
   use_zero_mask: true
   topk_loss_fraction: 1.0
   do_contrast: true
-  contrast_mask_ratio: 0.05
+  contrast_mask_ratio: 0.1
   contrast_mask_mode: full
-  contrast_mask_token_ratio: 0.5
-  contrast_mask_random_ratio: 0.5
+  contrast_mask_token_ratio: 0.8
+  contrast_mask_random_ratio: 0.7
   contrast_mask_max_span: 1
   contrast_mask_span_expand_prob: 0.0
   contrast_mask_span_ramp_start: 8000
   contrast_mask_span_ramp_end: 12000
   temperature: 0.07
-  contrast_lambda: 0.1
+  contrast_lambda: 0.3
   use_contrast_projector: false
   linear_projector: true
   contrast_layer: embedder
@@ -64,11 +64,11 @@ model:
   optimization:
     name: gradient
     optimizer: AdamW
-    lr: 1.0e-3
-    weight_decay: 5.0e-5
+    lr: 0.0015
+    weight_decay: 0.0001
     gradient_clip: 200.0
     lr_scheduler: warmup_cosine
-    warmup_steps: 5000
+    warmup_steps: 2500
     total_steps: 40001
     scheduler_step: epoch
 
@@ -76,7 +76,7 @@ preprocessing:
   observations: null
 
 trainer:
-  epochs: 40001
+  epochs: 5000
   batch_size: 64
   device: cpu
 

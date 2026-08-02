@@ -89,8 +89,8 @@ class LangevinFlowConfig(BaseModelConfig):
     gamma: float = 0.55
     langevin_step: float = 0.01
     potential_groups: int = 4
-    potential_kernel_size: int = 3
-    transformer_heads: int = 2
+    potential_kernel_size: int = 7
+    transformer_heads: int = 4
     transformer_feedforward: int = 512
     coordinated_dropout_rate: float = 0.5
     kl_weight: float = 0.1
@@ -454,7 +454,7 @@ class LangevinFlow(BaseDynamicsModel):
         noise_std = math.sqrt(noise_var)
         for t in range(1, total_steps):
             if t < self.n_time:
-                hidden_input = observ[:, t - 1]
+                hidden_input = observ[:, t]
             else:
                 hidden_input = observ[:, -1]
             hidden = self.dropout(self.encoder(hidden_input, hidden))
