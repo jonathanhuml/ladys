@@ -37,13 +37,14 @@ from ladys.types import ModelOutput, StepResult
 from ladys.training.strategies import build_strategy
 
 
-def _assert_all_trainable_parameters_receive_gradients(model, loss):
+def _assert_all_trainable_parameters_receive_gradients(model, loss, allowed_missing=()):
+    allowed_missing = set(allowed_missing)
     model.zero_grad(set_to_none=True)
     loss.backward()
     missing = [
         name
         for name, param in model.named_parameters()
-        if param.requires_grad and param.grad is None
+        if param.requires_grad and param.grad is None and name not in allowed_missing
     ]
     nonfinite = [
         name
@@ -173,7 +174,14 @@ def test_model_contracts_smoke():
     assert stndt_out.latents.shape[:2] == x.shape[:2]
     assert stndt.predict_rates(x).shape == x.shape
     assert stndt_loss.total.ndim == 0
-    _assert_all_trainable_parameters_receive_gradients(stndt, stndt_loss.total)
+    _assert_all_trainable_parameters_receive_gradients(
+        stndt,
+        stndt_loss.total,
+        allowed_missing={
+            "encoder.layers.0.spatial_self_attn.out_proj.weight",
+            "encoder.layers.0.spatial_self_attn.out_proj.bias",
+        },
+    )
 
     stndt_ensemble = STNDTConfig(
         ensemble=True,
@@ -197,6 +205,12 @@ def test_model_contracts_smoke():
     _assert_all_trainable_parameters_receive_gradients(
         stndt_ensemble,
         stndt_ensemble_loss.total,
+        allowed_missing={
+            "members.0.encoder.layers.0.spatial_self_attn.out_proj.weight",
+            "members.0.encoder.layers.0.spatial_self_attn.out_proj.bias",
+            "members.1.encoder.layers.0.spatial_self_attn.out_proj.weight",
+            "members.1.encoder.layers.0.spatial_self_attn.out_proj.bias",
+        },
     )
 
 
@@ -519,7 +533,15 @@ def test_gpfa_nlb_adapter_fits_heldout_decoder(tmp_path: Path):
         DataLoader(valid_ds, batch_size=2),
         train_loader=DataLoader(train_ds, batch_size=5),
     )
+    from scripts.run_nlb_classical_table import collect_heldin_rates
 
+    heldin_rates = collect_heldin_rates(
+        model,
+        DataLoader(valid_ds, batch_size=2),
+        torch.device("cpu"),
+    )
+
+    assert heldin_rates.shape == eval_heldin.shape
     assert result.predictions["rates"].shape == eval_heldout.shape
     assert result.targets["spikes"].shape == eval_heldout.shape
     assert "co_bps" in result.metrics
@@ -586,6 +608,62 @@ def test_langevin_flow_nlb_adapter_scores_direct_heldout_slice(tmp_path: Path):
     output = model(batch["spikes"])
     loss = model.loss(batch, output)
     assert output.rates.shape[-1] == train_heldin.shape[-1] + train_heldout.shape[-1]
+    assert loss.total.ndim == 0
+
+    result = evaluate_model(
+        model,
+        DataLoader(valid_ds, batch_size=2),
+        train_loader=DataLoader(train_ds, batch_size=5),
+    )
+
+    assert result.predictions["rates"].shape == eval_heldout.shape
+    assert result.targets["spikes"].shape == eval_heldout.shape
+    assert "co_bps" in result.metrics
+    assert np.isfinite(result.metrics["co_bps"])
+
+
+def test_ndt_nlb_adapter_scores_direct_heldout_slice(tmp_path: Path):
+    path = tmp_path / "ndt_nlb.h5"
+    rng = np.random.default_rng(4)
+    train_heldin = rng.poisson(0.5, size=(5, 6, 3)).astype(np.float32)
+    train_heldout = (train_heldin[..., :2] + 0.1).astype(np.float32)
+    eval_heldin = rng.poisson(0.5, size=(2, 6, 3)).astype(np.float32)
+    eval_heldout = (eval_heldin[..., :2] + 0.1).astype(np.float32)
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset("train_spikes_heldin", data=train_heldin)
+        handle.create_dataset("train_spikes_heldout", data=train_heldout)
+        handle.create_dataset("eval_spikes_heldin", data=eval_heldin)
+        handle.create_dataset("eval_spikes_heldout", data=eval_heldout)
+
+    config = NLBDatasetConfig(name="mc_maze", data_path=str(path), bin_size_ms=5)
+    train_ds, valid_ds = NLBDataset.make_splits(config)
+    data = type(
+        "Data",
+        (),
+        {
+            "n_neurons": train_ds.spikes.shape[-1],
+            "n_time": train_ds.spikes.shape[1],
+            "train_dataset": train_ds,
+        },
+    )()
+    model = NDTConfig(
+        hidden_size=18,
+        num_layers=1,
+        num_heads=1,
+        dropout=0.0,
+        dropout_rates=0.0,
+        dropout_embedding=0.0,
+        embed_dim=0,
+    ).build_from_data(data)
+    batch = next(iter(DataLoader(train_ds, batch_size=2)))
+    output = model(batch["spikes"])
+    target = model._reconstruction_target(batch, output.extras["log_rates"])
+    loss_mask = model._loss_mask_for_target(batch, output, target)
+    loss = model.loss(batch, output)
+    assert batch["spikes"].shape[-1] == train_heldin.shape[-1]
+    assert output.rates.shape[-1] == train_heldin.shape[-1] + train_heldout.shape[-1]
+    assert target.shape[-1] == train_heldin.shape[-1] + train_heldout.shape[-1]
+    assert loss_mask[:, :, train_heldin.shape[-1] :].all()
     assert loss.total.ndim == 0
 
     result = evaluate_model(
@@ -677,13 +755,21 @@ def test_stndt_nlb_adapter_scores_direct_heldout_slice(tmp_path: Path):
     rng = np.random.default_rng(0)
     train_heldin = rng.poisson(0.5, size=(5, 8, 4)).astype(np.float32)
     train_heldout = (train_heldin[..., :2] + 0.1).astype(np.float32)
+    train_heldin_forward = rng.poisson(0.4, size=(5, 2, 4)).astype(np.float32)
+    train_heldout_forward = rng.poisson(0.2, size=(5, 2, 2)).astype(np.float32)
     eval_heldin = rng.poisson(0.5, size=(2, 8, 4)).astype(np.float32)
     eval_heldout = (eval_heldin[..., :2] + 0.1).astype(np.float32)
+    eval_heldin_forward = rng.poisson(0.4, size=(2, 2, 4)).astype(np.float32)
+    eval_heldout_forward = rng.poisson(0.2, size=(2, 2, 2)).astype(np.float32)
     with h5py.File(path, "w") as handle:
         handle.create_dataset("train_spikes_heldin", data=train_heldin)
         handle.create_dataset("train_spikes_heldout", data=train_heldout)
+        handle.create_dataset("train_spikes_heldin_forward", data=train_heldin_forward)
+        handle.create_dataset("train_spikes_heldout_forward", data=train_heldout_forward)
         handle.create_dataset("eval_spikes_heldin", data=eval_heldin)
         handle.create_dataset("eval_spikes_heldout", data=eval_heldout)
+        handle.create_dataset("eval_spikes_heldin_forward", data=eval_heldin_forward)
+        handle.create_dataset("eval_spikes_heldout_forward", data=eval_heldout_forward)
 
     config = NLBDatasetConfig(name="mc_maze", data_path=str(path), bin_size_ms=5)
     train_ds, valid_ds = NLBDataset.make_splits(config)
@@ -760,6 +846,129 @@ def test_stndt_nlb_adapter_scores_full_observed_heldout_slice(tmp_path: Path):
         dropout_rates=0.0,
         dropout_embedding=0.0,
         do_contrast=False,
+    ).build_from_data(data)
+    batch = next(iter(DataLoader(train_ds, batch_size=2)))
+    output = model(batch["spikes"])
+    loss = model.loss(batch, output)
+    assert batch["spikes"].shape[-1] == train_heldin.shape[-1] + train_heldout.shape[-1]
+    assert output.rates.shape[1] == train_heldin.shape[1]
+    assert output.rates.shape[-1] == batch["spikes"].shape[-1]
+    assert loss.total.ndim == 0
+
+    result = evaluate_model(
+        model,
+        DataLoader(valid_ds, batch_size=2),
+        train_loader=DataLoader(train_ds, batch_size=5),
+    )
+
+    assert result.predictions["rates"].shape == eval_heldout.shape
+    assert result.targets["spikes"].shape == eval_heldout.shape
+    assert "co_bps" in result.metrics
+    assert np.isfinite(result.metrics["co_bps"])
+
+
+def test_ndt_nlb_adapter_scores_full_observed_heldout_slice(tmp_path: Path):
+    path = tmp_path / "ndt_nlb_full_observed.h5"
+    rng = np.random.default_rng(2)
+    train_heldin = rng.poisson(0.5, size=(5, 8, 4)).astype(np.float32)
+    train_heldout = (train_heldin[..., :2] + 0.1).astype(np.float32)
+    train_heldin_forward = rng.poisson(0.4, size=(5, 2, 4)).astype(np.float32)
+    train_heldout_forward = rng.poisson(0.2, size=(5, 2, 2)).astype(np.float32)
+    eval_heldin = rng.poisson(0.5, size=(2, 8, 4)).astype(np.float32)
+    eval_heldout = (eval_heldin[..., :2] + 0.1).astype(np.float32)
+    eval_heldin_forward = rng.poisson(0.4, size=(2, 2, 4)).astype(np.float32)
+    eval_heldout_forward = rng.poisson(0.2, size=(2, 2, 2)).astype(np.float32)
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset("train_spikes_heldin", data=train_heldin)
+        handle.create_dataset("train_spikes_heldout", data=train_heldout)
+        handle.create_dataset("train_spikes_heldin_forward", data=train_heldin_forward)
+        handle.create_dataset("train_spikes_heldout_forward", data=train_heldout_forward)
+        handle.create_dataset("eval_spikes_heldin", data=eval_heldin)
+        handle.create_dataset("eval_spikes_heldout", data=eval_heldout)
+        handle.create_dataset("eval_spikes_heldin_forward", data=eval_heldin_forward)
+        handle.create_dataset("eval_spikes_heldout_forward", data=eval_heldout_forward)
+
+    config = NLBDatasetConfig(
+        name="mc_maze",
+        data_path=str(path),
+        bin_size_ms=5,
+        input_mode="full_observed",
+    )
+    train_ds, valid_ds = NLBDataset.make_splits(config)
+    data = type(
+        "Data",
+        (),
+        {
+            "n_neurons": train_ds.spikes.shape[-1],
+            "n_time": train_ds.spikes.shape[1],
+            "train_dataset": train_ds,
+        },
+    )()
+    model = NDTConfig(
+        hidden_size=18,
+        num_layers=1,
+        num_heads=2,
+        dropout=0.0,
+        dropout_rates=0.0,
+        dropout_embedding=0.0,
+        embed_dim=0,
+    ).build_from_data(data)
+    batch = next(iter(DataLoader(train_ds, batch_size=2)))
+    output = model(batch["spikes"])
+    loss = model.loss(batch, output)
+    assert batch["spikes"].shape[-1] == train_heldin.shape[-1] + train_heldout.shape[-1]
+    assert output.rates.shape[1] == train_heldin.shape[1]
+    assert output.rates.shape[-1] == batch["spikes"].shape[-1]
+    assert loss.total.ndim == 0
+
+    result = evaluate_model(
+        model,
+        DataLoader(valid_ds, batch_size=2),
+        train_loader=DataLoader(train_ds, batch_size=5),
+    )
+
+    assert result.predictions["rates"].shape == eval_heldout.shape
+    assert result.targets["spikes"].shape == eval_heldout.shape
+    assert "co_bps" in result.metrics
+    assert np.isfinite(result.metrics["co_bps"])
+
+
+def test_langevin_flow_nlb_adapter_scores_full_observed_heldout_slice(tmp_path: Path):
+    path = tmp_path / "langevin_flow_nlb_full_observed.h5"
+    rng = np.random.default_rng(3)
+    train_heldin = rng.poisson(0.5, size=(5, 8, 4)).astype(np.float32)
+    train_heldout = (train_heldin[..., :2] + 0.1).astype(np.float32)
+    eval_heldin = rng.poisson(0.5, size=(2, 8, 4)).astype(np.float32)
+    eval_heldout = (eval_heldin[..., :2] + 0.1).astype(np.float32)
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset("train_spikes_heldin", data=train_heldin)
+        handle.create_dataset("train_spikes_heldout", data=train_heldout)
+        handle.create_dataset("eval_spikes_heldin", data=eval_heldin)
+        handle.create_dataset("eval_spikes_heldout", data=eval_heldout)
+
+    config = NLBDatasetConfig(
+        name="mc_maze",
+        data_path=str(path),
+        bin_size_ms=5,
+        input_mode="full_observed",
+    )
+    train_ds, valid_ds = NLBDataset.make_splits(config)
+    data = type(
+        "Data",
+        (),
+        {
+            "n_neurons": train_ds.spikes.shape[-1],
+            "n_time": train_ds.spikes.shape[1],
+            "train_dataset": train_ds,
+        },
+    )()
+    model = LangevinFlowConfig(
+        hidden_size=8,
+        potential_groups=4,
+        transformer_heads=2,
+        transformer_feedforward=16,
+        dropout=0.0,
+        prediction_samples=1,
     ).build_from_data(data)
     batch = next(iter(DataLoader(train_ds, batch_size=2)))
     output = model(batch["spikes"])

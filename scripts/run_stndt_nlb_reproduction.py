@@ -16,6 +16,7 @@ from pathlib import Path
 import sys
 from typing import Any
 
+import numpy as np
 import torch
 
 
@@ -27,11 +28,13 @@ for path in (ROOT, SRC):
 
 from ladys.config import ExperimentConfig, load_experiment_config
 from ladys.experiment import Experiment, _write_json
+from ladys.metrics import EvaluationResult, compute_available_metrics
+from ladys.mint_nlb import _score_full_nlb_metrics
 from ladys.models.stndt import STNDTConfig
 from ladys.training import Trainer, TrainerConfig
 from ladys.training.strategies import build_strategy
 from ladys.utils.yaml import load_yaml
-from scripts.run_nlb_classical_table import evaluate_full_nlb, write_full_artifacts
+from scripts.run_nlb_classical_table import FullNLBResult, evaluate_full_nlb, write_full_artifacts
 
 
 DEFAULT_CONFIGS = {
@@ -91,6 +94,12 @@ def main() -> int:
         help="Print train-loss progress every N epochs without running full NLB scoring.",
     )
     parser.add_argument(
+        "--ensemble-max-size",
+        type=int,
+        default=2,
+        help="Evaluate top-N artifact ensembles per dataset after all candidate runs. Use 0 to disable.",
+    )
+    parser.add_argument(
         "--checkpoint",
         type=Path,
         help="Optional LaDyS model state_dict to load before training one config.",
@@ -133,6 +142,14 @@ def main() -> int:
             checkpoint_state = result.get("_best_state_dict")
             rows.append(result)
             _write_summary(Path(args.output_dir), rows)
+    if int(args.ensemble_max_size) > 0:
+        ensemble_rows = _run_artifact_ensembles(
+            rows=rows,
+            output_dir=Path(args.output_dir),
+            target_h5=Path(args.target_h5),
+            max_size=int(args.ensemble_max_size),
+        )
+        _write_ensemble_summary(Path(args.output_dir), ensemble_rows)
     return 0
 
 
@@ -405,6 +422,186 @@ def _write_summary(output_dir: Path, rows: list[dict[str, Any]]) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     serializable = [{k: v for k, v in row.items() if not k.startswith("_")} for row in rows]
     (output_dir / "summary.json").write_text(
+        json.dumps(serializable, indent=2, sort_keys=True) + "\n"
+    )
+
+
+def _run_artifact_ensembles(
+    *,
+    rows: list[dict[str, Any]],
+    output_dir: Path,
+    target_h5: Path,
+    max_size: int,
+) -> list[dict[str, Any]]:
+    by_dataset: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        stage = row.get("stage")
+        if stage not in (None, "contrast"):
+            continue
+        run_dir = Path(str(row["run_dir"]))
+        if not (run_dir / "full_predictions.npz").exists():
+            continue
+        by_dataset.setdefault(str(row["dataset"]), []).append(row)
+
+    ensemble_rows: list[dict[str, Any]] = []
+    for dataset, candidates in sorted(by_dataset.items()):
+        candidates = sorted(
+            candidates,
+            key=lambda row: float(row.get("best_metrics", {}).get("co-bps", float("-inf"))),
+            reverse=True,
+        )
+        for ensemble_size in range(1, min(max_size, len(candidates)) + 1):
+            selected = candidates[:ensemble_size]
+            payload = _average_prediction_payloads(
+                [Path(str(row["run_dir"])) / "full_predictions.npz" for row in selected]
+            )
+            metrics = _score_ensemble_payload(dataset=dataset, target_h5=target_h5, payload=payload)
+            evaluation = EvaluationResult(
+                metrics={"co_bps": float(metrics["co-bps"])},
+                predictions={"rates": payload["eval_rates_heldout"].astype(np.float32)},
+                targets={"spikes": payload["target_spikes"].astype(np.float32)},
+            )
+            full = FullNLBResult(
+                evaluation=evaluation,
+                full_metrics=metrics,
+                train_rates_heldin=payload["train_rates_heldin"].astype(np.float32),
+                train_rates_heldout=payload["train_rates_heldout"].astype(np.float32),
+                eval_rates_heldin=payload["eval_rates_heldin"].astype(np.float32),
+                eval_rates_heldout=payload["eval_rates_heldout"].astype(np.float32),
+                eval_rates_heldin_forward=payload.get("eval_rates_heldin_forward"),
+                eval_rates_heldout_forward=payload.get("eval_rates_heldout_forward"),
+            )
+            run_dir = _make_unique_dir(output_dir / f"stndt_{dataset}_ensemble_top{ensemble_size}")
+            write_full_artifacts(run_dir=run_dir, dataset=dataset, full=full)
+            _write_json(
+                run_dir / "stndt_ensemble.json",
+                {
+                    "dataset": dataset,
+                    "ensemble_size": ensemble_size,
+                    "metrics": metrics,
+                    "selected_run_dirs": [str(row["run_dir"]) for row in selected],
+                    "selected_co_bps": [
+                        float(row.get("best_metrics", {}).get("co-bps", float("nan")))
+                        for row in selected
+                    ],
+                },
+            )
+            ensemble_rows.append(
+                {
+                    "dataset": dataset,
+                    "ensemble_size": ensemble_size,
+                    "run_dir": str(run_dir),
+                    "metrics": metrics,
+                    "selected_run_dirs": [str(row["run_dir"]) for row in selected],
+                }
+            )
+            print(
+                f"{dataset} ensemble_size={ensemble_size} metrics={metrics}",
+                flush=True,
+            )
+    return ensemble_rows
+
+
+def _average_prediction_payloads(paths: list[Path]) -> dict[str, np.ndarray]:
+    required = [
+        "train_rates_heldin",
+        "train_rates_heldout",
+        "eval_rates_heldin",
+        "eval_rates_heldout",
+        "target_spikes",
+    ]
+    payloads = []
+    for path in paths:
+        with np.load(path) as loaded:
+            payload = {key: loaded[key] for key in loaded.files}
+        missing = sorted(set(required) - set(payload))
+        if missing:
+            raise KeyError(f"{path} is missing prediction keys required for ensembling: {missing}")
+        payloads.append(payload)
+
+    averaged: dict[str, np.ndarray] = {}
+    for key in required:
+        if key == "target_spikes":
+            averaged[key] = payloads[0][key].astype(np.float32, copy=False)
+            continue
+        arrays = [payload[key].astype(np.float64, copy=False) for payload in payloads]
+        _validate_same_shape(key, arrays)
+        averaged[key] = np.mean(np.stack(arrays, axis=0), axis=0).astype(np.float32)
+
+    for key in ("eval_rates_heldin_forward", "eval_rates_heldout_forward"):
+        if all(key in payload for payload in payloads):
+            arrays = [payload[key].astype(np.float64, copy=False) for payload in payloads]
+            _validate_same_shape(key, arrays)
+            averaged[key] = np.mean(np.stack(arrays, axis=0), axis=0).astype(np.float32)
+    return averaged
+
+
+def _validate_same_shape(key: str, arrays: list[np.ndarray]) -> None:
+    shapes = {array.shape for array in arrays}
+    if len(shapes) != 1:
+        raise ValueError(f"Cannot ensemble key '{key}' with mismatched shapes: {sorted(shapes)}")
+
+
+def _score_ensemble_payload(
+    *,
+    dataset: str,
+    target_h5: Path,
+    payload: dict[str, np.ndarray],
+) -> dict[str, float]:
+    output_dict = {
+        dataset: {
+            "train_rates_heldin": payload["train_rates_heldin"],
+            "train_rates_heldout": payload["train_rates_heldout"],
+            "eval_rates_heldin": payload["eval_rates_heldin"],
+            "eval_rates_heldout": payload["eval_rates_heldout"],
+        }
+    }
+    if "eval_rates_heldin_forward" in payload and "eval_rates_heldout_forward" in payload:
+        output_dict[dataset]["eval_rates_heldin_forward"] = payload["eval_rates_heldin_forward"]
+        output_dict[dataset]["eval_rates_heldout_forward"] = payload["eval_rates_heldout_forward"]
+    try:
+        from nlb_tools.evaluation import evaluate
+    except ImportError:
+        evaluate = None
+
+    if evaluate is not None:
+        for item in evaluate(str(target_h5), output_dict):
+            key = f"{dataset}_split"
+            if key in item:
+                return {metric: float(value) for metric, value in item[key].items()}
+
+    direct = compute_available_metrics(
+        {"rates": torch.as_tensor(payload["eval_rates_heldout"])},
+        {"spikes": torch.as_tensor(payload["target_spikes"])},
+    )
+    return _score_full_nlb_metrics(
+        target_path=target_h5,
+        dataset=dataset,
+        eval_rates_heldout=payload["eval_rates_heldout"],
+        eval_rates_heldin=payload["eval_rates_heldin"],
+        train_rates_heldout=payload["train_rates_heldout"],
+        train_rates_heldin=payload["train_rates_heldin"],
+        co_bps=float(direct["co_bps"]),
+        eval_rates_heldin_forward=payload.get("eval_rates_heldin_forward"),
+        eval_rates_heldout_forward=payload.get("eval_rates_heldout_forward"),
+    )
+
+
+def _make_unique_dir(base: Path) -> Path:
+    if not base.exists():
+        base.mkdir(parents=True)
+        return base
+    for index in range(1, 1000):
+        candidate = base.with_name(f"{base.name}_{index:03d}")
+        if not candidate.exists():
+            candidate.mkdir(parents=True)
+            return candidate
+    raise RuntimeError(f"Could not create unique run directory near {base}")
+
+
+def _write_ensemble_summary(output_dir: Path, rows: list[dict[str, Any]]) -> None:
+    serializable = rows
+    (output_dir / "ensemble_summary.json").write_text(
         json.dumps(serializable, indent=2, sort_keys=True) + "\n"
     )
 

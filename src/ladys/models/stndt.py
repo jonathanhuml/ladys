@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import math
 from typing import Any, Literal, Optional
 
@@ -728,9 +729,9 @@ class STNDT(BaseDynamicsModel):
             & ~replace_mask
         )
         if random_mask.any():
-            max_count = min(max(int(torch.ceil(x.max()).item()), 1), self.max_spike_count)
+            max_count = max(int(torch.ceil(masked_x.max()).item()), 1)
             random_spikes = torch.randint(
-                high=max_count + 1,
+                high=max_count,
                 size=x.shape,
                 device=x.device,
                 dtype=torch.long,
@@ -887,6 +888,8 @@ class STNDT(BaseDynamicsModel):
 
     def init_weights(self) -> None:
         initrange = 0.1
+        if self.linear_embedder and self.embed_dim != 0 and isinstance(self.embedder, nn.Linear):
+            self.embedder.weight.data.uniform_(-initrange, initrange)
         for embedder in (self.embedder, self.spatial_embedder):
             if isinstance(embedder, SpikeEmbedding):
                 if self.spike_log_init:
@@ -914,17 +917,9 @@ class STNDT(BaseDynamicsModel):
     def fixup_initialization(self) -> None:
         scale = 0.67 * (self.num_layers ** (-0.25))
         for layer in self.encoder.layers:
-            for module in (
-                layer.temporal_linear1,
-                layer.temporal_linear2,
-                layer.ts_linear1,
-                layer.ts_linear2,
-            ):
+            for module in (layer.temporal_linear1, layer.temporal_linear2):
                 module.weight.data.mul_(scale)
             layer.temporal_self_attn.out_proj.weight.data.mul_(scale)
-            layer.temporal_self_attn.in_proj_weight.data.mul_(scale)
-            layer.spatial_self_attn.out_proj.weight.data.mul_(scale)
-            layer.spatial_self_attn.in_proj_weight.data.mul_(scale)
 
     def _validate_input(self, x: Tensor) -> None:
         if x.ndim != 3:
@@ -995,20 +990,16 @@ class SpatiotemporalTransformerEncoder(nn.Module):
         scale_norm: bool,
     ) -> None:
         super().__init__()
-        self.layers = nn.ModuleList(
-            [
-                SpatiotemporalTransformerEncoderLayer(
-                    model_dim=model_dim,
-                    spatial_dim=spatial_dim,
-                    num_heads=num_heads,
-                    hidden_size=hidden_size,
-                    dropout=dropout,
-                    activation=activation,
-                    pre_norm=pre_norm,
-                )
-                for _ in range(num_layers)
-            ]
+        prototype = SpatiotemporalTransformerEncoderLayer(
+            model_dim=model_dim,
+            spatial_dim=spatial_dim,
+            num_heads=num_heads,
+            hidden_size=hidden_size,
+            dropout=dropout,
+            activation=activation,
+            pre_norm=pre_norm,
         )
+        self.layers = nn.ModuleList([deepcopy(prototype) for _ in range(num_layers)])
         self.norm: nn.Module
         if scale_norm:
             self.norm = ScaleNorm(model_dim**0.5)
@@ -1130,12 +1121,10 @@ class SpatiotemporalTransformerEncoderLayer(nn.Module):
             attn_mask=spatial_mask,
             need_weights=True,
         )
-        spatial_signal = spatial_out.permute(2, 1, 0)
-
         residual = src
         ts_src = self.ts_norm1(src) if self.pre_norm else src
         spatial_mix = torch.bmm(spatial_weights, ts_src.permute(1, 2, 0)).permute(2, 0, 1)
-        ts_out = residual + self.ts_dropout1(spatial_mix + spatial_signal)
+        ts_out = residual + self.ts_dropout1(spatial_mix)
         if not self.pre_norm:
             ts_out = self.ts_norm1(ts_out)
 

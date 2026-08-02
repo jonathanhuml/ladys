@@ -32,7 +32,7 @@ preprocessing:
     kern_sd_ms: 50.0
 
 trainer:
-  epochs: 20
+  epochs: 10
   batch_size: 64
   device: cuda
 

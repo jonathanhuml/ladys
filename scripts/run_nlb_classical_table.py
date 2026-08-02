@@ -32,6 +32,7 @@ from ladys.models.baselines import PSTH, PSTHConfig, SmoothingConfig
 from ladys.models.cassm import CASSM, CASSMConfig
 from ladys.models.gpfa import GPFAConfig
 from ladys.models.kalman import KalmanConfig
+from ladys.models.langevin_flow import LangevinFlowConfig
 from ladys.models.ndt import NDTConfig
 from ladys.preprocessing import PreprocessingConfig
 from ladys.training import Trainer, TrainerConfig
@@ -40,7 +41,7 @@ from ladys.types import move_batch_to_device, observations_from_batch
 
 
 DATASETS = ("area2_bump", "dmfc_rsg", "mc_maze", "mc_rtt")
-METHODS = ("cassm", "gpfa", "kalman", "ndt", "psth", "smoothing")
+METHODS = ("cassm", "gpfa", "kalman", "langevin_flow", "ndt", "psth", "smoothing")
 
 GPFA_LATENT_DIMS = {
     "area2_bump": 22,
@@ -121,6 +122,37 @@ NDT_SWEEP_DATASET_OVERRIDES = {
     },
 }
 
+LANGEVIN_FLOW_DATASET_OVERRIDES = {
+    "area2_bump": {
+        "gamma": 0.55,
+        "coordinated_dropout_rate": 0.4,
+        "lr": 3.0e-3,
+        "weight_decay": 2.0e-5,
+        "batch_size": 32,
+    },
+    "dmfc_rsg": {
+        "gamma": 0.7,
+        "coordinated_dropout_rate": 0.6,
+        "lr": 1.0e-3,
+        "weight_decay": 1.0e-5,
+        "batch_size": 64,
+    },
+    "mc_maze": {
+        "gamma": 0.55,
+        "coordinated_dropout_rate": 0.5,
+        "lr": 3.0e-3,
+        "weight_decay": 2.0e-5,
+        "batch_size": 64,
+    },
+    "mc_rtt": {
+        "gamma": 0.55,
+        "coordinated_dropout_rate": 0.3,
+        "lr": 3.0e-3,
+        "weight_decay": 2.0e-5,
+        "batch_size": 64,
+    },
+}
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -142,6 +174,16 @@ def main() -> int:
         default="sweep",
         help="NDT hyperparameter profile: official launch defaults or deterministic sweep-derived settings.",
     )
+    parser.add_argument("--ndt-dropout", type=float, default=None)
+    parser.add_argument("--ndt-dropout-rates", type=float, default=None)
+    parser.add_argument("--ndt-dropout-embedding", type=float, default=None)
+    parser.add_argument("--ndt-context-forward", type=int, default=None)
+    parser.add_argument("--ndt-context-backward", type=int, default=None)
+    parser.add_argument("--ndt-mask-token-ratio", type=float, default=None)
+    parser.add_argument("--ndt-mask-random-ratio", type=float, default=None)
+    parser.add_argument("--ndt-mask-max-span", type=int, default=None)
+    parser.add_argument("--ndt-lr", type=float, default=None)
+    parser.add_argument("--ndt-weight-decay", type=float, default=None)
     parser.add_argument(
         "--train-classical",
         action="store_true",
@@ -164,7 +206,29 @@ def main() -> int:
             "and save them in each run directory's epoch_nlb_metrics.csv."
         ),
     )
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=10,
+        help="print training progress every N epochs; 0 disables progress output",
+    )
     args = parser.parse_args()
+    ndt_cli_overrides = {
+        key: value
+        for key, value in {
+            "dropout": args.ndt_dropout,
+            "dropout_rates": args.ndt_dropout_rates,
+            "dropout_embedding": args.ndt_dropout_embedding,
+            "context_forward": args.ndt_context_forward,
+            "context_backward": args.ndt_context_backward,
+            "mask_token_ratio": args.ndt_mask_token_ratio,
+            "mask_random_ratio": args.ndt_mask_random_ratio,
+            "mask_max_span": args.ndt_mask_max_span,
+            "lr": args.ndt_lr,
+            "weight_decay": args.ndt_weight_decay,
+        }.items()
+        if value is not None
+    }
 
     output_dir = Path(args.output_dir or f"runs/nlb_classical_{args.epochs}epoch")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -189,6 +253,7 @@ def main() -> int:
                 device=args.device,
                 train_classical=args.train_classical,
                 ndt_profile=args.ndt_profile,
+                ndt_cli_overrides=ndt_cli_overrides,
                 cassm_ridge_alpha=args.cassm_ridge_alpha,
             )
             print(
@@ -200,6 +265,7 @@ def main() -> int:
                 config=config,
                 target_h5=Path(args.target_h5),
                 epoch_eval_every=args.epoch_eval_every,
+                progress_every=args.progress_every,
             )
             elapsed = time.perf_counter() - start
             rows.append(
@@ -227,6 +293,7 @@ def build_config(
     device: str,
     train_classical: bool,
     ndt_profile: str = "sweep",
+    ndt_cli_overrides: dict[str, Any] | None = None,
     cassm_ridge_alpha: float | None = None,
 ) -> ExperimentConfig:
     dataset_config = build_dataset_config(
@@ -237,6 +304,7 @@ def build_config(
             "split": "test",
             "bin_size_ms": 5,
             "max_trials": None,
+            "input_mode": "heldin",
         },
     )
 
@@ -325,11 +393,12 @@ def build_config(
         preprocessing = PreprocessingConfig(observations=None)
         batch_size = 4096
     elif method == "ndt":
-        overrides = (
+        overrides = dict(
             NDT_BASE_DATASET_OVERRIDES[dataset]
             if ndt_profile == "base"
             else NDT_SWEEP_DATASET_OVERRIDES[dataset]
         )
+        overrides.update(ndt_cli_overrides or {})
         warmup_steps = max(1, int(round(0.1 * epochs)))
         ramp_start = max(0, int(round(0.16 * epochs)))
         ramp_end = max(ramp_start + 1, int(round(0.24 * epochs)))
@@ -362,8 +431,8 @@ def build_config(
             optimization=OptimizationConfig(
                 name="gradient",
                 optimizer="AdamW" if ndt_profile == "sweep" else "Adam",
-                lr=1.0e-3,
-                weight_decay=5.0e-5,
+                lr=overrides.get("lr", 1.0e-3),
+                weight_decay=overrides.get("weight_decay", 5.0e-5),
                 gradient_clip=200.0,
                 lr_scheduler="warmup_cosine" if ndt_profile == "sweep" else None,
                 warmup_steps=warmup_steps,
@@ -373,6 +442,40 @@ def build_config(
         )
         preprocessing = PreprocessingConfig(observations=None)
         batch_size = 64
+    elif method == "langevin_flow":
+        overrides = LANGEVIN_FLOW_DATASET_OVERRIDES[dataset]
+        model = LangevinFlowConfig(
+            hidden_size=280,
+            output_mode="auto",
+            fwd_steps=0,
+            dropout=0.05,
+            gamma=overrides["gamma"],
+            langevin_step=0.01,
+            potential_groups=4,
+            potential_kernel_size=3,
+            transformer_heads=2,
+            transformer_feedforward=512,
+            coordinated_dropout_rate=overrides["coordinated_dropout_rate"],
+            kl_weight=0.1,
+            kl_warmup_epochs=500,
+            weight_decay_warmup_epochs=500,
+            velocity_prior_var=0.1,
+            prediction_samples=50,
+            optimization=OptimizationConfig(
+                name="gradient",
+                optimizer="Adam",
+                lr=overrides["lr"],
+                weight_decay=overrides["weight_decay"],
+                gradient_clip=200.0,
+                lr_scheduler="ReduceLROnPlateau",
+                scheduler_factor=0.95,
+                scheduler_patience=10,
+                scheduler_threshold=0.0,
+                scheduler_min_lr=1.0e-5,
+            ),
+        )
+        preprocessing = PreprocessingConfig(observations=None)
+        batch_size = int(overrides["batch_size"])
     elif method == "smoothing":
         model = SmoothingConfig(
             kern_sd_ms=50.0,
@@ -405,6 +508,7 @@ def run_and_score(
     config: ExperimentConfig,
     target_h5: Path,
     epoch_eval_every: int = 0,
+    progress_every: int = 10,
 ) -> dict[str, Any]:
     experiment = Experiment(config)
     experiment._set_seeds()
@@ -427,6 +531,11 @@ def run_and_score(
         train_loader=train_loader,
         valid_loader=None,
         epoch_metrics=epoch_metrics,
+        epoch_callback=_progress_callback(
+            dataset=str(config.dataset.name),
+            method=str(config.model.name),
+            progress_every=progress_every,
+        ),
     )
 
     full = evaluate_full_nlb(
@@ -445,6 +554,37 @@ def run_and_score(
         full=full,
     )
     return {"run_dir": result.run_dir, "metrics": full.full_metrics}
+
+
+def _progress_callback(
+    *,
+    dataset: str,
+    method: str,
+    progress_every: int,
+) -> Any:
+    progress_every = int(progress_every)
+
+    def callback(report: Any) -> None:
+        epoch = int(report.epoch) + 1
+        has_metrics = any(
+            isinstance(value, (int, float)) and math.isfinite(float(value))
+            for value in report.metrics.values()
+        )
+        if progress_every <= 0 and not has_metrics:
+            return
+        if progress_every > 0 and epoch % progress_every != 0 and not has_metrics:
+            return
+        metric_text = ""
+        if has_metrics:
+            metric_text = " metrics=" + json.dumps(report.metrics, sort_keys=True)
+        print(
+            f"{method} {dataset} epoch={epoch} "
+            f"loss={report.train.loss:.6g} seconds={report.seconds:.3g}"
+            f"{metric_text}",
+            flush=True,
+        )
+
+    return callback
 
 
 class PeriodicNLBMetricTracker:
@@ -633,7 +773,10 @@ def collect_heldin_rates(
             batch = move_batch_to_device(batch, device)
             x = observations_from_batch(batch)
             prediction = model.predict_rates(x)
-            rates.append(prediction[:, : x.shape[1], : x.shape[-1]].detach().cpu())
+            heldin = batch.get("heldin_spikes") if isinstance(batch, dict) else None
+            n_time = int(x.shape[1] if heldin is None else heldin.shape[1])
+            n_heldin = int(x.shape[-1] if heldin is None else heldin.shape[-1])
+            rates.append(prediction[:, :n_time, :n_heldin].detach().cpu())
     return torch.cat(rates, dim=0).numpy().astype(np.float32)
 
 
@@ -676,8 +819,9 @@ def collect_forward_rates(
                 return None, None
             x = observations_from_batch(batch)
             prediction = model.predict_rates(x)
-            n_time = int(x.shape[1])
-            n_heldin = int(x.shape[-1])
+            heldin = batch.get("heldin_spikes")
+            n_time = int(heldin.shape[1])
+            n_heldin = int(heldin.shape[-1])
             n_forward = int(batch["heldin_forward_spikes"].shape[1])
             n_heldout = int(batch["heldout_forward_spikes"].shape[-1])
             if prediction.shape[1] < n_time + n_forward:
@@ -844,6 +988,15 @@ def write_full_artifacts(*, run_dir: Path, dataset: str, full: FullNLBResult) ->
     else:
         metrics = {}
     metrics.update(full.full_metrics)
+    metrics["nlb_co_bps"] = float(full.full_metrics["co-bps"])
+    if "vel R2" in full.full_metrics:
+        metrics["nlb_vel_r2"] = float(full.full_metrics["vel R2"])
+    if "tp corr" in full.full_metrics:
+        metrics["nlb_tp_corr"] = float(full.full_metrics["tp corr"])
+    if "psth R2" in full.full_metrics:
+        metrics["nlb_psth_r2"] = float(full.full_metrics["psth R2"])
+    if "fp-bps" in full.full_metrics:
+        metrics["nlb_fp_bps"] = float(full.full_metrics["fp-bps"])
     _write_json(metrics_path, metrics)
 
 

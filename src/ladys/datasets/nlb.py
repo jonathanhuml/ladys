@@ -600,6 +600,8 @@ def _prepare_validation_h5(
             dataset_obj,
             dataset_name=dataset,
             trial_split=train_trial_split,
+            include_behavior=True,
+            include_forward_pred=True,
             save_file=True,
             save_path=str(train_h5),
         )

@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import torch
+
 from ladys.config import load_experiment_config
 from ladys.models.stndt import STNDTConfig
 from scripts.run_stndt_nlb_reproduction import _load_configs
@@ -109,6 +111,31 @@ def test_stndt_mask_span_ramp_uses_training_epoch():
     model.set_training_epoch(25)
     assert model._current_mask_span_expand_prob(contrast=False) == 1.0
     assert model._current_mask_span_expand_prob(contrast=True) == 1.0
+
+
+def test_stndt_upstream_initialization_parity():
+    torch.manual_seed(123)
+    model = STNDTConfig(
+        linear_embedder=True,
+        num_layers=3,
+        num_heads=4,
+        hidden_size=16,
+        dropout=0.0,
+        dropout_rates=0.0,
+        dropout_embedding=0.0,
+        do_contrast=False,
+    ).build(n_neurons=16, n_time=8)
+
+    assert torch.max(torch.abs(model.embedder.weight)).item() <= 0.1
+    first = model.encoder.layers[0]
+    second = model.encoder.layers[1]
+    for (first_name, first_param), (second_name, second_param) in zip(
+        first.named_parameters(),
+        second.named_parameters(),
+    ):
+        assert first_name == second_name
+        assert first_param.data_ptr() != second_param.data_ptr()
+        assert torch.equal(first_param, second_param)
 
 
 def test_obsolete_stndt_experiment_configs_are_absent():

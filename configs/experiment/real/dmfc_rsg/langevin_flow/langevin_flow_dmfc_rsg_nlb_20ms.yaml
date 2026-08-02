@@ -3,6 +3,7 @@ dataset:
   split: test
   bin_size_ms: 20
   data_path: data/real/nlb/dmfc_rsg_test_20ms.h5
+  input_mode: heldin
 
 model:
   name: langevin_flow

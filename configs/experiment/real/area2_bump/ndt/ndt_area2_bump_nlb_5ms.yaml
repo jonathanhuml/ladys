@@ -3,6 +3,7 @@ dataset:
   split: test
   bin_size_ms: 5
   data_path: data/real/nlb/area2_bump_test_5ms.h5
+  input_mode: heldin
 
 model:
   name: ndt
@@ -39,8 +40,8 @@ model:
   mask_random_ratio: 0.95
   mask_max_span: 5
   mask_span_expand_prob: 0.0
-  mask_span_ramp_start: 3
-  mask_span_ramp_end: 5
+  mask_span_ramp_start: 1072
+  mask_span_ramp_end: 1608
   use_zero_mask: true
   topk_loss_fraction: 1.0
   nlb_decoder: direct
@@ -51,19 +52,19 @@ model:
     weight_decay: 5.0e-5
     gradient_clip: 200.0
     lr_scheduler: warmup_cosine
-    warmup_steps: 2
-    total_steps: 20
+    warmup_steps: 670
+    total_steps: 6700
     scheduler_step: epoch
 
 preprocessing:
   observations: null
 
 trainer:
-  epochs: 20
+  epochs: 1750
   batch_size: 64
-  device: cpu
+  device: cuda
 
 experiment:
-  output_dir: runs
+  output_dir: runs/ndt_nlb_reproduction
   run_name: ndt_area2_bump_nlb_5ms
   save_predictions: true

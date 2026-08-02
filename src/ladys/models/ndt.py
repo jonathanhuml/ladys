@@ -135,10 +135,18 @@ class NDTConfig(BaseModelConfig):
                     raise RuntimeError("DataModule.setup() must run before build_from_data().")
                 heldout = getattr(train_dataset, "raw_spikes", None)
                 if heldout is not None:
-                    output_neurons = n_neurons + int(heldout.shape[-1])
+                    heldin = getattr(train_dataset, "heldin_spikes", None)
+                    if heldin is not None and n_neurons >= int(heldin.shape[-1]) + int(
+                        heldout.shape[-1]
+                    ):
+                        output_neurons = n_neurons
+                    else:
+                        output_neurons = n_neurons + int(heldout.shape[-1])
+                    dataset_config = getattr(train_dataset, "config", None)
+                    include_forward = bool(getattr(dataset_config, "include_forward", False))
                     heldin_forward = getattr(train_dataset, "heldin_forward_spikes", None)
                     heldout_forward = getattr(train_dataset, "heldout_forward_spikes", None)
-                    if heldin_forward is not None and heldout_forward is not None:
+                    if include_forward and heldin_forward is not None and heldout_forward is not None:
                         fwd_steps = fwd_steps or int(heldin_forward.shape[1])
                 elif self.output_mode == "heldin_heldout":
                     raise ValueError(
@@ -694,7 +702,6 @@ class NDT(BaseDynamicsModel):
             module.linear1.weight.data.mul_(scale)
             module.linear2.weight.data.mul_(scale)
             module.self_attn.out_proj.weight.data.mul_(scale)
-            module.self_attn.in_proj_weight.data.mul_(scale)
 
 
 class NDTNLBAdapter(EvaluationAdapter):
@@ -719,7 +726,8 @@ class NDTNLBAdapter(EvaluationAdapter):
                     raise TypeError("NLB evaluation requires heldout_spikes in dict batches.")
                 rates = model.predict_rates(x)
                 target = batch["heldout_spikes"]
-                n_heldin = x.shape[-1]
+                heldin = batch.get("heldin_spikes")
+                n_heldin = x.shape[-1] if heldin is None else heldin.shape[-1]
                 n_heldout = target.shape[-1]
                 pred = rates[:, : target.shape[1], n_heldin : n_heldin + n_heldout]
                 if pred.shape != target.shape:

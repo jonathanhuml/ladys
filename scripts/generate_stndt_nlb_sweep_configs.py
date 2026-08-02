@@ -129,14 +129,23 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=100)
     parser.add_argument(
         "--input-mode",
-        choices=["heldin", "full_observed"],
-        help="Override dataset.input_mode in generated configs.",
+        choices=["heldin"],
+        help="Override dataset.input_mode in generated configs. Upstream STNDT NLB uses held-in inputs.",
     )
     parser.add_argument(
         "--include-hand-points",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Include a few deterministic boundary/focused candidates.",
+    )
+    parser.add_argument(
+        "--include-base",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Include the unmodified upstream-base LaDyS YAML as a parity candidate. "
+            "Upstream Ray HPO samples from the JSON space and does not require this fixed run."
+        ),
     )
     args = parser.parse_args()
 
@@ -147,6 +156,8 @@ def main() -> int:
         rng = random.Random(args.seed + stable_offset(dataset))
         base = load_yaml(ROOT / BASE_CONFIGS[dataset])
         candidates: list[tuple[str, dict[str, Any]]] = []
+        if args.include_base:
+            candidates.append(("upstream_base", {}))
         if args.include_hand_points:
             candidates.extend(hand_points(dataset))
         for index in range(args.num_random):
