@@ -741,6 +741,66 @@ def test_ndt_nlb_adapter_scores_direct_heldout_slice(tmp_path: Path):
     assert np.isfinite(result.metrics["co_bps"])
 
 
+def test_ndt_nlb_direct_output_allows_padded_head_dimension(tmp_path: Path):
+    path = tmp_path / "ndt_nlb_padded.h5"
+    rng = np.random.default_rng(44)
+    train_heldin = rng.poisson(0.5, size=(5, 6, 3)).astype(np.float32)
+    train_heldout = rng.poisson(0.4, size=(5, 6, 2)).astype(np.float32)
+    eval_heldin = rng.poisson(0.5, size=(2, 6, 3)).astype(np.float32)
+    eval_heldout = rng.poisson(0.4, size=(2, 6, 2)).astype(np.float32)
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset("train_spikes_heldin", data=train_heldin)
+        handle.create_dataset("train_spikes_heldout", data=train_heldout)
+        handle.create_dataset("eval_spikes_heldin", data=eval_heldin)
+        handle.create_dataset("eval_spikes_heldout", data=eval_heldout)
+
+    config = NLBDatasetConfig(name="mc_maze", data_path=str(path), bin_size_ms=5)
+    train_ds, valid_ds = NLBDataset.make_splits(config)
+    data = type(
+        "Data",
+        (),
+        {
+            "n_neurons": train_ds.spikes.shape[-1],
+            "n_time": train_ds.spikes.shape[1],
+            "train_dataset": train_ds,
+        },
+    )()
+    model = NDTConfig(
+        output_neurons=train_heldin.shape[-1] + train_heldout.shape[-1] + 1,
+        hidden_size=18,
+        num_layers=1,
+        num_heads=2,
+        dropout=0.0,
+        dropout_rates=0.0,
+        dropout_embedding=0.0,
+        embed_dim=0,
+    ).build_from_data(data)
+    batch = next(iter(DataLoader(train_ds, batch_size=2)))
+    output = model(batch["spikes"])
+    target = model._reconstruction_target(batch, output.extras["log_rates"])
+    loss_mask = model._loss_mask_for_target(batch, output, target)
+    padded_target, padded_mask = model._pad_target_and_mask_to_rates(
+        target,
+        loss_mask,
+        output.extras["log_rates"],
+    )
+
+    assert output.rates.shape[-1] == train_heldin.shape[-1] + train_heldout.shape[-1] + 1
+    assert padded_target.shape == output.rates.shape
+    assert not padded_mask[..., -1].any()
+    assert model.loss(batch, output).total.ndim == 0
+
+    result = evaluate_model(
+        model,
+        DataLoader(valid_ds, batch_size=2),
+        train_loader=DataLoader(train_ds, batch_size=5),
+    )
+
+    assert result.predictions["rates"].shape == eval_heldout.shape
+    assert result.targets["spikes"].shape == eval_heldout.shape
+    assert np.isfinite(result.metrics["co_bps"])
+
+
 def test_lfads_nlb_adapter_scores_direct_heldout_slice(tmp_path: Path):
     path = tmp_path / "lfads_nlb.h5"
     rng = np.random.default_rng(0)

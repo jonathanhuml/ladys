@@ -45,6 +45,7 @@ class AllenVCNDatasetConfig(BaseModel):
     max_valid_trials: Optional[int] = Field(default=None, ge=1)
     input_key: str = "spikes"
     target_key: str = "heldout_spikes"
+    seed: Optional[int] = None
 
     @model_validator(mode="after")
     def _resolve_group(self) -> "AllenVCNDatasetConfig":
@@ -214,4 +215,3 @@ def _decode_attr(value: object) -> object:
     if isinstance(value, np.generic):
         return value.item()
     return value
-

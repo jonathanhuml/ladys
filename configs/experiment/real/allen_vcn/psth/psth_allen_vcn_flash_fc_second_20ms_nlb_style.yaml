@@ -1,0 +1,23 @@
+dataset:
+  name: allen_vcn_flash_fc_second
+  data_path: data/real/allen_vcn/allen_vcn_low_trial_20ms.h5
+  group: flash_fc_second
+model:
+  name: psth
+  objective: psth_poisson_nll
+  kern_sd_ms: 70.0
+  bin_size_ms: 20.0
+  prediction_floor: 1.0e-09
+  optimization:
+    name: inference_only
+preprocessing:
+  observations: null
+trainer:
+  epochs: 0
+  batch_size: 4096
+  device: cpu
+  live_eval_interval: 0
+experiment:
+  output_dir: runs/allen_vcn_nlb_style_20260805_tuned_core_v2
+  run_name: psth_allen_vcn_flash_fc_second_20ms_nlb_style
+  save_predictions: true

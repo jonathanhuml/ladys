@@ -1,0 +1,55 @@
+[bo_drifting_one_tf] smoothing=0.154388398
+  lfads          co_bps= 0.408057511 margin= 0.253669113 beats
+  gpfa           co_bps= 0.316891491 margin= 0.162503094 beats
+  langevin_flow  co_bps= 0.315385252 margin= 0.160996854 beats
+  stndt          co_bps= 0.300509661 margin= 0.146121264 beats
+  ndt            co_bps= 0.295484543 margin= 0.141096145 beats
+  ilqr_vae       co_bps= 0.294352055 margin= 0.139963657 beats
+  bgpfa          co_bps= 0.236615926 margin= 0.082227528 beats
+  mint           co_bps= 0.209550604 margin= 0.055162206 beats
+  cassm          co_bps= 0.159229740 margin= 0.004841343 beats
+  kalman         co_bps= 0.156951532 margin= 0.002563134 beats
+  smoothing      co_bps= 0.154388398 margin= 0.000000000 beats
+  psth           co_bps=-0.003873721 margin=-0.158262119 miss
+
+[flash_bo_top] smoothing=0.134547204
+  lfads          co_bps= 0.309757769 margin= 0.175210565 beats
+  stndt          co_bps= 0.262516648 margin= 0.127969444 beats
+  langevin_flow  co_bps= 0.254346550 margin= 0.119799346 beats
+  gpfa           co_bps= 0.241302594 margin= 0.106755391 beats
+  ndt            co_bps= 0.215524077 margin= 0.080976874 beats
+  ilqr_vae       co_bps= 0.172813267 margin= 0.038266063 beats
+  bgpfa          co_bps= 0.171838686 margin= 0.037291482 beats
+  cassm          co_bps= 0.143925935 margin= 0.009378731 beats
+  mint           co_bps= 0.140794441 margin= 0.006247237 beats
+  kalman         co_bps= 0.137165234 margin= 0.002618030 beats
+  smoothing      co_bps= 0.134547204 margin= 0.000000000 beats
+  psth           co_bps= 0.013247435 margin=-0.121299769 miss
+
+[flash_fc_second] smoothing=0.107614532
+  lfads          co_bps= 0.254519045 margin= 0.146904513 beats
+  stndt          co_bps= 0.216642633 margin= 0.109028101 beats
+  mint           co_bps= 0.211624905 margin= 0.104010373 beats
+  gpfa           co_bps= 0.176691845 margin= 0.069077313 beats
+  langevin_flow  co_bps= 0.166943118 margin= 0.059328586 beats
+  ndt            co_bps= 0.163044363 margin= 0.055429831 beats
+  ilqr_vae       co_bps= 0.131085083 margin= 0.023470551 beats
+  kalman         co_bps= 0.117899276 margin= 0.010284744 beats
+  cassm          co_bps= 0.114817455 margin= 0.007202923 beats
+  bgpfa          co_bps= 0.110162660 margin= 0.002548128 beats
+  smoothing      co_bps= 0.107614532 margin= 0.000000000 beats
+  psth           co_bps=-0.021340422 margin=-0.128954954 miss
+
+[flash_fc_top] smoothing=0.096705653
+  lfads          co_bps= 0.196211204 margin= 0.099505551 beats
+  mint           co_bps= 0.193506509 margin= 0.096800856 beats
+  ndt            co_bps= 0.180039957 margin= 0.083334304 beats
+  gpfa           co_bps= 0.145357579 margin= 0.048651926 beats
+  langevin_flow  co_bps= 0.140507370 margin= 0.043801717 beats
+  bgpfa          co_bps= 0.130256191 margin= 0.033550538 beats
+  stndt          co_bps= 0.114459567 margin= 0.017753914 beats
+  ilqr_vae       co_bps= 0.109754182 margin= 0.013048530 beats
+  kalman         co_bps= 0.101698116 margin= 0.004992463 beats
+  cassm          co_bps= 0.098968618 margin= 0.002262965 beats
+  smoothing      co_bps= 0.096705653 margin= 0.000000000 beats
+  psth           co_bps=-0.042572852 margin=-0.139278505 miss

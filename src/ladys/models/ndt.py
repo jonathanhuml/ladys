@@ -404,6 +404,11 @@ class NDT(BaseDynamicsModel):
             dtype=output.rates.dtype,
         )
         mask = self._loss_mask_for_target(batch, output, target)
+        target, mask = self._pad_target_and_mask_to_rates(
+            target,
+            mask,
+            output.extras["log_rates"],
+        )
 
         if self.lograte:
             log_rates = output.extras["log_rates"].to(device=target.device, dtype=target.dtype)
@@ -541,6 +546,33 @@ class NDT(BaseDynamicsModel):
             if target.shape[1] > self.n_time:
                 mask[:, self.n_time :, :] = True
         return mask
+
+    @staticmethod
+    def _pad_target_and_mask_to_rates(
+        target: Tensor,
+        mask: Tensor,
+        rates: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        if target.shape == rates.shape:
+            return target, mask
+        if target.ndim != rates.ndim:
+            raise ValueError(
+                f"NDT target rank {target.ndim} is incompatible with rates rank {rates.ndim}."
+            )
+        if target.shape[0] != rates.shape[0]:
+            raise ValueError(
+                f"NDT target batch {target.shape[0]} is incompatible with rates batch {rates.shape[0]}."
+            )
+        if target.shape[1] > rates.shape[1] or target.shape[-1] > rates.shape[-1]:
+            raise ValueError(
+                f"NDT target shape {tuple(target.shape)} is larger than rates {tuple(rates.shape)}."
+            )
+
+        time_pad = rates.shape[1] - target.shape[1]
+        neuron_pad = rates.shape[-1] - target.shape[-1]
+        target = F.pad(target, (0, neuron_pad, 0, time_pad), value=0.0)
+        mask = F.pad(mask, (0, neuron_pad, 0, time_pad), value=False)
+        return target, mask
 
     def _build_decoder(self) -> nn.Module:
         if self.decoder_layers == 1:

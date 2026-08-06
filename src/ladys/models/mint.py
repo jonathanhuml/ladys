@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import combinations
+import json
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Literal, Mapping, Optional, Sequence, Tuple
 
@@ -211,6 +212,7 @@ class MINTConfig(BaseModelConfig):
         "mc_maze",
         "mc_rtt",
         "lorenz",
+        "allen_vcn",
     ] = "mc_maze"
     train_source: Literal["h5", "lfads", "mat", "nwb"] = "nwb"
     train_split: Literal["auto", "train", "trainval"] = "trainval"
@@ -223,9 +225,17 @@ class MINTConfig(BaseModelConfig):
     n_candidates: Optional[int] = None
     window_length: Optional[int] = None
     delta: Optional[int] = None
+    interp: Optional[int] = None
+    interp_within_trajectories: Optional[bool] = None
+    allen_condition_mode: Literal["condition_id", "trial_index"] = "condition_id"
+    allen_library_source: Literal["spikes", "lfads_checkpoint"] = "spikes"
+    allen_lfads_run_dir: Optional[str] = None
     sigma: Optional[int] = None
     min_rate: Optional[float] = None
     causal: Optional[bool] = None
+    n_neural_dims: Optional[int] = None
+    n_cond_dims: Optional[int] = None
+    n_trial_dims: Optional[int] = None
     lfads_epochs: int = 25
     lfads_batch_size: int = 16
     lfads_train_bin_size: int = 1
@@ -334,12 +344,24 @@ class MINT(BaseDynamicsModel):
             self.hyperparams.window_length = int(self.config.window_length)
         if self.config.delta is not None:
             self.hyperparams.Delta = int(self.config.delta)
+        if self.config.interp is not None:
+            self.hyperparams.interp = int(self.config.interp)
+        if self.config.interp_within_trajectories is not None:
+            self.hyperparams.interp_within_trajectories = bool(
+                self.config.interp_within_trajectories
+            )
         if self.config.sigma is not None:
             self.hyperparams.sigma = int(self.config.sigma)
         if self.config.min_rate is not None:
             self.hyperparams.min_rate = float(self.config.min_rate)
         if self.config.causal is not None:
             self.hyperparams.causal = bool(self.config.causal)
+        if self.config.n_neural_dims is not None:
+            self.hyperparams.n_neural_dims = int(self.config.n_neural_dims)
+        if self.config.n_cond_dims is not None:
+            self.hyperparams.n_cond_dims = int(self.config.n_cond_dims)
+        if self.config.n_trial_dims is not None:
+            self.hyperparams.n_trial_dims = int(self.config.n_trial_dims)
 
     def _refresh_runtime_params(self) -> None:
         """Refresh derived tensors after config/hyperparameter overrides."""
@@ -449,6 +471,15 @@ class MINT(BaseDynamicsModel):
             total=torch.zeros((), dtype=torch.float32, device=self.device),
             objective=self.objective,
         )
+
+    def evaluation_adapter(self, task: str):
+        if task == "nlb" and getattr(self.config, "dataset", None) == "allen_vcn":
+            return _MINTAllenVCNAdapter(
+                condition_mode=self.config.allen_condition_mode,
+                library_source=self.config.allen_library_source,
+                lfads_run_dir=self.config.allen_lfads_run_dir,
+            )
+        return None
 
     def predict_spike_trials(
         self,
@@ -810,6 +841,162 @@ class MINT(BaseDynamicsModel):
         return x, z, lam, alpha
 
 
+class _MINTAllenVCNAdapter:
+    """Fit a full-neuron Allen VCN MINT library and score held-out neurons."""
+
+    task = "nlb"
+
+    def __init__(
+        self,
+        condition_mode: str = "condition_id",
+        library_source: str = "spikes",
+        lfads_run_dir: str | None = None,
+    ) -> None:
+        if condition_mode not in {"condition_id", "trial_index"}:
+            raise ValueError(f"Unsupported Allen VCN MINT condition mode: {condition_mode}")
+        if library_source not in {"spikes", "lfads_checkpoint"}:
+            raise ValueError(f"Unsupported Allen VCN MINT library source: {library_source}")
+        self.condition_mode = condition_mode
+        self.library_source = library_source
+        self.lfads_run_dir = lfads_run_dir
+
+    def fit(self, model: BaseDynamicsModel, loader, device: torch.device) -> None:
+        if not isinstance(model, MINT):
+            raise TypeError("_MINTAllenVCNAdapter requires a MINT model.")
+        full_trials: list[Tensor] = []
+        heldin_trials: list[Tensor] = []
+        conditions: list[int] = []
+        with torch.no_grad():
+            for batch in loader:
+                full = batch.get("full_spikes") if isinstance(batch, dict) else None
+                if full is None:
+                    raise KeyError("Allen VCN MINT requires full_spikes in training batches.")
+                full = full.to(device=device, dtype=TORCH_DTYPE)
+                heldin = batch.get("heldin_spikes") if isinstance(batch, dict) else None
+                if heldin is None:
+                    heldin = batch.get("spikes") if isinstance(batch, dict) else None
+                if heldin is None:
+                    raise KeyError("Allen VCN MINT requires held-in spikes in training batches.")
+                heldin = heldin.to(device=device, dtype=TORCH_DTYPE)
+                cond = batch.get("condition_id") if isinstance(batch, dict) else None
+                cond_values = cond.reshape(-1) if cond is not None else None
+                for idx, (trial, heldin_trial) in enumerate(zip(full, heldin)):
+                    full_trials.append(trial.T.contiguous())
+                    heldin_trials.append(heldin_trial.contiguous())
+                    if self.condition_mode == "trial_index" or cond_values is None:
+                        conditions.append(len(full_trials) - 1)
+                    else:
+                        conditions.append(int(cond_values[idx].item()))
+        if not full_trials:
+            raise RuntimeError("Allen VCN MINT received no training trials.")
+        if self.library_source == "lfads_checkpoint":
+            rate_trials = self._lfads_rate_trials(
+                heldin_trials,
+                n_time=int(full_trials[0].shape[1]),
+                n_full=int(full_trials[0].shape[0]),
+                device=device,
+            )
+            previous_source = model.settings.lorenz_library_source
+            model.settings.lorenz_library_source = "true_rates"
+            try:
+                model.fit_library(full_trials, rate_trials, conditions)
+            finally:
+                model.settings.lorenz_library_source = previous_source
+            return
+        model.fit_library(full_trials, full_trials, conditions)
+
+    def _lfads_rate_trials(
+        self,
+        heldin_trials: Sequence[Tensor],
+        *,
+        n_time: int,
+        n_full: int,
+        device: torch.device,
+    ) -> list[Tensor]:
+        if self.lfads_run_dir is None:
+            raise ValueError("Allen VCN MINT lfads_checkpoint source requires allen_lfads_run_dir.")
+        from ladys.models.base import BaseModelConfig
+
+        run_dir = Path(self.lfads_run_dir)
+        config_path = run_dir / "config.json"
+        checkpoint_path = run_dir / "best_model.pt"
+        if not checkpoint_path.exists():
+            checkpoint_path = run_dir / "model.pt"
+        if not config_path.exists() or not checkpoint_path.exists():
+            raise FileNotFoundError(
+                f"Missing LFADS config/checkpoint in {run_dir} for Allen VCN MINT library."
+            )
+        config = json.loads(config_path.read_text())
+        model_config = BaseModelConfig.from_dict(config["model"])
+        n_heldin = int(heldin_trials[0].shape[-1])
+        lfads = model_config.build(n_neurons=n_heldin, n_time=n_time).to(device)
+        state = torch.load(checkpoint_path, map_location=device)
+        lfads.load_state_dict(state)
+        lfads.eval()
+        dt = float(getattr(lfads, "dt", 1.0))
+        rates: list[Tensor] = []
+        with torch.no_grad():
+            for start in range(0, len(heldin_trials), 16):
+                batch = torch.stack(list(heldin_trials[start : start + 16]), dim=0).to(
+                    device=device,
+                    dtype=torch.float32,
+                )
+                pred = lfads.predict_rates(batch)
+                if pred.shape[-1] != n_full:
+                    raise ValueError(
+                        f"LFADS library predicted {pred.shape[-1]} neurons, expected {n_full}."
+                    )
+                count_rates = (pred * dt).to(dtype=TORCH_DTYPE)
+                rates.extend([trial.T.contiguous() for trial in count_rates])
+        return rates
+
+    def evaluate(self, model: BaseDynamicsModel, loader, device: torch.device):
+        if not isinstance(model, MINT):
+            raise TypeError("_MINTAllenVCNAdapter requires a MINT model.")
+        from ladys.metrics import EvaluationResult, compute_available_metrics
+
+        predictions: list[Tensor] = []
+        targets: list[Tensor] = []
+        with torch.no_grad():
+            for batch in loader:
+                if not isinstance(batch, dict):
+                    raise TypeError("Allen VCN MINT evaluation requires dict batches.")
+                heldin = batch["heldin_spikes"].to(device=device, dtype=TORCH_DTYPE)
+                heldout = batch["heldout_spikes"].to(device=device, dtype=TORCH_DTYPE)
+                zeros = torch.zeros_like(heldout)
+                full_query = torch.cat([heldin, zeros], dim=-1)
+                n_heldin = int(heldin.shape[-1])
+                n_heldout = int(heldout.shape[-1])
+                mask = torch.zeros(n_heldin + n_heldout, dtype=torch.bool, device=device)
+                mask[:n_heldin] = True
+                trials = [trial.T.contiguous() for trial in full_query]
+                rates, _ = model.predict_spike_trials(
+                    trials,
+                    likelihood_neuron_mask=mask,
+                    verbose=False,
+                )
+                pred = torch.stack(
+                    [item[n_heldin : n_heldin + n_heldout].T for item in rates],
+                    dim=0,
+                )
+                pred = torch.nan_to_num(
+                    pred,
+                    nan=1.0e-9,
+                    posinf=1.0e6,
+                    neginf=1.0e-9,
+                ).clamp_min(1.0e-9)
+                predictions.append(pred.detach().cpu())
+                targets.append(heldout.detach().cpu())
+        pred_dict = {"rates": torch.cat(predictions, dim=0)}
+        target_dict = {"spikes": torch.cat(targets, dim=0)}
+        metrics = compute_available_metrics(pred_dict, target_dict)
+        return EvaluationResult(
+            metrics=metrics,
+            predictions={key: value.numpy() for key, value in pred_dict.items()},
+            targets={key: value.numpy() for key, value in target_dict.items()},
+        )
+
+
 def get_mint_config(dataset: str) -> Tuple[Settings, HyperParams]:
     settings = Settings(
         task=dataset,
@@ -892,6 +1079,22 @@ def get_mint_config(dataset: str) -> Tuple[Settings, HyperParams]:
         hp.Delta = 1
         hp.window_length = 6
         hp.n_candidates = 4
+        hp.causal = False
+        hp.interp_within_trajectories = False
+        hp.n_neural_dims = None
+        hp.n_cond_dims = None
+        hp.n_trial_dims = None
+    elif dataset == "allen_vcn":
+        settings.Ts = 0.02
+        settings.trial_alignment = range(0, 100)
+        settings.test_alignment = range(0, 100)
+        hp.trajectories_alignment = range(0, 100)
+        hp.min_lambda = 1e-3
+        hp.sigma = 2
+        hp.Delta = 1
+        hp.window_length = 6
+        hp.n_candidates = 4
+        hp.interp = 0
         hp.causal = False
         hp.interp_within_trajectories = False
         hp.n_neural_dims = None
@@ -1651,7 +1854,7 @@ def fit_trajectories(S, Z, condition, settings, hyperparams):
         vel, labels = preprocess_behavior(Z, settings)
         rates = [item[4:] * settings.Ts * hyperparams.Delta for item in Z]
         return rates, vel, labels
-    if settings.task in {"chaotic_rnn", "lorenz"}:
+    if settings.task in {"chaotic_rnn", "lorenz", "allen_vcn"}:
         source = getattr(settings, "lorenz_library_source", "smoothed_spikes")
         if source == "true_rates":
             rate_trials = [item.to(TORCH_DTYPE) for item in Z]

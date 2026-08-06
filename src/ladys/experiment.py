@@ -83,7 +83,9 @@ class Experiment:
         self.data.setup()
         model = self.build_model()
         strategy = build_strategy(self.config.model.optimization)
-        train_loader = self.data.train_loader()
+        train_loader = self.data.train_loader(
+            shuffle=not bool(getattr(strategy, "requires_ordered_training_data", False))
+        )
         valid_loader = self.data.valid_loader()
 
         run_dir = self._make_run_dir()

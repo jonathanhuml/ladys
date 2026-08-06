@@ -5,14 +5,15 @@ from __future__ import annotations
 import importlib
 import math
 import numpy as np
-from typing import Any, Literal, Optional
+from typing import Any, Iterable, Literal, Optional
 
 import torch
 from pydantic import Field, model_validator
 from torch import Tensor
 
+from ladys.metrics import EvaluationResult, NLBCoSmoothingAdapter
 from ladys.models.base import BaseDynamicsModel, BaseModelConfig, OptimizationConfig
-from ladys.types import LossOutput, ModelOutput, observations_from_batch
+from ladys.types import LossOutput, ModelOutput, move_batch_to_device, observations_from_batch
 
 
 @BaseModelConfig.register
@@ -33,6 +34,16 @@ class BGPFAConfig(BaseModelConfig):
     learn_scale: bool = False
     ard: bool = True
     dtype: Literal["float64", "float32"] = "float64"
+    latent_init: Literal["gp_prior", "fa"] = "gp_prior"
+    observation_init: Literal["mgplvm", "fa"] = "mgplvm"
+    nlb_feature_source: Literal["latents", "rates", "reconstruction"] = "latents"
+    nlb_decoder: Literal["ridge", "poisson"] = "poisson"
+    nlb_ridge_alpha: float = 1.0e-2
+    nlb_poisson_max_iter: int = 80
+    nlb_latent_infer_steps: int = 300
+    nlb_latent_infer_n_mc: int = 20
+    nlb_latent_infer_lr: float = 1e-1
+    nlb_latent_infer_burnin: int = 1
     optimization: OptimizationConfig = Field(
         default_factory=lambda: OptimizationConfig(
             name="mgplvm_full_batch_gradient",
@@ -70,6 +81,16 @@ class BGPFAConfig(BaseModelConfig):
             learn_scale=self.learn_scale,
             ard=self.ard,
             dtype=self.dtype,
+            latent_init=self.latent_init,
+            observation_init=self.observation_init,
+            nlb_feature_source=self.nlb_feature_source,
+            nlb_decoder=self.nlb_decoder,
+            nlb_ridge_alpha=self.nlb_ridge_alpha,
+            nlb_poisson_max_iter=self.nlb_poisson_max_iter,
+            nlb_latent_infer_steps=self.nlb_latent_infer_steps,
+            nlb_latent_infer_n_mc=self.nlb_latent_infer_n_mc,
+            nlb_latent_infer_lr=self.nlb_latent_infer_lr,
+            nlb_latent_infer_burnin=self.nlb_latent_infer_burnin,
             objective=self.objective,
         )
 
@@ -118,6 +139,16 @@ class BGPFA(BaseDynamicsModel):
         learn_scale: bool = False,
         ard: bool = True,
         dtype: Literal["float64", "float32"] = "float64",
+        latent_init: str = "gp_prior",
+        observation_init: str = "mgplvm",
+        nlb_feature_source: str = "latents",
+        nlb_decoder: str = "poisson",
+        nlb_ridge_alpha: float = 1.0e-2,
+        nlb_poisson_max_iter: int = 80,
+        nlb_latent_infer_steps: int = 300,
+        nlb_latent_infer_n_mc: int = 20,
+        nlb_latent_infer_lr: float = 1e-1,
+        nlb_latent_infer_burnin: int = 1,
         objective: str = "negative_elbo",
     ) -> None:
         super().__init__()
@@ -135,6 +166,16 @@ class BGPFA(BaseDynamicsModel):
         self.learn_scale = bool(learn_scale)
         self.ard = bool(ard)
         self.dtype = dtype
+        self.latent_init = str(latent_init)
+        self.observation_init = str(observation_init)
+        self.nlb_feature_source = str(nlb_feature_source)
+        self.nlb_decoder = str(nlb_decoder)
+        self.nlb_ridge_alpha = float(nlb_ridge_alpha)
+        self.nlb_poisson_max_iter = int(nlb_poisson_max_iter)
+        self.nlb_latent_infer_steps = int(nlb_latent_infer_steps)
+        self.nlb_latent_infer_n_mc = int(nlb_latent_infer_n_mc)
+        self.nlb_latent_infer_lr = float(nlb_latent_infer_lr)
+        self.nlb_latent_infer_burnin = int(nlb_latent_infer_burnin)
         self.objective = objective
 
         fit_ts = torch.arange(self.n_time, dtype=self._torch_dtype())[None, None, :]
@@ -191,6 +232,20 @@ class BGPFA(BaseDynamicsModel):
             },
             objective=self.objective,
         )
+
+    def evaluation_adapter(self, task: str):
+        if task == "nlb":
+            return _BGPFANLBCoSmoothingAdapter(
+                feature_source=self.nlb_feature_source,
+                decoder=self.nlb_decoder,
+                ridge_alpha=self.nlb_ridge_alpha,
+                poisson_max_iter=self.nlb_poisson_max_iter,
+                latent_infer_steps=self.nlb_latent_infer_steps,
+                latent_infer_n_mc=self.nlb_latent_infer_n_mc,
+                latent_infer_lr=self.nlb_latent_infer_lr,
+                latent_infer_burnin=self.nlb_latent_infer_burnin,
+            )
+        return None
 
     def _model_for(self, x: Tensor) -> torch.nn.Module:
         x = self._coerce_observations(x)
@@ -293,7 +348,66 @@ class BGPFA(BaseDynamicsModel):
             ard=self.ard,
             rel_scale=self.rho,
         )
-        return mod.to(device=x.device, dtype=x.dtype)
+        mod = mod.to(device=x.device, dtype=x.dtype)
+        if self.latent_init not in {"gp_prior", "fa"}:
+            raise ValueError(f"Unsupported bGPFA latent_init '{self.latent_init}'.")
+        if self.observation_init not in {"mgplvm", "fa"}:
+            raise ValueError(f"Unsupported bGPFA observation_init '{self.observation_init}'.")
+        if self.latent_init == "fa" or self.observation_init == "fa":
+            self._initialize_from_fa(mod, y_np, x.device, x.dtype)
+        return mod
+
+    def _initialize_from_fa(
+        self,
+        mod: torch.nn.Module,
+        y_np: Any,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> None:
+        from sklearn import decomposition
+
+        n_trials, n_neurons, n_time = y_np.shape
+        flat = np.asarray(y_np, dtype=np.float64).transpose(0, 2, 1).reshape(
+            n_trials * n_time,
+            n_neurons,
+        )
+        components = min(self.latent_dim, n_neurons, flat.shape[0])
+        if components < 1:
+            return
+        fa = decomposition.FactorAnalysis(n_components=components)
+        scores = fa.fit_transform(flat)
+        loadings = np.asarray(fa.components_.T, dtype=np.float64)
+        scale = np.std(scores, axis=0, keepdims=True)
+        score_scale = 0.5 / np.maximum(scale, 1.0e-6)
+        scores = scores * score_scale
+        loadings = loadings / score_scale
+        if components < self.latent_dim:
+            padded = np.zeros((scores.shape[0], self.latent_dim), dtype=np.float64)
+            padded[:, :components] = scores
+            scores = padded
+            padded_loadings = np.zeros((n_neurons, self.latent_dim), dtype=np.float64)
+            padded_loadings[:, :components] = loadings
+            loadings = padded_loadings
+        latents = scores.reshape(n_trials, n_time, self.latent_dim)
+        nu = torch.as_tensor(
+            latents.transpose(0, 2, 1),
+            dtype=dtype,
+            device=device,
+        )
+        with torch.no_grad():
+            if self.latent_init == "fa":
+                mod.lat_dist._nu.copy_(nu)
+            if self.observation_init == "fa" and hasattr(mod.obs, "_q_mu"):
+                obs = mod.obs
+                effective_scale = (
+                    obs.neuron_scale.detach()
+                    * obs.scale.detach().reshape(1, 1)
+                    * obs.dim_scale.detach().reshape(1, -1)
+                )
+                q_mu = torch.as_tensor(loadings, dtype=dtype, device=device) / effective_scale.clamp_min(
+                    1.0e-8
+                )
+                obs._q_mu.copy_(q_mu.unsqueeze(0))
 
     def _build_likelihood(self, mgp: Any, x: Tensor, y_np: Any) -> torch.nn.Module:
         if self.likelihood == "gaussian":
@@ -352,6 +466,62 @@ class BGPFA(BaseDynamicsModel):
             raise ValueError(f"Expected {self.n_time} time bins, got {int(x.shape[1])}.")
         if int(x.shape[2]) != self.n_neurons:
             raise ValueError(f"Expected {self.n_neurons} neurons, got {int(x.shape[2])}.")
+
+
+class _BGPFANLBCoSmoothingAdapter(NLBCoSmoothingAdapter):
+    """NLB adapter that infers eval-trial bGPFA latents before decoding."""
+
+    def __init__(
+        self,
+        *,
+        feature_source: str,
+        decoder: str,
+        ridge_alpha: float,
+        poisson_max_iter: int,
+        latent_infer_steps: int,
+        latent_infer_n_mc: int,
+        latent_infer_lr: float,
+        latent_infer_burnin: int,
+    ) -> None:
+        super().__init__(
+            feature_source=feature_source,
+            decoder=decoder,
+            ridge_alpha=ridge_alpha,
+            poisson_max_iter=poisson_max_iter,
+        )
+        self.latent_infer_steps = int(latent_infer_steps)
+        self.latent_infer_n_mc = int(latent_infer_n_mc)
+        self.latent_infer_lr = float(latent_infer_lr)
+        self.latent_infer_burnin = int(latent_infer_burnin)
+
+    def evaluate(
+        self,
+        model: BaseDynamicsModel,
+        loader: Iterable,
+        device: torch.device,
+    ) -> EvaluationResult:
+        if isinstance(model, BGPFA):
+            self._infer_eval_latents(model, loader, device)
+        return super().evaluate(model, loader, device)
+
+    def _infer_eval_latents(
+        self,
+        model: "BGPFA",
+        loader: Iterable,
+        device: torch.device,
+    ) -> None:
+        model.to(device)
+        model.eval()
+        for batch in loader:
+            batch = move_batch_to_device(batch, device)
+            x = observations_from_batch(batch)
+            model.infer_latents(
+                x,
+                max_steps=self.latent_infer_steps,
+                n_mc=self.latent_infer_n_mc,
+                lrate=self.latent_infer_lr,
+                burnin=self.latent_infer_burnin,
+            )
 
 
 def _require_mgplvm() -> Any:

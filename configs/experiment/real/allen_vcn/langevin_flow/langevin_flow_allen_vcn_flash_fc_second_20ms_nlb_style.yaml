@@ -1,0 +1,52 @@
+dataset:
+  name: allen_vcn_flash_fc_second
+  data_path: data/real/allen_vcn/allen_vcn_low_trial_20ms.h5
+  group: flash_fc_second
+model:
+  name: langevin_flow
+  objective: langevin_flow_elbo
+  hidden_size: 280
+  initialization: ladys
+  output_mode: auto
+  fwd_steps: 0
+  dropout: 0.05
+  gamma: 0.55
+  langevin_step: 0.01
+  potential_groups: 4
+  potential_kernel_size: 3
+  transformer_heads: 2
+  transformer_feedforward: 512
+  coordinated_dropout_rate: 0.5
+  kl_weight: 0.1
+  kl_warmup_epochs: 500
+  weight_decay_warmup_epochs: 500
+  velocity_prior_var: 0.1
+  log_rate_min: -8.0
+  log_rate_max: 8.0
+  posterior_logvar_min: -9.210340371976182
+  posterior_logvar_max: 5.0
+  sample_train: true
+  sample_eval: false
+  prediction_samples: 50
+  optimization:
+    name: gradient
+    optimizer: Adam
+    lr: 0.003
+    weight_decay: 2.0e-05
+    gradient_clip: 200.0
+    lr_scheduler: ReduceLROnPlateau
+    scheduler_factor: 0.95
+    scheduler_patience: 10
+    scheduler_threshold: 0.0
+    scheduler_min_lr: 1.0e-05
+preprocessing:
+  observations: null
+trainer:
+  epochs: 500
+  batch_size: 64
+  device: cuda
+  live_eval_interval: 250
+experiment:
+  output_dir: runs/allen_vcn_nlb_style_20260805_tuned_core_v2
+  run_name: langevin_flow_allen_vcn_flash_fc_second_20ms_nlb_style
+  save_predictions: true

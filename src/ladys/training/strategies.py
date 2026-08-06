@@ -22,6 +22,7 @@ from ladys.types import LossOutput, StepResult, move_batch_to_device, observatio
 
 class OptimizationStrategy(ABC):
     name: str
+    requires_ordered_training_data = False
 
     def setup(self, model: BaseDynamicsModel) -> None:
         """Initialize optimizer state."""
@@ -320,6 +321,7 @@ class MgplvmFullBatchGradientStrategy(OptimizationStrategy):
     """Full-batch gradient strategy matching mgplvm's SVGP optimizer loop."""
 
     name = "mgplvm_full_batch_gradient"
+    requires_ordered_training_data = True
 
     def __init__(
         self,
