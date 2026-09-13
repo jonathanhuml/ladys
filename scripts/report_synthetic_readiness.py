@@ -103,7 +103,7 @@ def render(root):
                 ax.set_title(model_label(method))
                 style_axis(ax)
             axes[0, 0].legend(fontsize=9)
-            fig.supxlabel("Time (dataset exposure units)")
+            fig.supxlabel("Time bin")
             fig.supylabel("Firing rate (Hz)")
             fig.suptitle(f"{label}: held-out trial 0, neuron 0, final fitted model")
             save_figure(fig, root / f"{dataset}_rate_traces.png")
@@ -118,6 +118,11 @@ def render(root):
              "and 100 inference steps / 5 Monte Carlo samples for bGPFA validation. "
              "MINT instead fits libraries with 1, 2, 3, then 4 training repeats per condition. "
              "PSTH and smoothing are noniterative baselines.", "",
+             "Existing model-specific experiment recipes are used where present; missing "
+             "recipes fall back to generic defaults. These are not matched tuning budgets. "
+             "For example, LangevinFlow's Lorenz recipe averages 50 posterior predictions, "
+             "whereas its chaotic-RNN default uses one prediction. Resolved configurations "
+             "and source snapshots are retained for interpreting these differences.", "",
              "LangevinFlow uses the explicit `current` encoder alignment, matching "
              "[paper Algorithm 1](https://arxiv.org/html/2507.11531v2). "
              "The released code's lagged-input behavior remains available as `upstream_lagged`. "

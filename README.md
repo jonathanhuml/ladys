@@ -9,29 +9,84 @@ models of neural population dynamics through a shared PyTorch API.
 
 ## Models
 
-- bGPFA
-- CASSM
-- GPFA
-- iLQR-VAE
-- Kalman filter
-- LangevinFlow
-- LFADS
-- MINT
-- NDT
-- PSTH
-- Gaussian smoothing
-- STNDT
+| Model (CLI name) | Citation | Description |
+| --- | --- | --- |
+| bGPFA (`bgpfa`) | [Jensen et al., 2021](https://proceedings.neurips.cc/paper/2021/hash/58238e9ae2dd305d79c2ebc8c1883422-Abstract.html) | Bayesian Gaussian process factor analysis with automatic relevance determination, scalable variational inference, and support for non-Gaussian observation noise. |
+| CASSM (`cassm`) | [Huml et al., 2026](https://arxiv.org/abs/2606.01468) | Learns low-dimensional projections for Kalman filtering while accounting for uncertainty introduced by approximate computation. |
+| GPFA (`gpfa`) | [Yu et al., 2009](https://doi.org/10.1152/jn.90941.2008) | Combines temporal smoothing and dimensionality reduction in a probabilistic model with Gaussian process latent trajectories. |
+| iLQR-VAE (`ilqr_vae`) | [Schimel et al., 2022](https://openreview.net/forum?id=wRODLDHaAiW) | Sequential variational autoencoder that uses iterative linear quadratic regulation to infer latent dynamics, initial conditions, and external inputs. |
+| Kalman filter (`kalman`) | [Kalman, 1960](https://doi.org/10.1115/1.3662552) | Exact inference in linear Gaussian state-space models; the LaDyS implementation uses Matérn dynamics to represent smooth neural trajectories. |
+| LangevinFlow (`langevin_flow`) | [Song et al., 2025](https://arxiv.org/abs/2507.11531) | Sequential variational autoencoder with underdamped Langevin latent dynamics and a learned potential built from locally coupled oscillators. |
+| LFADS (`lfads`) | [Pandarinath et al., 2018](https://doi.org/10.1038/s41592-018-0109-9) | Recurrent sequential variational autoencoder that infers single-trial neural dynamics, initial conditions, and time-varying inputs. |
+| MINT (`mint`) | [Perkins et al., 2025](https://elifesciences.org/articles/89421) | Matches observed spikes to a learned library of neural trajectories using Poisson likelihoods and interpolation. |
+| NDT (`ndt`) | [Ye & Pandarinath, 2021](https://doi.org/10.51628/001c.27358) | Transformer that learns neural activity representations by reconstructing masked spike counts with temporal self-attention. |
+| PSTH (`psth`) | [Palmer & Ashby, 1992](https://pubmed.ncbi.nlm.nih.gov/20870522/) | Estimates event-aligned firing rates by averaging spike counts across repeated trials within each condition. |
+| Gaussian smoothing (`smoothing`) | [Shimazaki & Shinomoto, 2007](https://doi.org/10.1162/neco.2007.19.6.1503) (histogram binning) | Estimates firing rates by convolving spike counts with a Gaussian kernel of configurable width. |
+| STNDT (`stndt`) | [Le & Shlizerman, 2022](https://arxiv.org/abs/2206.04727) | Extends NDT with attention across both time and neurons, combining masked modeling with contrastive learning. |
 
 ## Quickstart
 
-With LaDyS installed, run a Lorenz experiment on CPU:
+From the repository root, with LaDyS and a CUDA-enabled PyTorch installation,
+train GPFA on synthetic Lorenz data:
 
 ```bash
-ladys run -d lorenz -m gpfa --epochs 20 --device cpu
+ladys run -d lorenz -m gpfa --device cuda \
+  --epochs 20 --batch-size 8 --live-eval-interval 5 \
+  --run-name gpfa_lorenz
 ```
 
-The experiment saves its configuration, fitted model, metrics, and predictions
-under `runs/`.
+This generates data locally, reports training and validation losses, and
+evaluates reconstruction metrics every five epochs. Each run saves its resolved
+configuration, learning history, fitted model, metrics, and predictions under
+`runs/`.
+
+Use a YAML recipe to specify the full experiment, with CLI overrides for the
+device and training budget:
+
+```bash
+ladys run -c configs/experiment/synthetic/lorenz/gpfa/gpfa_lorenz.yaml \
+  --device cuda --epochs 20
+```
+
+## Capabilities
+
+Use the same interface for synthetic Lorenz and chaotic-RNN experiments, NLB
+benchmarks, and prepared Allen VCN or CTD datasets.
+
+| Task | Command |
+| --- | --- |
+| Discover available models and datasets | `ladys list models` / `ladys list datasets` |
+| Train and evaluate a configured experiment | `ladys run -c experiment.yaml --device cuda` |
+| Search hyperparameters with Ray Tune | `ladys tune -c study.yaml` |
+| Continue an interrupted tuning study | `ladys tune --resume-from studies/my_study` |
+| Download and prepare NLB validation data | `ladys prepare-nlb --datasets mc_maze --splits val --bin-sizes-ms 5 --download` |
+| Score saved NLB predictions | `ladys score-nlb --run-dir runs/my_nlb_run` |
+
+Use `ladys --help` or `ladys <command> --help` for options. Tuning supports random
+search and Optuna TPE, repeated training seeds, and validation-based selection;
+see the [tuning guide](website/docs/tuning.md) for installation and study recipes.
+
+## Python API
+
+`ExperimentConfig` combines dataset, model, preprocessing, and trainer settings.
+Model configs build PyTorch modules, `DataModule` prepares data and batches, and
+`Experiment` handles training, evaluation, and saved results. Python and the CLI
+use the same experiment configuration and execution path:
+
+```python
+from ladys import Experiment
+
+experiment = Experiment.from_config_path(
+    "configs/experiment/synthetic/lorenz/gpfa/gpfa_lorenz.yaml"
+)
+experiment.config.trainer.device = "cuda"
+result = experiment.run()
+print(result.metrics)
+```
+
+`Study` adds a search space and validation objective to an experiment config.
+It runs trials through Ray Tune and exports `best_config.yaml`, which can be
+run through the ordinary `Experiment` API or `ladys run` command.
 
 ## Learn more
 

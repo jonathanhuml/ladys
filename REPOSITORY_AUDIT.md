@@ -115,7 +115,7 @@ tested. Final diagnostic curves use the current-bin mode; the earlier lagged
 fits are archived separately. The corrected KL also intentionally differs
 from the released code's variance/log-variance arguments.
 
-Final verification: **424 passed, 6 skipped locally; 429 passed, 1 skipped on
+Final verification: **425 passed, 6 skipped locally; 430 passed, 1 skipped on
 HAL**, including CUDA checks. All 24 method/dataset jobs completed, with 40
 epochs for the nine iterative methods, four MINT library fits, and one point
 for each fixed baseline. The slowest fit took about 109 seconds. These counts
