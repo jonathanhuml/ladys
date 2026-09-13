@@ -33,7 +33,7 @@ preprocessing:
   observations: null
 
 trainer:
-  epochs: 1
+  epochs: 100
   batch_size: 1
   device: cpu
 

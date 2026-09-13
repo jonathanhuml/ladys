@@ -56,11 +56,12 @@ fitted library and neuron layout.
 
 Config for the MINT trajectory-library decoder.
 
-Training fits trajectory templates by smoothing and averaging training
-trials, optionally after training an LFADS rate estimator. This statistical
-fit uses `optimization.name="library_fit"` and one training epoch
-(`trainer.epochs=1`). The epoch learns the complete library and reports
-training and validation Poisson negative log likelihood.
+The default `train_source="h5"` estimates trajectories from training
+spikes by smoothing and averaging, using one library-fitting epoch.
+With `train_source="lfads"`, each `trainer.epochs` iteration trains the
+rate estimator for one pass and updates the trajectory library. Both
+paths use `optimization.name="library_fit"` and report training and
+validation Poisson negative log likelihood.
 
 Prepared NLB H5 tensors are the default input. Neuron dimensions and sample
 intervals come from the dataset; condition metadata, when available, groups
@@ -68,8 +69,12 @@ training trials. `train_source="lfads"` trains LFADS from those same spikes
 before fitting templates. Explicit NWB/MAT sources retain the original
 task-specific reproduction adapters.
 
+`Experiment` uses `trainer.epochs` as its training budget. The model field
+`lfads_epochs` controls the direct `fit_training_data` helper and legacy
+reproduction runners only.
+
 For synthetic Lorenz and chaotic-RNN tasks, LaDyS builds the MINT trajectory
-library from repeated training trials. The default
+library from repeated training trials. With `train_source="h5"`, the default
 `lorenz_library_source="smoothed_spikes"` estimates library rates by
 Gaussian-smoothing training spikes and averaging by condition.
 `lorenz_library_source="true_rates"` is an oracle sanity-check mode only

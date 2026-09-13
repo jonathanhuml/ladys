@@ -31,14 +31,23 @@ def test_mint_nlb_experiment_configs_load():
     assert all(config.model.mat_data_root is None for config in configs)
     assert all(config.model.target_h5 is None for config in configs)
     assert all(config.model.optimization.name == "library_fit" for config in configs)
-    assert all(config.trainer.epochs == 1 for config in configs)
+    assert [config.trainer.epochs for config in configs] == [1, 1, 100, 1, 100]
 
 
-def test_mint_lorenz_recipe_trains_for_one_epoch():
+def test_mint_lorenz_recipe_trains_trajectories_for_50_epochs():
     config = load_experiment_config("configs/experiment/synthetic/lorenz/mint/mint_lorenz_100.yaml")
-    assert config.trainer.epochs == 1
+    assert config.trainer.epochs == 50
     assert config.model.optimization.name == "library_fit"
-    assert config.model.lorenz_library_source == "smoothed_spikes"
+    assert config.model.train_source == "lfads"
+    assert config.model.lfads_epochs == 50
+
+
+def test_mint_python_and_yaml_defaults_use_training_spikes():
+    from ladys.utils.yaml import load_yaml
+
+    for config in [MINTConfig(), MINTConfig.model_validate(load_yaml("configs/model/mint.yaml"))]:
+        assert config.train_source == "h5"
+        assert config.lorenz_library_source == "smoothed_spikes"
 
 
 def test_mint_dmfc_uses_paper_trajectory_defaults():

@@ -232,87 +232,144 @@ def _load_lfads_training_data(
     return rate_S, Z, condition
 
 
+class _MINTLFADSTrainer:
+    """Persistent rate estimator and optimizer for MINT's training epochs."""
+
+    def __init__(self, mint_model: MINT):
+        self.mint_model = mint_model
+        self.cfg = mint_model.config
+        self.estimator = None
+        self.optimizer = None
+        self.spikes = None
+        self.trials = None
+        self.conditions = None
+        self.shape = None
+        self.epochs_completed = 0
+        self.final_loss = None
+
+    def _initialize(self, n_neurons: int, n_time: int, device) -> None:
+        cfg = self.cfg
+        torch.manual_seed(cfg.lfads_seed)
+        estimator_config = LFADSConfig(
+            generator_dim=cfg.lfads_generator_dim,
+            factor_dim=cfg.lfads_factor_dim,
+            inferred_input_dim=cfg.lfads_inferred_input_dim,
+            g0_encoder_dim=cfg.lfads_encoder_dim,
+            controller_encoder_dim=cfg.lfads_encoder_dim,
+            controller_dim=cfg.lfads_controller_dim,
+            keep_prob=cfg.lfads_keep_prob,
+            dt=self.mint_model.settings.Ts * max(1, cfg.lfads_train_bin_size),
+            optimization={"name": "gradient", "optimizer": "Adam", "lr": cfg.lfads_lr},
+        )
+        self.estimator = estimator_config.build(n_neurons=n_neurons, n_time=n_time).to(device)
+        self.optimizer = torch.optim.Adam(self.estimator.parameters(), lr=cfg.lfads_lr)
+        self.shape = (n_neurons, n_time)
+
+    def prepare(self, trials: list[torch.Tensor], device) -> None:
+        if not trials:
+            raise ValueError("MINT trajectory training requires nonempty training trials.")
+        train_bin_size = max(1, int(self.cfg.lfads_train_bin_size))
+        n_neurons, n_time = trials[0].shape
+        if n_time % train_bin_size:
+            raise ValueError("lfads_train_bin_size must divide the training trajectory length.")
+        binned = [bin_data(trial, train_bin_size, "sum").T if train_bin_size > 1 else trial.T
+                  for trial in trials]
+        self.spikes = torch.stack(binned).to(device=device, dtype=torch.float32)
+        self.spikes = torch.nan_to_num(self.spikes, nan=0.0, posinf=0.0, neginf=0.0)
+        self.trials = trials
+        shape = (n_neurons, self.spikes.shape[1])
+        if self.estimator is None:
+            self._initialize(*shape, device)
+        elif shape != self.shape:
+            raise ValueError("MINT trajectory training dimensions differ from its checkpoint.")
+
+    def optimize_epoch(self, epoch: int) -> float:
+        if self.spikes is None or self.estimator is None or self.optimizer is None:
+            raise RuntimeError("MINT trajectory training data has not been prepared.")
+        self.estimator.train()
+        batch_size = max(1, int(self.cfg.lfads_batch_size))
+        permutation = torch.randperm(self.spikes.shape[0], device=self.spikes.device)
+        dt = self.spikes.new_tensor(self.mint_model.settings.Ts * max(1, self.cfg.lfads_train_bin_size))
+        epoch_loss = 0.0
+        for start in range(0, self.spikes.shape[0], batch_size):
+            batch_x = self.spikes.index_select(0, permutation[start:start + batch_size])
+            batch = {"spikes": batch_x, "dt": dt.expand(batch_x.shape[0])}
+            loss = self.estimator.loss(batch, self.estimator(batch_x), epoch=epoch)
+            self.optimizer.zero_grad(set_to_none=True)
+            loss.total.backward()
+            torch.nn.utils.clip_grad_norm_(self.estimator.parameters(), 200.0)
+            self.optimizer.step()
+            epoch_loss += float(loss.total.detach().cpu()) * batch_x.shape[0]
+        self.final_loss = epoch_loss / self.spikes.shape[0]
+        self.epochs_completed = epoch + 1
+        self.mint_model.library_training.update(
+            lfads_epochs=self.epochs_completed, lfads_seed=self.cfg.lfads_seed,
+            lfads_final_loss=self.final_loss,
+        )
+        return self.final_loss
+
+    def rate_trials(self) -> list[torch.Tensor]:
+        self.estimator.eval()
+        batch_size = max(1, int(self.cfg.lfads_batch_size))
+        with torch.no_grad():
+            rates_hz = torch.cat([
+                self.estimator.predict_rates(self.spikes[start:start + batch_size])
+                for start in range(0, self.spikes.shape[0], batch_size)
+            ])
+        counts = rates_hz * float(self.mint_model.settings.Ts * self.mint_model.Delta)
+        train_bin_size = max(1, int(self.cfg.lfads_train_bin_size))
+        if train_bin_size > 1:
+            counts = counts.repeat_interleave(train_bin_size, dim=1)
+        return [trial.T.to(dtype=TORCH_DTYPE).contiguous() for trial in counts]
+
+    def train_epoch(self, loader, epoch: int, device) -> dict[str, float]:
+        from ladys.training.checkpoint import evaluation_rng
+
+        if self.spikes is None:
+            trials, _, self.conditions = self.mint_model._library_training_inputs(loader, device=device)
+            self.prepare(trials, device)
+        loss = self.optimize_epoch(epoch)
+        # Updating the library must not perturb the next epoch's training RNG.
+        with evaluation_rng(self.cfg.lfads_seed, str(device)):
+            rates = self.rate_trials()
+        self.mint_model.settings.library_rate_source = "prepared_rates"
+        self.mint_model.fit_library(self.trials, rates, self.conditions)
+        self.mint_model.library_training.update(
+            source="lfads", trials=len(self.trials), trajectories=len(self.mint_model.Omega_plus),
+        )
+        return {"trajectory_loss": loss}
+
+    def state_dict(self) -> dict[str, Any]:
+        if self.estimator is None:
+            return {}
+        return {
+            "shape": self.shape, "estimator": self.estimator.state_dict(),
+            "optimizer": self.optimizer.state_dict(), "epochs_completed": self.epochs_completed,
+            "final_loss": self.final_loss,
+        }
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        self._initialize(*state["shape"], self.mint_model.device)
+        self.estimator.load_state_dict(state["estimator"])
+        self.optimizer.load_state_dict(state["optimizer"])
+        self.epochs_completed = state["epochs_completed"]
+        self.final_loss = state["final_loss"]
+
+
 def _fit_lfads_rate_trials(
     S: list[torch.Tensor],
     mint_model: MINT,
     cfg: MINTConfig,
     device: torch.device,
 ) -> list[torch.Tensor]:
-    if not S:
-        raise ValueError("LFADS rate estimation received no MINT training trials.")
-
-    n_neurons, n_time = S[0].shape
-    train_bin_size = max(1, int(cfg.lfads_train_bin_size))
-    if train_bin_size > 1:
-        binned_trials = [bin_data(trial, train_bin_size, "sum").T for trial in S]
-        lfads_dt = mint_model.settings.Ts * train_bin_size
-    else:
-        binned_trials = [trial.T for trial in S]
-        lfads_dt = mint_model.settings.Ts
-    spikes = torch.stack([trial.to(dtype=torch.float32) for trial in binned_trials], dim=0)
-    spikes = torch.nan_to_num(spikes, nan=0.0, posinf=0.0, neginf=0.0).to(device)
-
     if cfg.lfads_epochs < 1:
         raise ValueError("MINT LFADS library fitting requires lfads_epochs >= 1.")
-    if n_time % train_bin_size:
-        raise ValueError("lfads_train_bin_size must divide the training trajectory length.")
-    torch.manual_seed(cfg.lfads_seed)
-    lfads_cfg = LFADSConfig(
-        generator_dim=cfg.lfads_generator_dim,
-        factor_dim=cfg.lfads_factor_dim,
-        inferred_input_dim=cfg.lfads_inferred_input_dim,
-        g0_encoder_dim=cfg.lfads_encoder_dim,
-        controller_encoder_dim=cfg.lfads_encoder_dim,
-        controller_dim=cfg.lfads_controller_dim,
-        keep_prob=cfg.lfads_keep_prob,
-        dt=lfads_dt,
-        optimization={"name": "gradient", "optimizer": "Adam", "lr": cfg.lfads_lr},
-    )
-    lfads = lfads_cfg.build(n_neurons=n_neurons, n_time=spikes.shape[1]).to(device)
-    optimizer = torch.optim.Adam(lfads.parameters(), lr=cfg.lfads_lr)
-    batch_size = max(1, int(cfg.lfads_batch_size))
-    dt = torch.as_tensor(lfads_dt, dtype=torch.float32, device=device)
-
-    for epoch in range(max(0, int(cfg.lfads_epochs))):
-        lfads.train()
-        permutation = torch.randperm(spikes.shape[0], device=device)
-        epoch_loss = 0.0
-        epoch_items = 0
-        for start in range(0, spikes.shape[0], batch_size):
-            idx = permutation[start : start + batch_size]
-            batch_x = spikes.index_select(0, idx)
-            batch = {
-                "spikes": batch_x,
-                "dt": dt.expand(batch_x.shape[0]),
-            }
-            output = lfads(batch_x)
-            loss = lfads.loss(batch, output, epoch=epoch)
-            optimizer.zero_grad(set_to_none=True)
-            loss.total.backward()
-            torch.nn.utils.clip_grad_norm_(lfads.parameters(), 200.0)
-            optimizer.step()
-            epoch_loss += float(loss.total.detach().cpu()) * int(batch_x.shape[0])
-            epoch_items += int(batch_x.shape[0])
-        if epoch_items:
-            mean_loss = epoch_loss / epoch_items
-            print(f"LFADS library epoch {epoch + 1}/{cfg.lfads_epochs}: loss={mean_loss:.6g}", flush=True)
-
-    lfads.eval()
-    rate_batches = []
-    with torch.no_grad():
-        for start in range(0, spikes.shape[0], batch_size):
-            batch_x = spikes[start : start + batch_size]
-            rate_batches.append(lfads.predict_rates(batch_x).detach().cpu())
-    rates_hz = torch.cat(rate_batches, dim=0)
-    mint_model.library_training.update(lfads_epochs=cfg.lfads_epochs, lfads_seed=cfg.lfads_seed, lfads_final_loss=mean_loss)
-    expected_counts = rates_hz * float(mint_model.settings.Ts * mint_model.hyperparams.Delta)
-    if train_bin_size > 1:
-        expected_counts = expected_counts.repeat_interleave(train_bin_size, dim=1)
-        expected_counts = expected_counts[:, :n_time]
-    return [
-        expected_counts[trial].T.to(dtype=TORCH_DTYPE, device=device).contiguous()
-        for trial in range(expected_counts.shape[0])
-    ]
+    trainer = _MINTLFADSTrainer(mint_model)
+    trainer.prepare(S, device)
+    for epoch in range(cfg.lfads_epochs):
+        loss = trainer.optimize_epoch(epoch)
+        print(f"MINT trajectory epoch {epoch + 1}/{cfg.lfads_epochs}: loss={loss:.6g}", flush=True)
+    return trainer.rate_trials()
 
 
 def _experiment_h5_path(config: ExperimentConfig) -> Path:

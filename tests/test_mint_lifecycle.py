@@ -183,6 +183,71 @@ def test_mint_loss_measures_raw_count_likelihood():
     assert loss.named_terms["poisson_nll"] == loss.total
 
 
+def _iterative_lorenz_config(tmp_path, epochs=3):
+    return ExperimentConfig(
+        dataset=LorenzDatasetConfig(neurons=3, num_inits=2, num_trials=4,
+                                    num_steps=8, burn_steps=4, seed=0),
+        model=MINTConfig(dataset="lorenz", train_source="lfads", lfads_epochs=99,
+                         lfads_batch_size=2, lfads_generator_dim=4, lfads_factor_dim=3,
+                         lfads_encoder_dim=4, lfads_controller_dim=4,
+                         delta=1, window_length=2, interp=0),
+        trainer=TrainerConfig(epochs=epochs, live_eval_interval=1),
+        preprocessing=PreprocessingConfig(), batch_size=2,
+        output_dir=str(tmp_path), save_training_state=True, evaluation_seed=0,
+    )
+
+
+def test_iterative_mint_budget_updates_weights_and_library_each_epoch(tmp_path):
+    config = _iterative_lorenz_config(tmp_path)
+    experiment = Experiment(config)
+    snapshots = []
+    libraries = []
+
+    def snapshot(report):
+        if not report.final:
+            saved = torch.load(report.checkpoint_path, weights_only=True)
+            snapshots.append(saved["strategy"]["library_trainer"])
+            libraries.append([x.clone() for x in experiment.model.Omega_plus])
+
+    result = experiment.run(callback=snapshot)
+    assert result.completed_epochs == len(result.history) == len(snapshots) == 3
+    assert experiment.model.library_training["lfads_epochs"] == 3
+    assert experiment.model.library_training["trials"] == 6
+    for index, state in enumerate(snapshots, start=1):
+        assert state["epochs_completed"] == index
+        assert {int(item["step"]) for item in state["optimizer"]["state"].values()} == {3 * index}
+    for previous, current in zip(snapshots, snapshots[1:]):
+        assert any(not torch.equal(previous["estimator"][key], current["estimator"][key])
+                   for key in current["estimator"])
+    for previous, current in zip(libraries, libraries[1:]):
+        assert any(not torch.equal(a, b) for a, b in zip(previous, current))
+    assert all(np.isfinite(report.train.metrics["trajectory_loss"]) for report in result.history)
+    assert all(np.isfinite(report.valid.loss) for report in result.history)
+
+
+def test_iterative_mint_resume_preserves_optimizer_and_predictions(tmp_path):
+    config = _iterative_lorenz_config(tmp_path)
+    uninterrupted = Experiment(config).run()
+    interrupted = Experiment(config).run(callback=lambda report: report.final or report.epoch != 1)
+    assert interrupted.completed_epochs == 1
+    resumed = Experiment(config).run(resume_from=interrupted.run_dir / "training_state.pt")
+    assert resumed.completed_epochs == len(resumed.history) == 3
+    assert [report.train.loss for report in resumed.history] == [report.train.loss for report in uninterrupted.history]
+    with np.load(uninterrupted.predictions_path) as first, np.load(resumed.predictions_path) as second:
+        np.testing.assert_array_equal(first["pred_rates"], second["pred_rates"])
+
+
+def test_direct_mint_fit_retains_legacy_rate_training_budget(tmp_path):
+    config = _iterative_lorenz_config(tmp_path)
+    config.model.lfads_epochs = 2
+    experiment = Experiment(config)
+    model = experiment.build_model()
+    model.fit_training_data(experiment.data.train_loader(), device="cpu")
+    assert model.library_training["lfads_epochs"] == 2
+    assert model.library_training["source"] == "lfads"
+    assert np.isfinite(model.library_training["lfads_final_loss"])
+
+
 def test_delta_counts_conversion_preserves_constant_training_intensity(tmp_path):
     experiment, model = _nlb_experiment(tmp_path)
     model.config.sigma = 0

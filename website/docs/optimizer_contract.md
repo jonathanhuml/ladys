@@ -19,14 +19,20 @@ negative log likelihood and runs one standard PyTorch backward/optimizer step.
 The older full-dataset EM adapter remains available by setting
 `optimization.name: em`.
 
-Library methods use `optimization.name: library_fit` and `trainer.epochs: 1`.
-Their training epoch calls `model.fit_training_data(train_loader, device=device)`
-to learn the complete library, then records training and validation losses.
-MINT learns trajectory templates in this epoch, including optional LFADS rate
-estimation. PSTH learns its training-trial average. A larger epoch budget still
-completes after this full-data fit; zero epochs are rejected. Fitted state
-survives checkpoint restoration and device moves, and resuming a completed
-library fit does not retrain it.
+Library methods use `optimization.name: library_fit`. With MINT's
+`train_source: lfads`, each epoch trains the rate estimator for one full pass
+and updates the trajectory library. `trainer.epochs` controls the number of
+these updates. Training history records MINT's training and validation Poisson
+losses and the estimator's objective under `train_metrics.trajectory_loss`.
+Resumable checkpoints include estimator weights and optimizer state; fitted
+model checkpoints include the library needed for inference.
+
+MINT's default `train_source: h5` and PSTH estimate a statistical library
+directly. They use one full-data fitting epoch, calling
+`model.fit_training_data(train_loader, device=device)`, followed by training
+and validation loss measurement. Zero-epoch library training is rejected.
+The model field `lfads_epochs` is retained for direct fitting helpers and
+legacy reproduction runners; standard experiments use `trainer.epochs`.
 
 The reporting contract is shared across strategies: every epoch returns a
 `StepResult`, and benchmark plots use `seconds_per_epoch`. The benchmark

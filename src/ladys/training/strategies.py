@@ -588,11 +588,26 @@ class InferenceOnlyStrategy(OptimizationStrategy):
 
 
 class LibraryFitStrategy(OptimizationStrategy):
-    """Learn a complete library in one recorded training epoch."""
+    """Train a trajectory estimator or fit a statistical library directly."""
 
     name = "library_fit"
     fits_training_data_in_epoch = True
-    max_epochs = 1
+
+    def setup(self, model: BaseDynamicsModel) -> None:
+        factory = getattr(model, "create_library_trainer", None)
+        self.library_trainer = factory() if callable(factory) else None
+        self.max_epochs = 1 if self.library_trainer is None else None
+
+    def state_dict(self) -> dict[str, Any]:
+        if self.library_trainer is None:
+            return {}
+        return {"library_trainer": self.library_trainer.state_dict()}
+
+    def load_state_dict(self, state: Mapping[str, Any]) -> None:
+        if self.library_trainer is not None:
+            if "library_trainer" not in state:
+                raise ValueError("Resuming iterative library training requires its estimator and optimizer state.")
+            self.library_trainer.load_state_dict(state["library_trainer"])
 
     def train_epoch(
         self,
@@ -602,12 +617,19 @@ class LibraryFitStrategy(OptimizationStrategy):
         device: torch.device | str,
     ) -> list[StepResult]:
         model.train()
-        model.fit_training_data(loader, device=torch.device(device))
+        metrics = {}
+        if self.library_trainer is None:
+            model.fit_training_data(loader, device=torch.device(device))
+        else:
+            metrics = self.library_trainer.train_epoch(loader, epoch, torch.device(device))
         model.eval()
-        return [
+        results = [
             self.step(model, move_batch_to_device(batch, device), epoch)
             for batch in loader
         ]
+        for result in results:
+            result.metrics.update(metrics)
+        return results
 
     def step(
         self,

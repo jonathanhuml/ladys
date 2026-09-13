@@ -165,11 +165,12 @@ DATASET_FIELDS: Mapping[str, Mapping[str, Mapping[str, str]]] = {
 class MINTConfig(BaseModelConfig):
     """Config for the MINT trajectory-library decoder.
 
-    Training fits trajectory templates by smoothing and averaging training
-    trials, optionally after training an LFADS rate estimator. This statistical
-    fit uses `optimization.name="library_fit"` and one training epoch
-    (`trainer.epochs=1`). The epoch learns the complete library and reports
-    training and validation Poisson negative log likelihood.
+    The default `train_source="h5"` estimates trajectories from training
+    spikes by smoothing and averaging, using one library-fitting epoch.
+    With `train_source="lfads"`, each `trainer.epochs` iteration trains the
+    rate estimator for one pass and updates the trajectory library. Both
+    paths use `optimization.name="library_fit"` and report training and
+    validation Poisson negative log likelihood.
 
     Prepared NLB H5 tensors are the default input. Neuron dimensions and sample
     intervals come from the dataset; condition metadata, when available, groups
@@ -177,8 +178,12 @@ class MINTConfig(BaseModelConfig):
     before fitting templates. Explicit NWB/MAT sources retain the original
     task-specific reproduction adapters.
 
+    `Experiment` uses `trainer.epochs` as its training budget. The model field
+    `lfads_epochs` controls the direct `fit_training_data` helper and legacy
+    reproduction runners only.
+
     For synthetic Lorenz and chaotic-RNN tasks, LaDyS builds the MINT trajectory
-    library from repeated training trials. The default
+    library from repeated training trials. With `train_source="h5"`, the default
     `lorenz_library_source="smoothed_spikes"` estimates library rates by
     Gaussian-smoothing training spikes and averaging by condition.
     `lorenz_library_source="true_rates"` is an oracle sanity-check mode only
@@ -395,9 +400,36 @@ class MINT(BaseDynamicsModel):
         self._refresh_runtime_params()
 
     def fit_training_data(self, loader, *, device) -> None:
-        """Learn the library from the training split during the fitting epoch."""
+        """Fit a complete library directly; lfads_epochs controls this helper's budget."""
         if self.V is not None:
             return
+        trials, oracle, conditions = self._library_training_inputs(loader, device=device)
+        rate_trials = None
+        if self.config.train_source == "lfads":
+            from ladys.mint_nlb import _fit_lfads_rate_trials
+
+            rate_trials = _fit_lfads_rate_trials(trials, self, self.config, torch.device(device))
+        elif self.config.dataset == "allen_vcn" and self.config.allen_library_source == "lfads_checkpoint":
+            adapter = _MINTAllenVCNAdapter(library_source="lfads_checkpoint", lfads_run_dir=self.config.allen_lfads_run_dir)
+            rates = adapter._lfads_rate_trials(
+                [trial[:self.n_heldin].T for trial in trials], n_time=trials[0].shape[1],
+                n_full=trials[0].shape[0], device=torch.device(device),
+            )
+            rate_trials = [rate * self.Delta for rate in rates]
+        elif oracle:
+            rate_trials = oracle
+        self.settings.library_rate_source = "prepared_rates" if rate_trials is not None else "prepared_spikes"
+        self.fit_library(trials, rate_trials or trials, conditions)
+        self.library_training.update(source=self.config.train_source, trials=len(trials), trajectories=len(self.Omega_plus))
+
+    def create_library_trainer(self):
+        if self.config.train_source == "lfads":
+            from ladys.mint_nlb import _MINTLFADSTrainer
+
+            return _MINTLFADSTrainer(self)
+        return None
+
+    def _library_training_inputs(self, loader, *, device):
         if self.config.train_source in {"nwb", "mat"}:
             raise ValueError("Use run_mint_nlb for explicit NWB/MAT reproduction sources.")
         if loader is None or not hasattr(loader, "dataset"):
@@ -418,7 +450,7 @@ class MINT(BaseDynamicsModel):
             elif cond is None:
                 cond = self._training_conditions[index] if self._training_conditions is not None else index
             conditions.append(int(cond))
-            if self.config.lorenz_library_source == "true_rates":
+            if self.config.lorenz_library_source == "true_rates" and self.config.train_source != "lfads":
                 if "rates" not in sample:
                     raise ValueError("Oracle MINT fitting requires explicitly provided training rates.")
                 unit = sample.get("rates_unit", "counts")
@@ -426,23 +458,7 @@ class MINT(BaseDynamicsModel):
                     raise ValueError("MINT training rates must declare 'counts' or 'hz' units.")
                 scale = self.dt if unit == "hz" else self.Delta
                 oracle.append(sample["rates"].T.to(device=device, dtype=TORCH_DTYPE) * scale)
-        rate_trials = None
-        if self.config.train_source == "lfads":
-            from ladys.mint_nlb import _fit_lfads_rate_trials
-
-            rate_trials = _fit_lfads_rate_trials(trials, self, self.config, torch.device(device))
-        elif self.config.dataset == "allen_vcn" and self.config.allen_library_source == "lfads_checkpoint":
-            adapter = _MINTAllenVCNAdapter(library_source="lfads_checkpoint", lfads_run_dir=self.config.allen_lfads_run_dir)
-            rates = adapter._lfads_rate_trials(
-                [trial[:self.n_heldin].T for trial in trials], n_time=trials[0].shape[1],
-                n_full=trials[0].shape[0], device=torch.device(device),
-            )
-            rate_trials = [rate * self.Delta for rate in rates]
-        elif oracle:
-            rate_trials = oracle
-        self.settings.library_rate_source = "prepared_rates" if rate_trials is not None else "prepared_spikes"
-        self.fit_library(trials, rate_trials or trials, conditions)
-        self.library_training.update(source=self.config.train_source, trials=len(trials), trajectories=len(self.Omega_plus))
+        return trials, oracle, conditions
 
     def get_extra_state(self):
         return {

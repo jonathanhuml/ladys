@@ -15,7 +15,9 @@ model:
   name: mint
   objective: mint_likelihood_recursion
   dataset: lorenz
-  lorenz_library_source: smoothed_spikes
+  train_source: lfads
+  lfads_epochs: 50
+  lfads_batch_size: 4
   n_candidates: 4
   window_length: 6
   delta: 1
@@ -29,7 +31,7 @@ preprocessing:
   observations: null
 
 trainer:
-  epochs: 1
+  epochs: 50
   batch_size: 4
   device: cpu
 
