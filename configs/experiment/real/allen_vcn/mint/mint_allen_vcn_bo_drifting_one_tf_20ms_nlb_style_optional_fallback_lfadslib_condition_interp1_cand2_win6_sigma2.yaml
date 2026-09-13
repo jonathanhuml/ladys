@@ -20,7 +20,7 @@ model:
 preprocessing:
   observations: null
 trainer:
-  epochs: 0
+  epochs: 1
   batch_size: 8
   device: cpu
   live_eval_interval: 0

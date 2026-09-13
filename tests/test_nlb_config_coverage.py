@@ -30,6 +30,7 @@ def test_core_5ms_validation_recipe_exists_and_can_train(dataset, model):
     assert config.model.name == model
     if model == "mint":
         assert config.model.optimization.name == "library_fit"
+        assert config.trainer.epochs == 1
     elif model not in {"psth", "smoothing"}:
         assert config.model.optimization.name != "inference_only"
         assert config.trainer.epochs > 0

@@ -14,6 +14,7 @@ from ladys.preprocessing import PreprocessedDataset, PreprocessingConfig
 from torch.utils.data import DataLoader, Subset
 from ladys.training import TrainerConfig
 from ladys.training.strategies import build_strategy
+from ladys.types import ModelOutput
 
 
 CUDA_DEVICE = pytest.param(
@@ -35,7 +36,7 @@ def _nlb_experiment(tmp_path, name="mc_maze", source="h5", device="cpu"):
                          window_length=4, interp=0, causal=False, lfads_epochs=1,
                          lfads_generator_dim=4, lfads_factor_dim=3, lfads_encoder_dim=4,
                          lfads_controller_dim=4, lfads_batch_size=2),
-        trainer=TrainerConfig(epochs=0, device=device), preprocessing=PreprocessingConfig(),
+        trainer=TrainerConfig(epochs=1, device=device), preprocessing=PreprocessingConfig(),
         output_dir=str(tmp_path / "runs"), batch_size=2,
     )
     experiment = Experiment(cfg)
@@ -108,13 +109,14 @@ def test_raw_mc_rtt_trains_lfads_and_restores_template_checkpoint(tmp_path, devi
     torch.testing.assert_close(restored(query).rates, model(query).rates)
 
 
-def test_standard_synthetic_experiment_fits_and_saves_mint(tmp_path: Path):
+@pytest.mark.parametrize("epoch_budget", [1, 200])
+def test_standard_synthetic_experiment_fits_and_saves_mint(tmp_path: Path, epoch_budget):
     config = ExperimentConfig(
         dataset=LorenzDatasetConfig(neurons=3, num_inits=2, num_trials=3,
                                     num_steps=8, burn_steps=4, train_fraction=0.67,
                                     spike_bin_size=0.25, seed=3),
         model=MINTConfig(sigma=1, window_length=2, delta=1, interp=0),
-        trainer=TrainerConfig(epochs=0), preprocessing=PreprocessingConfig(),
+        trainer=TrainerConfig(epochs=epoch_budget), preprocessing=PreprocessingConfig(),
         output_dir=str(tmp_path), batch_size=2,
     )
     experiment = Experiment(config)
@@ -124,6 +126,61 @@ def test_standard_synthetic_experiment_fits_and_saves_mint(tmp_path: Path):
     assert experiment.model.config.dataset == "lorenz"
     assert experiment.model.Ts == 0.25
     assert np.isfinite(result.metrics["co_bps"])
+    assert result.completed_epochs == len(result.history) == 1
+    report = result.history[0]
+    assert report.train.batch_size == len(experiment.data.train_dataset)
+    assert report.valid.batch_size == len(experiment.data.valid_dataset)
+    assert np.isfinite(report.train.loss) and np.isfinite(report.valid.loss)
+    assert report.valid.loss == pytest.approx(result.metrics["poisson_nll"])
+    assert report.seconds > 0
+
+
+def test_library_fit_rejects_zero_training_epochs(tmp_path):
+    experiment, model = _nlb_experiment(tmp_path)
+    experiment.trainer.config.epochs = 0
+    with pytest.raises(ValueError, match="library_fit requires epochs >= 1"):
+        _fit(experiment, model)
+    assert model.V is None
+    assert not model.library_training
+
+
+def test_mint_training_is_inside_recorded_epoch_and_resume_does_not_refit(tmp_path, monkeypatch):
+    experiment, _ = _nlb_experiment(tmp_path)
+    experiment.config.save_training_state = True
+    experiment.config.dataset.split = "val"
+    from ladys.models.mint import MINT
+
+    original_fit = MINT.fit_training_data
+    training_calls = []
+
+    def fit(model, loader, *, device):
+        assert model.V is None
+        original_fit(model, loader, device=device)
+        training_calls.append(model.library_training.copy())
+
+    monkeypatch.setattr(MINT, "fit_training_data", fit)
+    result = experiment.run()
+    assert len(training_calls) == 1
+    assert result.completed_epochs == 1
+    saved = torch.load(result.model_path, weights_only=True)
+    assert saved["_extra_state"]["library_training"] == training_calls[0]
+    resumed = Experiment(experiment.config).run(resume_from=result.run_dir / "training_state.pt")
+    assert len(training_calls) == 1
+    assert resumed.completed_epochs == 1
+    with np.load(result.predictions_path) as first, np.load(resumed.predictions_path) as second:
+        np.testing.assert_array_equal(first["pred_rates"], second["pred_rates"])
+
+
+def test_mint_loss_measures_raw_count_likelihood():
+    model = MINTConfig().build(n_neurons=2, n_time=3)
+    raw = torch.ones(1, 3, 2)
+    transformed = raw * 100
+    rates = raw * 2
+    batch = {"spikes": transformed, "raw_spikes": raw}
+    loss = model.loss(batch, ModelOutput(rates=rates))
+    assert loss.total == pytest.approx(2 - np.log(2))
+    torch.testing.assert_close(model.loss_forward_observations(batch, transformed), raw)
+    assert loss.named_terms["poisson_nll"] == loss.total
 
 
 def test_delta_counts_conversion_preserves_constant_training_intensity(tmp_path):
@@ -157,11 +214,11 @@ def test_cli_routes_synthetic_mint_through_standard_training(tmp_path, monkeypat
         dataset=LorenzDatasetConfig(neurons=2, num_inits=1, num_trials=3,
                                     num_steps=6, burn_steps=3, train_fraction=0.67),
         model=MINTConfig(dataset="lorenz", sigma=1, window_length=2, delta=1, interp=0),
-        trainer=TrainerConfig(epochs=0), preprocessing=PreprocessingConfig(),
+        trainer=TrainerConfig(epochs=1), preprocessing=PreprocessingConfig(),
         output_dir=str(tmp_path), run_name="cli-mint", batch_size=2,
     )
     monkeypatch.setattr("ladys.cli.build_experiment_config", lambda args: config)
-    assert run_command(Namespace(resume_from=None)) == 0
+    assert run_command(Namespace(config=None, resume_from=None)) == 0
     assert (tmp_path / "cli-mint" / "model.pt").exists()
 
 

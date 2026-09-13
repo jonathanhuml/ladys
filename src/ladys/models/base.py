@@ -91,7 +91,7 @@ class BaseDynamicsModel(nn.Module, ABC):
         return None
 
     def fit_training_data(self, loader: Any, *, device: torch.device) -> None:
-        """Fit data-derived state before optimization, including zero-epoch runs."""
+        """Fit data-derived state; library_fit calls this inside its training epoch."""
 
         del loader, device
 

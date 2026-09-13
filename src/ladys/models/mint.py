@@ -167,8 +167,9 @@ class MINTConfig(BaseModelConfig):
 
     Training fits trajectory templates by smoothing and averaging training
     trials, optionally after training an LFADS rate estimator. This statistical
-    fit uses `optimization.name="library_fit"` and needs no gradient epochs
-    for the MINT decoder itself.
+    fit uses `optimization.name="library_fit"` and one training epoch
+    (`trainer.epochs=1`). The epoch learns the complete library and reports
+    training and validation Poisson negative log likelihood.
 
     Prepared NLB H5 tensors are the default input. Neuron dimensions and sample
     intervals come from the dataset; condition metadata, when available, groups
@@ -294,8 +295,9 @@ class MINT(BaseDynamicsModel):
     ## Outputs
 
     `forward` accepts raw `(batch, time, neurons)` spike counts and returns expected spike
-    counts per input bin. Training fits templates once before evaluation;
-    checkpoints contain the complete fitted library and neuron layout.
+    counts per input bin. The training epoch learns the trajectory library and
+    reports Poisson negative log likelihood; checkpoints contain the complete
+    fitted library and neuron layout.
     """
 
     def __init__(self, config: MINTConfig) -> None:
@@ -393,7 +395,7 @@ class MINT(BaseDynamicsModel):
         self._refresh_runtime_params()
 
     def fit_training_data(self, loader, *, device) -> None:
-        """Fit once from the training split, including optional LFADS training."""
+        """Learn the library from the training split during the fitting epoch."""
         if self.V is not None:
             return
         if self.config.train_source in {"nwb", "mat"}:
@@ -632,15 +634,39 @@ class MINT(BaseDynamicsModel):
                                extras={"full_rates": full_counts}, full_rates_unit="counts")
         return ModelOutput(rates=full_counts, rates_unit="counts")
 
+    def loss_forward_observations(self, batch, x: Tensor) -> Tensor:
+        if isinstance(batch, dict):
+            if "heldin_spikes" in batch:
+                return batch["heldin_spikes"]
+            return batch.get("raw_spikes", x)
+        return x
+
     def loss(
         self,
         batch: Tensor | dict[str, Tensor],
         output: ModelOutput,
         epoch: int = 0,
     ) -> LossOutput:
-        del batch, output, epoch
+        from ladys.metrics import poisson_negative_log_likelihood
+
+        del epoch
+        if output.rates is None:
+            raise RuntimeError("MINT loss requires predicted count rates.")
+        if isinstance(batch, dict):
+            spikes = batch.get("heldout_spikes", batch.get("raw_spikes", batch["spikes"]))
+        else:
+            spikes = batch if self.n_heldin is None else batch[..., self.n_heldin:]
+        rates = output.rates
+        spikes = spikes.to(device=rates.device, dtype=rates.dtype)
+        if spikes.shape != rates.shape:
+            raise ValueError("MINT loss requires matching spike and count-rate shapes.")
+        observed = torch.isfinite(spikes)
+        if not bool(observed.any()):
+            raise ValueError("MINT loss requires observed spike counts.")
+        total = poisson_negative_log_likelihood(rates[observed], spikes[observed]).mean()
         return LossOutput(
-            total=torch.zeros((), dtype=torch.float32, device=self.device),
+            total=total,
+            named_terms={"poisson_nll": total},
             objective=self.objective,
         )
 

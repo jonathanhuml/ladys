@@ -48,8 +48,9 @@ comparison. Use it only when validating the likelihood/interpolation code.
 ## Outputs
 
 `forward` accepts raw `(batch, time, neurons)` spike counts and returns expected spike
-counts per input bin. Training fits templates once before evaluation;
-checkpoints contain the complete fitted library and neuron layout.
+counts per input bin. The training epoch learns the trajectory library and
+reports Poisson negative log likelihood; checkpoints contain the complete
+fitted library and neuron layout.
 
 ## Configuration
 
@@ -57,8 +58,9 @@ Config for the MINT trajectory-library decoder.
 
 Training fits trajectory templates by smoothing and averaging training
 trials, optionally after training an LFADS rate estimator. This statistical
-fit uses `optimization.name="library_fit"` and needs no gradient epochs
-for the MINT decoder itself.
+fit uses `optimization.name="library_fit"` and one training epoch
+(`trainer.epochs=1`). The epoch learns the complete library and reports
+training and validation Poisson negative log likelihood.
 
 Prepared NLB H5 tensors are the default input. Neuron dimensions and sample
 intervals come from the dataset; condition metadata, when available, groups

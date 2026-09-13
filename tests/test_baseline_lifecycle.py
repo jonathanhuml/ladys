@@ -54,14 +54,17 @@ def test_psth_fitted_checkpoint_round_trip_and_dimension_validation(tmp_path):
         incompatible.load_state_dict(state)
 
 
-def test_zero_epoch_psth_experiment_saves_fitted_model(tmp_path):
+def test_psth_training_epoch_saves_fitted_model(tmp_path):
     experiment = Experiment(ExperimentConfig(
         dataset=LorenzDatasetConfig(neurons=2, num_inits=2, num_trials=3,
                                     num_steps=8, burn_steps=4, train_fraction=0.67),
-        model=PSTHConfig(kern_sd_ms=0), trainer=TrainerConfig(epochs=0),
+        model=PSTHConfig(kern_sd_ms=0), trainer=TrainerConfig(epochs=1),
         batch_size=2, output_dir=str(tmp_path), preprocessing=PreprocessingConfig(),
     ))
     result = experiment.run()
+    assert result.completed_epochs == len(result.history) == 1
+    assert np.isfinite(result.history[0].train.loss)
+    assert np.isfinite(result.history[0].valid.loss)
     assert np.isfinite(result.metrics["rate_mse"])
     saved = torch.load(result.model_path, weights_only=True)
     assert saved["psth_rates"].shape == (8, 2)

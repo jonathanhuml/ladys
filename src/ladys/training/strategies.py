@@ -23,6 +23,8 @@ from ladys.types import LossOutput, StepResult, move_batch_to_device, observatio
 class OptimizationStrategy(ABC):
     name: str
     requires_ordered_training_data = False
+    fits_training_data_in_epoch = False
+    max_epochs: int | None = None
 
     def setup(self, model: BaseDynamicsModel) -> None:
         """Initialize optimizer state."""
@@ -585,10 +587,35 @@ class InferenceOnlyStrategy(OptimizationStrategy):
         return StepResult.from_loss(loss, batch_size=int(x.shape[0]))
 
 
-class LibraryFitStrategy(InferenceOnlyStrategy):
-    """Use the trainer's data-fitting phase without gradient optimization."""
+class LibraryFitStrategy(OptimizationStrategy):
+    """Learn a complete library in one recorded training epoch."""
 
     name = "library_fit"
+    fits_training_data_in_epoch = True
+    max_epochs = 1
+
+    def train_epoch(
+        self,
+        model: BaseDynamicsModel,
+        loader: Iterable,
+        epoch: int,
+        device: torch.device | str,
+    ) -> list[StepResult]:
+        model.train()
+        model.fit_training_data(loader, device=torch.device(device))
+        model.eval()
+        return [
+            self.step(model, move_batch_to_device(batch, device), epoch)
+            for batch in loader
+        ]
+
+    def step(
+        self,
+        model: BaseDynamicsModel,
+        batch: Tensor | dict[str, Tensor],
+        epoch: int,
+    ) -> StepResult:
+        return self.validation_step(model, batch, epoch)
 
 
 def build_strategy(config: OptimizationConfig) -> OptimizationStrategy:

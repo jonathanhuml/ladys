@@ -31,6 +31,14 @@ def test_mint_nlb_experiment_configs_load():
     assert all(config.model.mat_data_root is None for config in configs)
     assert all(config.model.target_h5 is None for config in configs)
     assert all(config.model.optimization.name == "library_fit" for config in configs)
+    assert all(config.trainer.epochs == 1 for config in configs)
+
+
+def test_mint_lorenz_recipe_trains_for_one_epoch():
+    config = load_experiment_config("configs/experiment/synthetic/lorenz/mint/mint_lorenz_100.yaml")
+    assert config.trainer.epochs == 1
+    assert config.model.optimization.name == "library_fit"
+    assert config.model.lorenz_library_source == "smoothed_spikes"
 
 
 def test_mint_dmfc_uses_paper_trajectory_defaults():

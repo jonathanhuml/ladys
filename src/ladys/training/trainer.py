@@ -48,7 +48,11 @@ class Trainer:
     ) -> list[EpochReport]:
         device = torch.device(self.config.device)
         model.to(device)
-        model.fit_training_data(train_loader, device=device)
+        if strategy.fits_training_data_in_epoch:
+            if self.config.epochs < 1:
+                raise ValueError(f"{strategy.name} requires epochs >= 1 to train from data.")
+        else:
+            model.fit_training_data(train_loader, device=device)
         strategy.setup(model)
         if strategy_state is not None:
             strategy.load_state_dict(strategy_state)
@@ -57,7 +61,10 @@ class Trainer:
         if on_ready is not None:
             on_ready()
 
-        for epoch in range(int(start_epoch), self.config.epochs):
+        stop_epoch = self.config.epochs
+        if strategy.max_epochs is not None:
+            stop_epoch = min(stop_epoch, strategy.max_epochs)
+        for epoch in range(int(start_epoch), stop_epoch):
             start = time.perf_counter()
             strategy.on_epoch_start(model, epoch)
             train_results = strategy.train_epoch(model, train_loader, epoch, device)
