@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import math
 from pathlib import Path
 from typing import Any, Literal, Optional
 
 import torch
-from pydantic import Field
+from pydantic import Field, model_validator
 from torch import Tensor
 
 from ladys.models.base import BaseDynamicsModel, BaseModelConfig, OptimizationConfig
@@ -15,7 +16,7 @@ from ladys.models.ilqr_vae_core import ILQRVAE as TutorialILQRVAE
 from ladys.models.ilqr_vae_core import load_tutorial_params
 from ladys.models.ilqr_vae_core import make_random_params
 from ladys.models.ilqr_vae_core.params import TutorialParams
-from ladys.metrics import poisson_negative_log_likelihood
+from ladys.metrics import EvaluationAdapter, SyntheticEvaluationAdapter, poisson_negative_log_likelihood
 from ladys.types import LossOutput, ModelOutput, observations_from_batch
 
 
@@ -46,30 +47,47 @@ class ILQRVAEConfig(BaseModelConfig):
     template_params_path: Optional[str] = None
     random_init_profile: Literal["default", "tutorial_mc_maze"] = "default"
     readout_bias_initialization: Literal["none", "empirical_rates"] = "none"
-    empirical_rate_floor_hz: float = 1.0e-3
-    latent_dim: int = 20
-    input_dim: int = 5
+    empirical_rate_floor_hz: float = Field(default=1.0e-3, gt=0.0, allow_inf_nan=False)
+    latent_dim: int = Field(default=20, gt=0)
+    input_dim: int = Field(default=5, gt=0)
     init_seed: int = 0
     solver: Literal["ilqr", "lbfgs", "adam"] = "ilqr"
-    max_iter: int = 5
-    lr: Optional[float] = None
+    max_iter: int = Field(default=5, ge=0)
+    lr: Optional[float] = Field(default=None, gt=0.0, allow_inf_nan=False)
     control_hessian_mode: Literal["true", "fisher", "clamped"] = "true"
     ilqr_failure_fallback: Literal["none", "adam", "lbfgs"] = "adam"
-    ilqr_fallback_max_iter: int = 25
-    ilqr_fallback_lr: Optional[float] = None
+    ilqr_fallback_max_iter: int = Field(default=25, ge=0)
+    ilqr_fallback_lr: Optional[float] = Field(default=None, gt=0.0, allow_inf_nan=False)
     differentiate_controls: bool = True
     trainable_parameters: bool = True
-    n_posterior_samples: int = 1
+    n_posterior_samples: int = Field(default=1, gt=0)
     include_elbo_constants: bool = True
-    dynamics_regularizer: float = 0.0
-    held_in_neurons: Optional[int] = None
-    output_neuron_start: Optional[int] = None
-    output_neurons: Optional[int] = None
+    dynamics_regularizer: float = Field(default=0.0, ge=0.0, allow_inf_nan=False)
+    held_in_neurons: Optional[int] = Field(default=None, gt=0)
+    output_neuron_start: Optional[int] = Field(default=None, ge=0)
+    output_neurons: Optional[int] = Field(default=None, gt=0)
     rate_mode: Literal["likelihood", "pre_sample"] = "likelihood"
-    dt: Optional[float] = None
+    dt: Optional[float] = Field(default=None, gt=0.0, allow_inf_nan=False)
     optimization: OptimizationConfig = Field(
         default_factory=lambda: OptimizationConfig(name="gradient", lr=1.0e-3)
     )
+
+    @model_validator(mode="after")
+    def validate_training_config(self) -> "ILQRVAEConfig":
+        if self.latent_dim % self.input_dim != 0:
+            raise ValueError("latent_dim must be divisible by input_dim.")
+        if self.objective == "ilqr_vae_elbo" and self.trainable_parameters:
+            if not self.include_elbo_constants:
+                raise ValueError(
+                    "ELBO training requires include_elbo_constants=True: "
+                    "the prior normalization depends on learned parameters."
+                )
+            if self.differentiate_controls and (
+                self.solver == "lbfgs"
+                or (self.solver == "ilqr" and self.ilqr_failure_fallback == "lbfgs")
+            ):
+                raise ValueError("Differentiable ELBO training does not support LBFGS inference.")
+        return self
 
     def build(self, n_neurons: int, n_time: int) -> "ILQRVAE":
         model_neurons = n_neurons
@@ -282,6 +300,14 @@ class ILQRVAE(BaseDynamicsModel):
         self.rate_mode = rate_mode
         self.dt = float(dt)
         self.objective = objective
+        if self.n_neurons < 1 or self.n_time < 1:
+            raise ValueError("n_neurons and n_time must be positive.")
+        if not math.isfinite(self.dt) or self.dt <= 0.0:
+            raise ValueError("dt must be finite and positive.")
+        if self.n_posterior_samples < 1:
+            raise ValueError("n_posterior_samples must be positive.")
+        if self.objective == "ilqr_vae_elbo" and self.trainable_parameters and not self.include_elbo_constants:
+            raise ValueError("ELBO training requires parameter-dependent prior normalization constants.")
 
         if initialization == "pretrained":
             if params_path is None:
@@ -323,6 +349,7 @@ class ILQRVAE(BaseDynamicsModel):
             if self.output_neurons is None
             else output_start + int(self.output_neurons)
         )
+        output_dtype = x.dtype if x.is_floating_point() else self.core.c.dtype
 
         rates = []
         full_rates = []
@@ -347,10 +374,10 @@ class ILQRVAE(BaseDynamicsModel):
                 n_observed_steps=int(trial.shape[0]),
             )
             rates_hz = self.core.firing_rates(observed_latents, mode=self.rate_mode)
-            full_counts = (self.dt * rates_hz).to(x.dtype)
-            full_rates.append(rates_hz.to(x.dtype))
+            full_counts = (self.dt * rates_hz).to(output_dtype)
+            full_rates.append(rates_hz.to(output_dtype))
             rates.append(full_counts[:, output_start:output_stop])
-            latents.append(observed_latents.to(x.dtype))
+            latents.append(observed_latents.to(output_dtype))
             controls.append(result.controls)
             eval_counts.append(len(result.loss_history))
             fallback_counts.append(1.0 if used_fallback else 0.0)
@@ -490,6 +517,11 @@ class ILQRVAE(BaseDynamicsModel):
             return x
         return self._training_observations(batch, x)
 
+    def evaluation_adapter(self, task: str) -> EvaluationAdapter | None:
+        if task == "synthetic":
+            return SyntheticEvaluationAdapter(use_raw_spikes=True)
+        return None
+
     def _training_observations(self, batch: Tensor | dict[str, Tensor], x: Tensor) -> Tensor:
         if not isinstance(batch, dict):
             return x
@@ -499,7 +531,9 @@ class ILQRVAE(BaseDynamicsModel):
                 raise ValueError("reconstruction_spikes channels disagree with the model readout")
             return reconstruction.to(device=x.device, dtype=x.dtype)
         if int(x.shape[-1]) == self.core.n_neurons:
-            return x
+            raw = batch.get("raw_spikes")
+            return raw if raw is not None and raw.shape == x.shape else x
+        x = batch.get("heldin_spikes", x)
         heldout = batch.get("heldout_spikes")
         if heldout is None:
             heldout = batch.get("raw_spikes")
@@ -604,9 +638,7 @@ def _full_spikes_from_dataset(dataset: Any) -> Tensor | None:
     heldin = getattr(base, "heldin_spikes", None)
     heldout = getattr(base, "raw_spikes", None)
     if heldin is None:
-        return heldout if heldout is not None else getattr(dataset, "spikes", None)
-    if heldin is None:
-        return None
+        return heldout if heldout is not None else getattr(base, "spikes", None)
     if heldout is None:
         return heldin
     if heldin.shape[:-1] != heldout.shape[:-1]:

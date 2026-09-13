@@ -499,6 +499,8 @@ class LFADS(BaseDynamicsModel):
         dt = self._batch_dt(batch, target).to(device=self.device, dtype=output.rates.dtype)
         spike_means = (rates * dt).clamp_min(1e-8)
         finite_target = torch.isfinite(target)
+        if not finite_target.any():
+            raise ValueError("LFADS loss requires at least one finite reconstruction target.")
         safe_target = torch.where(finite_target, target, torch.zeros_like(target))
         recon_terms = spike_means - safe_target * torch.log(spike_means)
         recon_terms = self._apply_coordinated_dropout_grad_mask(recon_terms)
@@ -563,6 +565,8 @@ class LFADS(BaseDynamicsModel):
             raise ValueError(f"Expected {self.n_time} time bins, got {x.shape[1]}.")
         if x.shape[-1] != self.input_neurons:
             raise ValueError(f"Expected {self.input_neurons} input neurons, got {x.shape[-1]}.")
+        if not torch.isfinite(x).all():
+            raise ValueError("LFADS expects finite spike-count observations.")
         if torch.any(x < 0):
             raise ValueError("LFADS expects nonnegative spike-count observations.")
 
@@ -867,7 +871,12 @@ class LFADS(BaseDynamicsModel):
                 and target.shape[-1] == rates.shape[-1]
             ):
                 return target
-        target = observations_from_batch(batch).to(device=rates.device, dtype=rates.dtype)
+        target = observations_from_batch(batch)
+        if isinstance(batch, dict) and "heldout_spikes" not in batch:
+            raw = batch.get("raw_spikes")
+            if raw is not None and raw.shape == target.shape:
+                target = raw
+        target = target.to(device=rates.device, dtype=rates.dtype)
         if target.shape == rates.shape:
             return target
         if (

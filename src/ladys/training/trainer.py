@@ -41,9 +41,10 @@ class Trainer:
         train_loader: Iterable,
         valid_loader: Iterable | None = None,
         epoch_metrics: Mapping[str, Callable[[BaseDynamicsModel], float]] | None = None,
-        epoch_callback: Callable[[EpochReport], None] | None = None,
+        epoch_callback: Callable[[EpochReport], bool | None] | None = None,
         start_epoch: int = 0,
         strategy_state: Mapping[str, object] | None = None,
+        on_ready: Callable[[], None] | None = None,
     ) -> list[EpochReport]:
         device = torch.device(self.config.device)
         model.to(device)
@@ -53,6 +54,8 @@ class Trainer:
             strategy.load_state_dict(strategy_state)
         elif int(start_epoch) > 0:
             strategy.advance_to_epoch(int(start_epoch))
+        if on_ready is not None:
+            on_ready()
 
         for epoch in range(int(start_epoch), self.config.epochs):
             start = time.perf_counter()
@@ -73,7 +76,8 @@ class Trainer:
             )
             self.history.append(report)
             if epoch_callback is not None:
-                epoch_callback(report)
+                if epoch_callback(report) is False:
+                    break
 
         return self.history
 

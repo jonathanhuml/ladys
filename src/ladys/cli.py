@@ -62,6 +62,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--epochs", type=int, help="number of training epochs")
     run_parser.add_argument("--batch-size", type=int, help="training batch size")
     run_parser.add_argument("--device", help="PyTorch device")
+    run_parser.add_argument("--training-seed", type=int, help="training RNG seed, independent of the dataset seed")
+    run_parser.add_argument("--resume-from", help="resume a training_state.pt checkpoint into a new run folder")
     run_parser.add_argument(
         "--live-eval-interval",
         type=int,
@@ -75,6 +77,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip predictions.npz artifact",
     )
     run_parser.set_defaults(handler=run_command)
+
+    tune_parser = subparsers.add_parser("tune", help="tune hyperparameters with Ray")
+    tune_parser.add_argument("-c", "--config", help="study YAML or resolved study.json")
+    tune_parser.add_argument("--resume-from", help="resume a study directory using its saved recipe")
+    tune_parser.set_defaults(handler=tune_command)
 
     list_parser = subparsers.add_parser("list", help="list registered components")
     list_parser.add_argument("kind", choices=["datasets", "models"])
@@ -155,7 +162,7 @@ def run_command(args: argparse.Namespace) -> int:
         print(f"  submission_h5: {result.submission_path}")
         return 0
 
-    result = Experiment(config).run()
+    result = Experiment(config).run(resume_from=getattr(args, "resume_from", None))
     print(f"Wrote LaDyS run: {result.run_dir}")
     if result.metrics:
         print("Metrics:")
@@ -164,6 +171,24 @@ def run_command(args: argparse.Namespace) -> int:
             print(f"  {key}: {display}")
     else:
         print("Metrics: none available")
+    return 0
+
+
+def tune_command(args: argparse.Namespace) -> int:
+    from ladys.tuning import Study
+
+    if args.config and args.resume_from:
+        raise ValueError("Use either --config or --resume-from; resume uses the saved study recipe.")
+    if not args.config and not args.resume_from:
+        raise ValueError("Provide a study with --config or --resume-from.")
+    path = args.config or str(Path(args.resume_from) / "study.json")
+    result = Study.from_config_path(path).run(resume_from=args.resume_from)
+    print(f"Wrote LaDyS study: {result.study_dir}")
+    if result.best_config is None:
+        print("No candidate completed all seed runs; inspect trials.csv and Ray logs.")
+        return 1
+    print(f"Selected mean validation score: {result.best_score:.6g}")
+    print(f"Selected config: {result.best_config_path}")
     return 0
 
 
@@ -244,6 +269,7 @@ def build_experiment_config(args: argparse.Namespace) -> ExperimentConfig:
         trainer = replace(trainer, device=args.device)
     if args.live_eval_interval is not None:
         trainer = replace(trainer, live_eval_interval=args.live_eval_interval)
+    training_seed = getattr(args, "training_seed", None)
 
     return replace(
         config,
@@ -252,6 +278,7 @@ def build_experiment_config(args: argparse.Namespace) -> ExperimentConfig:
         output_dir=args.output_dir if args.output_dir is not None else config.output_dir,
         run_name=args.run_name if args.run_name is not None else config.run_name,
         save_predictions=False if args.no_save_predictions else config.save_predictions,
+        training_seed=training_seed if training_seed is not None else config.training_seed,
     )
 
 

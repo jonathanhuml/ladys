@@ -160,7 +160,15 @@ def load_resume_checkpoint(folder, payload):
     if not saved_config_path.exists() or not state_path.exists():
         raise FileNotFoundError(f"Resume requires config.json and training_state.pt in {folder}.")
     validate_resume_config(json.loads(saved_config_path.read_text()), payload)
-    state = torch.load(state_path, map_location="cpu", weights_only=True)
+    # Legacy sqrt-decay schedulers stored NumPy float64 learning rates.
+    numpy_scalar = np.float64(0).__reduce__()[0]
+    numeric_globals = [
+        (numpy_scalar, "numpy.core.multiarray.scalar"),
+        (numpy_scalar, "numpy._core.multiarray.scalar"),
+        np.dtype, type(np.dtype("float64")),
+    ]
+    with torch.serialization.safe_globals(numeric_globals):
+        state = torch.load(state_path, map_location="cpu", weights_only=True)
     if "config" in state:
         validate_resume_config(state["config"], payload)
     epoch = state.get("epoch")
@@ -237,6 +245,10 @@ def run_one(args):
         config.dataset.split = "val"
         config.dataset.max_trials = None
         config.dataset.seed = args.seed
+        if method == "mint":
+            config.model.lfads_seed = args.seed
+        elif method == "ilqr_vae":
+            config.model.init_seed = args.seed
         config.trainer.device = args.device
         config.trainer.live_eval_interval = 0
         if args.epochs is not None:
@@ -321,8 +333,8 @@ def run_one(args):
             if score > best_score:
                 best_score = score
                 save_checkpoint(folder / "best_model.pt", model.state_dict())
-                _write_json(folder / "best_metrics.json", row)
                 _write_predictions(folder / "predictions.npz", result)
+                write_status(folder / "best_metrics.json", row)
                 state.update(best_co_bps=score, best_epoch=epoch)
             evaluations = [item for item in evaluations if item["epoch"] != epoch] + [row]
             write_status(evaluations_path, evaluations)

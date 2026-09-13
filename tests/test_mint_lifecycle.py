@@ -6,10 +6,12 @@ import pytest
 import torch
 
 from ladys.config import ExperimentConfig
-from ladys.datasets import LorenzDatasetConfig, NLBDatasetConfig
+from ladys.datasets import LorenzDataset, LorenzDatasetConfig, NLBDatasetConfig
 from ladys.experiment import Experiment
-from ladys.models.mint import MINTConfig
-from ladys.preprocessing import PreprocessingConfig
+from ladys.metrics import evaluate_model
+from ladys.models.mint import MINTConfig, InterpOptions, fit_poisson_interp
+from ladys.preprocessing import PreprocessedDataset, PreprocessingConfig
+from torch.utils.data import DataLoader, Subset
 from ladys.training import TrainerConfig
 from ladys.training.strategies import build_strategy
 
@@ -159,5 +161,62 @@ def test_cli_routes_synthetic_mint_through_standard_training(tmp_path, monkeypat
         output_dir=str(tmp_path), run_name="cli-mint", batch_size=2,
     )
     monkeypatch.setattr("ladys.cli.build_experiment_config", lambda args: config)
-    assert run_command(Namespace()) == 0
+    assert run_command(Namespace(resume_from=None)) == 0
     assert (tmp_path / "cli-mint" / "model.pt").exists()
+
+
+def test_interpolation_does_not_stop_on_negative_newton_step():
+    x1 = torch.tensor([0.672034, 1.251349, 5.312476, 4.094878], dtype=torch.float64)
+    x2 = torch.tensor([5.102956, 3.884396, 2.468927, 3.123640], dtype=torch.float64)
+    spikes = torch.tensor([7, 2, 1, 7], dtype=torch.float64)
+    alpha = fit_poisson_interp(spikes, x1, x2, InterpOptions(), 0)
+    assert alpha == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("interp", [1, 2])
+def test_interpolation_with_one_available_library_state(interp):
+    model = MINTConfig(dataset="lorenz", sigma=0, delta=1, window_length=4,
+                       interp=interp).build(2, 4)
+    spikes = torch.ones(2, 4)
+    model.fit_library([spikes], [spikes], np.array([0]))
+    assert torch.isfinite(model(spikes.T.unsqueeze(0)).rates).all()
+    with pytest.raises(ValueError, match="query duration"):
+        model(spikes.T[:2].unsqueeze(0))
+
+
+def test_unsmoothed_legacy_library_preserves_delta_count_units():
+    model = MINTConfig(dataset="lorenz", sigma=0, delta=2, window_length=4,
+                       interp=0).build(2, 8)
+    spikes = torch.full((2, 8), 0.25)
+    model.fit_library([spikes], [spikes], np.array([0]))
+    expected = torch.full((1, 8, 2), 0.25, dtype=torch.float64)
+    torch.testing.assert_close(model(spikes.T.unsqueeze(0)).rates, expected)
+
+
+def test_synthetic_fit_and_evaluation_ignore_transformed_observations():
+    config = LorenzDatasetConfig(neurons=2, num_inits=2, num_trials=3, num_steps=8,
+                                 burn_steps=4, train_fraction=0.67, spike_bin_size=0.25)
+    training, validation = LorenzDataset.make_splits(config)
+    transformed = PreprocessingConfig(observations=[{"name": "anscombe"}])
+    raw_model = MINTConfig(dataset="lorenz", sigma=1, window_length=2, interp=0).build(2, 8)
+    transformed_model = raw_model.config.build(2, 8)
+    raw_model.fit_training_data(DataLoader(training, batch_size=2), device="cpu")
+    transformed_model.fit_training_data(DataLoader(PreprocessedDataset(training, transformed), batch_size=2), device="cpu")
+    for raw, processed in zip(raw_model.Omega_plus, transformed_model.Omega_plus):
+        torch.testing.assert_close(raw, processed)
+    expected = evaluate_model(raw_model, DataLoader(validation, batch_size=2))
+    actual = evaluate_model(transformed_model, DataLoader(PreprocessedDataset(validation, transformed), batch_size=2))
+    np.testing.assert_allclose(actual.predictions["count_rates"], expected.predictions["count_rates"])
+    assert actual.metrics["rate_mse"] == expected.metrics["rate_mse"]
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_subset_preserves_training_condition_membership(nested):
+    config = LorenzDatasetConfig(neurons=2, num_inits=2, num_trials=3, num_steps=8,
+                                 burn_steps=4, train_fraction=0.67)
+    training = LorenzDataset(config)
+    subset = Subset(Subset(training, [3, 1, 0]), [0, 1]) if nested else Subset(training, [1, 3])
+    model = MINTConfig(dataset="lorenz", sigma=1, window_length=2, interp=0).build(2, 8)
+    model.fit_training_data(DataLoader(subset, batch_size=2), device="cpu")
+    assert model._training_conditions.tolist() == [1, 1]
+    assert len(model.Omega_plus) == 1

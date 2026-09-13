@@ -19,7 +19,7 @@ class CASSMConfig(BaseModelConfig):
 
     name: Literal["cassm"] = "cassm"
     objective: str = "cassm_elbo"
-    projection_dim: int = 20
+    projection_dim: int = Field(default=20, ge=1)
     dt: float = 0.01
     dataset_name: Optional[str] = None
     save_model: bool = False
@@ -92,8 +92,8 @@ class CASSM(BaseDynamicsModel):
         objective: str = "cassm_elbo",
     ) -> None:
         super().__init__()
-        if projection_dim > n_neurons:
-            raise ValueError("projection_dim must be <= n_neurons for CASSM.")
+        if not 1 <= projection_dim <= n_neurons:
+            raise ValueError("projection_dim must be positive and <= n_neurons for CASSM.")
 
         self.n_neurons = int(n_neurons)
         self.n_time = int(n_time)

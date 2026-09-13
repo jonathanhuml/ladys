@@ -7,6 +7,7 @@ from typing import Any, Literal
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 import scipy.signal.windows as signal
+from scipy.signal import convolve
 import torch
 from torch import Tensor
 from torch.utils.data import Dataset
@@ -104,7 +105,7 @@ def smooth_firing_rate(
     spike_np = spike_trains.detach().cpu().numpy()
 
     def filt(x: np.ndarray) -> np.ndarray:
-        return np.convolve(x, window, "same")
+        return convolve(x, window, mode="same", method="direct")
 
     smoothed = np.apply_along_axis(filt, 1, spike_np)
     return torch.as_tensor(

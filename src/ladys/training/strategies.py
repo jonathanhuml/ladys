@@ -261,9 +261,17 @@ class FullBatchGradientStrategy(OptimizationStrategy):
         self.weight_decay = weight_decay
         self.gradient_clip = gradient_clip
         self.optimizer: torch.optim.Optimizer | None = None
+        self._pending_optimizer_state: Mapping[str, Any] | None = None
 
     def setup(self, model: BaseDynamicsModel) -> None:
         self.optimizer = None
+        self._pending_optimizer_state = None
+
+    def state_dict(self) -> dict[str, Any]:
+        return {"optimizer": self.optimizer.state_dict() if self.optimizer is not None else self._pending_optimizer_state}
+
+    def load_state_dict(self, state: Mapping[str, Any]) -> None:
+        self._pending_optimizer_state = state.get("optimizer")
 
     def train_epoch(
         self,
@@ -303,6 +311,9 @@ class FullBatchGradientStrategy(OptimizationStrategy):
                 lr=self.lr,
                 weight_decay=self.weight_decay,
             )
+            if self._pending_optimizer_state is not None:
+                self.optimizer.load_state_dict(self._pending_optimizer_state)
+                self._pending_optimizer_state = None
 
         self.optimizer.zero_grad(set_to_none=True)
         loss.total.backward()
@@ -352,12 +363,27 @@ class MgplvmFullBatchGradientStrategy(OptimizationStrategy):
         self.scheduler: LambdaLR | None = None
         self._hooks = []
         self._step_index = 0
+        self._pending_state: Mapping[str, Any] | None = None
 
     def setup(self, model: BaseDynamicsModel) -> None:
         self.optimizer = None
         self.scheduler = None
         self._hooks = []
         self._step_index = 0
+        self._pending_state = None
+
+    def state_dict(self) -> dict[str, Any]:
+        if self._pending_state is not None:
+            return dict(self._pending_state)
+        return {
+            "optimizer": None if self.optimizer is None else self.optimizer.state_dict(),
+            "scheduler": None if self.scheduler is None else self.scheduler.state_dict(),
+            "step_index": self._step_index,
+        }
+
+    def load_state_dict(self, state: Mapping[str, Any]) -> None:
+        self._pending_state = state
+        self._step_index = int(state["step_index"])
 
     def train_epoch(
         self,
@@ -463,6 +489,12 @@ class MgplvmFullBatchGradientStrategy(OptimizationStrategy):
             return 1.0 - np.exp(-step / (3.0 * max(self.burnin, 1)))
 
         self.scheduler = LambdaLR(self.optimizer, lr_lambda=[lambda step: 1.0, fburn])
+        if self._pending_state is not None:
+            if self._pending_state.get("optimizer") is not None:
+                self.optimizer.load_state_dict(self._pending_state["optimizer"])
+            if self._pending_state.get("scheduler") is not None:
+                self.scheduler.load_state_dict(self._pending_state["scheduler"])
+            self._pending_state = None
 
     def _kl_ramp(self) -> float:
         return float(1.0 - np.exp(-self._step_index / max(self.burnin, 1)))

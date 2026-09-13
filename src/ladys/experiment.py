@@ -11,7 +11,8 @@ import os
 from pathlib import Path
 import re
 import tempfile
-from typing import Any
+import time
+from typing import Any, Callable
 
 import numpy as np
 import torch
@@ -24,6 +25,23 @@ from ladys.models.base import BaseDynamicsModel
 from ladys.nlb_eval import evaluate_model_nlb_submission
 from ladys.training import EpochReport, Trainer
 from ladys.training.strategies import build_strategy
+from ladys.training.checkpoint import (
+    capture_rng, evaluation_rng, restore_rng, save_training_checkpoint,
+    seed_training, validate_resume_config,
+)
+from ladys.types import StepResult
+
+
+@dataclass
+class ExperimentReport:
+    """A fresh task evaluation. Returning False from a callback stops training."""
+
+    epoch: int
+    metrics: dict[str, float]
+    elapsed_seconds: float
+    run_dir: Path
+    checkpoint_path: Path | None = None
+    final: bool = False
 
 
 @dataclass
@@ -40,6 +58,9 @@ class ExperimentResult:
     report_path: Path
     predictions_path: Path | None = None
     plot_paths: dict[str, Path] = field(default_factory=dict)
+    selected_epoch: int | None = None
+    completed_epochs: int = 0
+    elapsed_seconds: float = 0.0
 
 
 class Experiment:
@@ -77,18 +98,41 @@ class Experiment:
             )
         return self.model
 
-    def run(self) -> ExperimentResult:
+    def run(
+        self,
+        *,
+        callback: Callable[[ExperimentReport], bool | None] | None = None,
+        resume_from: str | Path | None = None,
+    ) -> ExperimentResult:
         """Train the model, evaluate it, and write a self-contained run folder."""
 
         is_test_split = isinstance(self.config.dataset, NLBDatasetConfig) and self.config.dataset.split == "test"
-        if is_test_split and self.config.trainer.live_eval_interval > 0:
+        if is_test_split and (self.config.trainer.live_eval_interval > 0 or self.config.selection is not None):
             raise ValueError(
                 "NLB checkpoint selection requires split='val'. Test targets may only "
                 "be scored after training, with live_eval_interval=0."
             )
+        if self.config.trainer.epochs < 0 or self.config.trainer.live_eval_interval < 0:
+            raise ValueError("Epochs and live_eval_interval must be nonnegative.")
+        if self.config.selection is not None and self.config.selection.checkpoint == "best":
+            if self.config.trainer.epochs > 0 and self.config.trainer.live_eval_interval == 0:
+                raise ValueError("Best checkpoint selection requires live_eval_interval > 0.")
+        started = time.monotonic()
+        payload = experiment_config_to_dict(self.config)
+        saved = None
+        if resume_from is not None:
+            saved = torch.load(resume_from, map_location="cpu", weights_only=True)
+            validate_resume_config(saved["config"], payload)
+            if not 0 <= saved["epoch"] <= self.config.trainer.epochs:
+                raise ValueError("Checkpoint epoch is outside the training budget.")
+            if not saved["resumable"]:
+                raise ValueError("This optimization strategy does not support training-state restoration.")
         self._set_seeds()
+        self.trainer.history = []
         self.data.setup()
         model = self.build_model()
+        if saved is not None:
+            model.load_state_dict(saved["model"])
         strategy = build_strategy(self.config.model.optimization)
         train_loader = self.data.train_loader(
             shuffle=not bool(getattr(strategy, "requires_ordered_training_data", False))
@@ -102,6 +146,7 @@ class Experiment:
         status_path = run_dir / "status.json"
         best_model_path = run_dir / "best_model.pt"
         best_metrics_path = run_dir / "best_metrics.json"
+        checkpoint_path = run_dir / "training_state.pt"
         _write_json(config_path, experiment_config_to_dict(self.config))
         _write_json(
             status_path,
@@ -111,11 +156,47 @@ class Experiment:
                 "run_dir": run_dir,
             },
         )
-        best_eval: dict[str, Any] | None = None
+        best_eval: dict[str, Any] | None = None if saved is None else saved["best_eval"]
+        best_evaluation = None if saved is None else _unpack_evaluation(saved["best_evaluation"])
+        if saved is not None:
+            self.trainer.history = [_unpack_epoch(item) for item in saved["history"]]
+            if saved["best_model"] is not None:
+                torch.save(saved["best_model"], best_model_path)
+                _write_json(best_metrics_path, best_eval)
         last_eval: dict[str, Any] | None = None
+        stopped = False
+        elapsed_before = 0.0 if saved is None else saved["elapsed_seconds"]
 
-        def epoch_callback(report: EpochReport) -> None:
-            nonlocal best_eval, last_eval
+        def elapsed() -> float:
+            return elapsed_before + time.monotonic() - started
+
+        def evaluate() -> EvaluationResult:
+            with evaluation_rng(self.config.evaluation_seed, self.config.trainer.device):
+                result = evaluate_model(
+                    model=model, loader=valid_loader, device=self.config.trainer.device,
+                    train_loader=self.data.train_loader(shuffle=False),
+                )
+            self._selection_score(result.metrics)
+            return result
+
+        def checkpoint(epoch: int) -> None:
+            if not self.config.save_training_state:
+                return
+            strategy_state = strategy.state_dict()
+            save_training_checkpoint(checkpoint_path, {
+                "version": 1, "epoch": epoch, "config": payload,
+                "model": model.state_dict(), "strategy": strategy_state,
+                "resumable": bool(strategy_state) or strategy.name in {"em", "library_fit", "inference_only"},
+                "rng": capture_rng(self.config.trainer.device),
+                "history": [asdict(item) for item in self.trainer.history],
+                "best_eval": best_eval, "best_evaluation": _pack_evaluation(best_evaluation),
+                "best_model": torch.load(best_model_path, map_location="cpu", weights_only=True)
+                    if best_model_path.exists() else None,
+                "elapsed_seconds": elapsed(),
+            })
+
+        def epoch_callback(report: EpochReport) -> bool | None:
+            nonlocal best_eval, best_evaluation, last_eval, stopped
             evaluation_metrics: dict[str, float] | None = None
             interval = int(getattr(self.config.trainer, "live_eval_interval", 0))
             should_evaluate = interval > 0 and (
@@ -123,12 +204,7 @@ class Experiment:
                 or report.epoch + 1 == self.config.trainer.epochs
             )
             if should_evaluate:
-                evaluation = evaluate_model(
-                    model=model,
-                    loader=valid_loader,
-                    device=self.config.trainer.device,
-                    train_loader=self.data.train_loader(shuffle=False),
-                )
+                evaluation = evaluate()
                 evaluation_metrics = evaluation.metrics
                 last_eval = {
                     "epoch": report.epoch + 1,
@@ -137,7 +213,7 @@ class Experiment:
                 report.metrics.update(
                     {f"eval/{key}": value for key, value in evaluation_metrics.items()}
                 )
-                live_score = _live_eval_score(evaluation_metrics)
+                live_score = self._selection_score(evaluation_metrics)
                 if live_score is not None and (
                     best_eval is None or _is_better_live_score(live_score, best_eval["score"])
                 ):
@@ -148,6 +224,8 @@ class Experiment:
                     }
                     torch.save(model.state_dict(), best_model_path)
                     _write_json(best_metrics_path, best_eval)
+                    if self.config.selection is not None and self.config.selection.checkpoint == "best":
+                        best_evaluation = evaluation
             _write_history(history_path, self.trainer.history)
             _write_live_metrics(
                 live_metrics_path,
@@ -169,6 +247,17 @@ class Experiment:
                 },
             )
             print(_format_epoch_progress(report, evaluation_metrics), flush=True)
+            if should_evaluate or report.epoch + 1 == self.config.trainer.epochs:
+                checkpoint(report.epoch + 1)
+            if callback is not None and evaluation_metrics is not None:
+                stopped = callback(ExperimentReport(
+                    epoch=report.epoch + 1, metrics=dict(evaluation_metrics),
+                    elapsed_seconds=elapsed(), run_dir=run_dir,
+                    checkpoint_path=checkpoint_path if checkpoint_path.exists() else None,
+                )) is False
+                if stopped:
+                    return False
+            return None
 
         try:
             history = self.trainer.fit(
@@ -177,19 +266,33 @@ class Experiment:
                 train_loader=train_loader,
                 valid_loader=None if is_test_split else valid_loader,
                 epoch_callback=epoch_callback,
+                start_epoch=0 if saved is None else saved["epoch"],
+                strategy_state=None if saved is None else saved["strategy"],
+                on_ready=None if saved is None else lambda: restore_rng(saved["rng"], self.config.trainer.device),
             )
-            evaluation = evaluate_model(
-                model=model,
-                loader=valid_loader,
-                device=self.config.trainer.device,
-                train_loader=self.data.train_loader(shuffle=False),
-            )
+            completed_epochs = history[-1].epoch + 1 if history else 0
+            checkpoint(completed_epochs)
+            selected_epoch = completed_epochs
+            if self.config.selection is not None and self.config.selection.checkpoint == "best" and best_eval:
+                model.load_state_dict(torch.load(best_model_path, map_location=self.config.trainer.device, weights_only=True))
+                evaluation = best_evaluation
+                selected_epoch = best_eval["epoch"]
+            else:
+                evaluation = evaluate()
             result = self._write_artifacts(run_dir, model, history, evaluation)
+            result.selected_epoch = selected_epoch
+            result.completed_epochs = completed_epochs
+            result.elapsed_seconds = elapsed()
+            _write_json(run_dir / "selection.json", {
+                "epoch": selected_epoch, "completed_epochs": completed_epochs,
+                "selection": None if self.config.selection is None else self.config.selection.model_dump(),
+                "metrics": result.metrics, "model_path": "model.pt", "elapsed_seconds": result.elapsed_seconds,
+            })
             _write_json(
                 status_path,
                 {
-                    "status": "complete",
-                    "epoch": self.config.trainer.epochs,
+                    "status": "stopped" if stopped else "complete",
+                    "epoch": completed_epochs,
                     "epochs": self.config.trainer.epochs,
                     "run_dir": run_dir,
                     "metrics": result.metrics,
@@ -197,6 +300,12 @@ class Experiment:
                     "best_eval": best_eval,
                 },
             )
+            if callback is not None:
+                callback(ExperimentReport(
+                    epoch=selected_epoch, metrics=dict(result.metrics),
+                    elapsed_seconds=result.elapsed_seconds, run_dir=run_dir,
+                    checkpoint_path=checkpoint_path if checkpoint_path.exists() else None, final=True,
+                ))
             self.result = result
             return result
         except Exception as exc:
@@ -211,11 +320,20 @@ class Experiment:
             raise
 
     def _set_seeds(self) -> None:
-        seed = getattr(self.config.dataset, "seed", None)
+        seed = self.config.training_seed
+        if seed is None:
+            seed = getattr(self.config.dataset, "seed", None)
         if seed is None:
             return
-        torch.manual_seed(int(seed))
-        np.random.seed(int(seed))
+        seed_training(int(seed))
+
+    def _selection_score(self, metrics: dict[str, float]) -> dict[str, Any] | None:
+        selection = self.config.selection
+        if selection is None:
+            return _live_eval_score(metrics)
+        if selection.metric not in metrics or not math.isfinite(metrics[selection.metric]):
+            raise ValueError(f"Selection metric {selection.metric!r} must be present and finite; got {metrics}.")
+        return {"name": selection.metric, "value": metrics[selection.metric], "mode": selection.mode}
 
     def _make_run_dir(self) -> Path:
         output_dir = Path(self.config.output_dir)
@@ -239,14 +357,15 @@ class Experiment:
         report_path = run_dir / "report.md"
         predictions_path = run_dir / "predictions.npz" if self.config.save_predictions else None
         metrics = dict(evaluation.metrics)
-        nlb_full = evaluate_model_nlb_submission(
-            model=model,
-            train_loader=self.data.train_loader(shuffle=False),
-            valid_loader=self.data.valid_loader(),
-            dataset_config=self.config.dataset,
-            device=self.config.trainer.device,
-            output_dir=run_dir,
-        )
+        with evaluation_rng(self.config.evaluation_seed, self.config.trainer.device):
+            nlb_full = evaluate_model_nlb_submission(
+                model=model,
+                train_loader=self.data.train_loader(shuffle=False),
+                valid_loader=self.data.valid_loader(),
+                dataset_config=self.config.dataset,
+                device=self.config.trainer.device,
+                output_dir=run_dir,
+            )
         if nlb_full is not None:
             metrics.update(nlb_full.metrics)
 
@@ -256,7 +375,7 @@ class Experiment:
         torch.save(model.state_dict(), model_path)
         if predictions_path is not None:
             _write_predictions(predictions_path, evaluation)
-        plot_paths = _write_history_plots(run_dir, history)
+        plot_paths = _write_history_plots(run_dir, history) if self.config.save_plots else {}
         _write_report(report_path, self.config, history, metrics, plot_paths)
 
         return ExperimentResult(
@@ -282,12 +401,45 @@ def experiment_config_to_dict(config: ExperimentConfig) -> dict[str, Any]:
         "preprocessing": config.preprocessing.model_dump(mode="json"),
         "trainer": asdict(config.trainer),
         "batch_size": config.batch_size,
+        "selection": None if config.selection is None else config.selection.model_dump(mode="json"),
         "experiment": {
             "output_dir": config.output_dir,
             "run_name": config.run_name,
             "save_predictions": config.save_predictions,
+            "save_plots": config.save_plots,
+            "training_seed": config.training_seed,
+            "evaluation_seed": config.evaluation_seed,
+            "save_training_state": config.save_training_state,
         },
     }
+
+
+def _pack_evaluation(evaluation: EvaluationResult | None) -> dict | None:
+    if evaluation is None:
+        return None
+    return {
+        "metrics": evaluation.metrics,
+        "predictions": {key: torch.as_tensor(value) for key, value in evaluation.predictions.items()},
+        "targets": {key: torch.as_tensor(value) for key, value in evaluation.targets.items()},
+    }
+
+
+def _unpack_evaluation(state: dict | None) -> EvaluationResult | None:
+    if state is None:
+        return None
+    return EvaluationResult(
+        metrics=state["metrics"],
+        predictions={key: value.cpu().numpy() for key, value in state["predictions"].items()},
+        targets={key: value.cpu().numpy() for key, value in state["targets"].items()},
+    )
+
+
+def _unpack_epoch(state: dict) -> EpochReport:
+    return EpochReport(
+        epoch=state["epoch"], train=StepResult(**state["train"]),
+        valid=None if state["valid"] is None else StepResult(**state["valid"]),
+        seconds=state["seconds"], metrics=state["metrics"],
+    )
 
 
 def _write_history(path: Path, history: list[EpochReport]) -> None:

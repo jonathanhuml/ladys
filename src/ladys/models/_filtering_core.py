@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import math
-import os
-from random import randint
-import warnings
 
 import gpytorch
 from linear_operator import operators
@@ -25,8 +22,8 @@ class CASSMElboLoss(nn.Module):
 
     def forward(
         self,
-        prior_predictive_residual: Tensor,
-        prior_state_covariance,
+        posterior_residual: Tensor,
+        posterior_state_covariance,
         obs_noise: Tensor,
         cakf_mean_message: Tensor,
         mean_update_term: Tensor,
@@ -34,12 +31,12 @@ class CASSMElboLoss(nn.Module):
         innovation_cholesky: Tensor,
         use_dense_projection: bool,
     ) -> Tensor:
-        pos_diag = prior_state_covariance.diagonal(dim1=-1, dim2=-2)[..., 0::2]
+        pos_diag = posterior_state_covariance.diagonal(dim1=-1, dim2=-2)[..., 0::2]
         inv_obs_noise = obs_noise.pow(-1)
 
         trace_cov = (inv_obs_noise * pos_diag).sum(-1)
         residual_quadratic = torch.mean(
-            (prior_predictive_residual.mT * inv_obs_noise) @ prior_predictive_residual
+            (posterior_residual.mT * inv_obs_noise) @ posterior_residual
         )
         normalizer = obs_noise.numel() * torch.log(2 * obs_noise.new_tensor(math.pi))
 
@@ -60,10 +57,17 @@ class CASSMElboLoss(nn.Module):
         )
 
         trace_term = cov_scaled_innovation.diagonal(dim1=-2, dim2=-1).sum(-1)
+        projected_dim = projected_noise_matrix.shape[-1]
+        noise_cholesky = torch.linalg.cholesky(projected_noise_matrix)
+        logdet_ratio = (
+            2.0 * noise_cholesky.diagonal(dim1=-2, dim2=-1).log().sum(-1)
+            - 2.0 * innovation_cholesky.diagonal(dim1=-2, dim2=-1).log().sum(-1)
+        )
         kl_term = 0.5 * (
             torch.mean(cakf_mean_message.mT @ mean_update_term)
-            - torch.mean(trace_term)
-            - torch.mean(torch.logdet(cov_scaled_innovation))
+            + torch.mean(trace_term)
+            - projected_dim
+            - torch.mean(logdet_ratio)
         )
 
         return kl_term + expectation_term
@@ -124,9 +128,9 @@ def _matern32_time_process_cov(
     rho2 = torch.exp(-2.0 * lam * delta_t)
     u = lam * delta_t
 
-    q11 = 3.0 * sigma_f2 * (1.0 - rho2 * (1.0 + 2.0 * u + 2.0 * u**2))
-    q22 = 3.0 * sigma_f2 * lam**2 * (1.0 - rho2 * (1.0 - 2.0 * u + 2.0 * u**2))
-    q12 = 6.0 * sigma_f2 * lam**3 * delta_t**2 * rho2
+    q11 = sigma_f2 * (1.0 - rho2 * (1.0 + 2.0 * u + 2.0 * u**2))
+    q22 = sigma_f2 * lam**2 * (1.0 - rho2 * (1.0 - 2.0 * u + 2.0 * u**2))
+    q12 = 2.0 * sigma_f2 * lam**3 * delta_t**2 * rho2
 
     return torch.stack(
         [torch.stack([q11, q12], -1), torch.stack([q12, q22], -1)],
@@ -168,10 +172,6 @@ def _log_marginal_likelihood(residual: Tensor, y_cholesky: Tensor) -> Tensor:
     return loss1 + loss2 + loss3
 
 
-def _random_run_id(length: int = 6) -> str:
-    return "".join(str(randint(0, 9)) for _ in range(length))
-
-
 class ComputationAwareFilterSmoother(nn.Module):
     """Sparse computation-aware state-space filter used by LaDyS CASSM."""
 
@@ -191,14 +191,13 @@ class ComputationAwareFilterSmoother(nn.Module):
 
         self.dim = nneurons
         self.projection_dim = projection_dim
-        self.remainder = self.dim % self.projection_dim
-        if self.remainder != 0 and not use_dense_projection:
-            warnings.warn(
-                "Number of neurons is not divisible by projection dimension. "
-                f"Throwing away {self.remainder} neurons.",
-                stacklevel=2,
+        if not 1 <= self.projection_dim <= self.dim:
+            raise ValueError("projection_dim must be positive and <= nneurons.")
+        if self.dim % self.projection_dim != 0 and not use_dense_projection:
+            raise ValueError(
+                "Sparse CASSM requires nneurons to be divisible by projection_dim. "
+                "Choose a divisor or set use_dense_projection=True."
             )
-            self.dim -= self.remainder
 
         self.state_dim = 2 * self.dim
         self.t = timesteps
@@ -264,10 +263,10 @@ class ComputationAwareFilterSmoother(nn.Module):
         )
 
         if self.save_model:
-            if dataset_name is None:
-                raise ValueError("dataset_name is required when save_model=True.")
-            self.save_path = f"./cassm_runs/{dataset_name}/run_id_{_random_run_id()}/"
-            os.makedirs(self.save_path, exist_ok=True)
+            raise ValueError(
+                "Model-local save_model is unsupported; use Experiment output_dir. "
+                "Experiment.run saves the fitted checkpoint."
+            )
 
     def _build_dynamics(self):
         ell = self.softplus(self.raw_ell)
@@ -317,9 +316,6 @@ class ComputationAwareFilterSmoother(nn.Module):
 
     def filter(self, data: Tensor, return_type: str = "forward"):
         num_trials, time_steps = data.shape[:2]
-
-        if self.remainder != 0:
-            data = data[:, :, : self.dim]
 
         if return_type == "prediction":
             updated_belief_state_means = torch.empty(
@@ -397,18 +393,15 @@ class ComputationAwareFilterSmoother(nn.Module):
             mean_update_term = prior_belief_state_cov_op.matmul(cakf_mean_message)
             updated_belief_state_mean = prior_belief_state_mean + mean_update_term
             scaled_cov = prior_belief_state_cov_op.matmul(cakf_cov_message)
-
-            m_trunc = self._truncate_downdate(torch.cat([downdate_sqrt, scaled_cov], dim=-1))
-            prior_belief_state_mean = transition_matrix @ updated_belief_state_mean
-            downdate_sqrt = transition_matrix @ m_trunc
-            prior_belief_state_cov_op = (
-                prior_belief_state_cov_op.linear_ops[0]
-                - operators.RootLinearOperator(downdate_sqrt)
+            updated_belief_state_cov_op = (
+                prior_belief_state_cov_op - operators.RootLinearOperator(scaled_cov)
             )
 
             loss = loss + self.loss_fn(
-                prior_predictive_residual=prior_predictive_residual,
-                prior_state_covariance=prior_belief_state_cov_op,
+                posterior_residual=(
+                    prior_predictive_residual - self.observation_matrix @ mean_update_term
+                ),
+                posterior_state_covariance=updated_belief_state_cov_op,
                 obs_noise=self.softplus(self.obs_noise_values),
                 cakf_mean_message=cakf_mean_message,
                 mean_update_term=mean_update_term,
@@ -418,11 +411,20 @@ class ComputationAwareFilterSmoother(nn.Module):
             )
 
             if return_type == "prediction":
-                pos_diag = prior_belief_state_cov_op.diagonal(dim1=-1, dim2=-2)[..., 0::2]
+                pos_diag = updated_belief_state_cov_op.diagonal(dim1=-1, dim2=-2)[..., 0::2]
                 updated_belief_obs_vars[:, t, :] = pos_diag + self.softplus(
                     self.obs_noise_values
                 )
                 updated_belief_state_means[:, t, :] = updated_belief_state_mean[:, :, 0]
+
+            # Evaluate the current posterior before compressing and propagating
+            # its covariance representation to the next time step.
+            m_trunc = self._truncate_downdate(torch.cat([downdate_sqrt, scaled_cov], dim=-1))
+            prior_belief_state_mean = transition_matrix @ updated_belief_state_mean
+            downdate_sqrt = transition_matrix @ m_trunc
+            prior_belief_state_cov_op = (
+                sigma_inf_op - operators.RootLinearOperator(downdate_sqrt)
+            )
 
         loss = loss * (1 / time_steps) * (1 / self.dim)
 
@@ -473,10 +475,10 @@ class DenseKalmanFilterSmoother(nn.Module):
         self.obs_noise_values = nn.Parameter(1e-1 * torch.ones(self.dim, device=device))
 
         if self.save_model:
-            if dataset_name is None:
-                raise ValueError("dataset_name is required when save_model=True.")
-            self.save_path = f"./kalman_runs/{dataset_name}/run_id_{_random_run_id()}/"
-            os.makedirs(self.save_path, exist_ok=True)
+            raise ValueError(
+                "Model-local save_model is unsupported; use Experiment output_dir. "
+                "Experiment.run saves the fitted checkpoint."
+            )
 
     def build_matern_observation_matrix(self) -> Tensor:
         eye = torch.eye(

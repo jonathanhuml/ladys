@@ -111,7 +111,7 @@ class Smoothing(BaseDynamicsModel):
         epoch: int = 0,
     ) -> LossOutput:
         del epoch
-        x = observations_from_batch(batch).to(device=output.rates.device, dtype=output.rates.dtype)
+        x = _training_count_observations(batch).to(device=output.rates.device, dtype=output.rates.dtype)
         total = _poisson_nll(output.rates, x).mean()
         return LossOutput(
             total=total,
@@ -130,6 +130,10 @@ class Smoothing(BaseDynamicsModel):
                 poisson_max_iter=self.nlb_poisson_max_iter,
                 prediction_floor=self.prediction_floor,
             )
+        if task == "synthetic":
+            from ladys.metrics import SyntheticEvaluationAdapter
+
+            return SyntheticEvaluationAdapter(use_raw_spikes=True)
         return None
 
     def _smooth(self, x: Tensor) -> Tensor:
@@ -155,7 +159,7 @@ class PSTHConfig(BaseModelConfig):
     bin_size_ms: float = 5.0
     prediction_floor: float = 1e-9
     optimization: OptimizationConfig = Field(
-        default_factory=lambda: OptimizationConfig(name="inference_only")
+        default_factory=lambda: OptimizationConfig(name="library_fit")
     )
 
     def build(self, n_neurons: int, n_time: int) -> "PSTH":
@@ -193,7 +197,7 @@ class PSTH(BaseDynamicsModel):
 
     ## Outputs
 
-    `forward` returns the fitted time-varying mean rates when available. NLB
+    `forward` requires a fitted training time-varying mean rate. NLB
     evaluation bypasses `forward` and returns condition-matched held-out
     training PSTH rates directly from the prepared H5 tensors.
     """
@@ -220,14 +224,33 @@ class PSTH(BaseDynamicsModel):
     def forward(self, x: Tensor) -> ModelOutput:
         if x.ndim != 3:
             raise ValueError("PSTH expects input shape (batch, time, neurons).")
-        if self.psth_rates.numel() > 0:
-            rates = self.psth_rates.to(device=x.device, dtype=x.dtype)
-            rates = rates[: x.shape[1], : x.shape[2]]
-            rates = rates.unsqueeze(0).expand(x.shape[0], -1, -1)
-        else:
-            rates = x.float().mean(dim=0, keepdim=True).expand(x.shape[0], -1, -1)
+        if self.psth_rates.numel() == 0:
+            raise RuntimeError("PSTH must be fitted on training data before prediction.")
+        if tuple(x.shape[1:]) != (self.n_time, self.n_neurons):
+            raise ValueError(f"PSTH expects time/neuron dimensions {(self.n_time, self.n_neurons)}, got {tuple(x.shape[1:])}.")
+        dtype = x.dtype if x.is_floating_point() else self.psth_rates.dtype
+        rates = self.psth_rates.to(device=x.device, dtype=dtype)
+        rates = rates.unsqueeze(0).expand(x.shape[0], -1, -1)
         rates = rates.clamp_min(self.prediction_floor)
         return ModelOutput(rates=rates, reconstruction=rates)
+
+    def fit_training_data(self, loader, *, device) -> None:
+        if self.psth_rates.numel() == 0:
+            self.fit_psth_from_loader(loader, torch.device(device))
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        saved = state_dict.get(prefix + "psth_rates")
+        if saved is not None:
+            expected = (self.n_time, self.n_neurons)
+            if tuple(saved.shape) not in {(0,), expected}:
+                error_msgs.append(f"PSTH checkpoint dimensions must be {expected}, got {tuple(saved.shape)}.")
+            elif not bool(torch.isfinite(saved).all()) or bool((saved < 0).any()):
+                error_msgs.append("PSTH checkpoint rates must be finite and nonnegative.")
+            else:
+                self.psth_rates = self.psth_rates.new_empty(saved.shape)
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
+                                     missing_keys, unexpected_keys, error_msgs)
 
     def loss(
         self,
@@ -236,7 +259,7 @@ class PSTH(BaseDynamicsModel):
         epoch: int = 0,
     ) -> LossOutput:
         del epoch
-        x = observations_from_batch(batch).to(device=output.rates.device, dtype=output.rates.dtype)
+        x = _training_count_observations(batch).to(device=output.rates.device, dtype=output.rates.dtype)
         total = _poisson_nll(output.rates, x).mean()
         return LossOutput(
             total=total,
@@ -251,19 +274,23 @@ class PSTH(BaseDynamicsModel):
 
     def fit_psth_from_loader(self, loader: Iterable | None, device: torch.device) -> None:
         if loader is None:
-            return
+            raise ValueError("PSTH fitting requires a training loader.")
         sums: Tensor | None = None
         count = 0
         with torch.no_grad():
             for batch in loader:
                 batch = move_batch_to_device(batch, device)
-                x = observations_from_batch(batch).float()
+                x = _training_count_observations(batch).float()
+                if x.ndim != 3 or tuple(x.shape[1:]) != (self.n_time, self.n_neurons):
+                    raise ValueError("PSTH training data does not match its configured time/neuron dimensions.")
+                if not bool(torch.isfinite(x).all()) or bool((x < 0).any()):
+                    raise ValueError("PSTH requires finite nonnegative training spike counts.")
                 x = _smooth_trials(x, self.kernel)
                 batch_sum = x.sum(dim=0)
                 sums = batch_sum if sums is None else sums + batch_sum
                 count += int(x.shape[0])
         if sums is None or count == 0:
-            return
+            raise ValueError("PSTH fitting requires nonempty training data.")
         self.psth_rates = (sums / count).clamp_min(self.prediction_floor)
 
 
@@ -282,7 +309,7 @@ class PSTHEvaluationAdapter:
     ) -> None:
         if not isinstance(model, PSTH):
             raise TypeError("PSTHEvaluationAdapter requires a PSTH model.")
-        model.fit_psth_from_loader(loader, device)
+        model.fit_training_data(loader, device=device)
         if self.task != "nlb" or loader is None:
             return
 
@@ -316,7 +343,7 @@ class PSTHEvaluationAdapter:
     ):
         from ladys.metrics import SyntheticEvaluationAdapter
 
-        return SyntheticEvaluationAdapter().evaluate(model, loader, device)
+        return SyntheticEvaluationAdapter(use_raw_spikes=True).evaluate(model, loader, device)
 
     def _evaluate_nlb(
         self,
@@ -413,8 +440,6 @@ def _rates_from_nlb_condition_psth(
     arrays = getattr(dataset, "arrays", None)
     train_heldout = getattr(arrays, "train_heldout_spikes", None)
     if train_heldout is None:
-        train_heldout = getattr(dataset, "raw_spikes", None)
-    if train_heldout is None:
         return None
     train_heldout = train_heldout.to(device=targets.device, dtype=targets.dtype)
     train_heldout = train_heldout[:, : targets.shape[1], : targets.shape[-1]]
@@ -453,3 +478,9 @@ def _smooth_trials(x: Tensor, kernel: Tensor) -> Tensor:
     full = F.conv1d(padded, weight, groups=neurons)
     start = (kernel.numel() - 1) // 2
     return full[..., start : start + time].transpose(1, 2).reshape(batch, time, neurons)
+
+
+def _training_count_observations(batch) -> Tensor:
+    if isinstance(batch, dict) and "heldout_spikes" not in batch:
+        return batch.get("raw_spikes", batch["spikes"])
+    return observations_from_batch(batch)

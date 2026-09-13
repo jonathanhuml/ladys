@@ -48,6 +48,7 @@ benchmarks = [
   "tueplots>=0.2.4; python_version >= '3.10'",
 ]
 data = ["dandi"]
+tuning = ["ray[tune]>=2.43,<3", "optuna>=3,<5"]
 
 [project.scripts]
 ladys = "ladys.cli:main"

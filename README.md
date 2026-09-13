@@ -1,312 +1,41 @@
-# LaDyS (Latent Dynamical Systems) Package
+# LaDyS
 
 <p align="center">
   <img src="https://zkunkworks.com/ladys/assets/lorenz.png" alt="LaDyS Lorenz attractor logo" width="240">
 </p>
 
-PyTorch benchmark scaffolding for latent variable models of neural dynamics.
+LaDyS (Latent Dynamical Systems) is a Python library for fitting and comparing
+models of neural population dynamics through a shared PyTorch API.
 
-The first API pass standardizes model construction, training/reporting contracts,
-and synthetic Lorenz/chaotic-RNN datasets. Models accept `(batch, time, neurons)`
-tensors in `forward`.
+## Models
 
-## Initial Examples
+- bGPFA
+- CASSM
+- GPFA
+- iLQR-VAE
+- Kalman filter
+- LangevinFlow
+- LFADS
+- MINT
+- NDT
+- PSTH
+- Gaussian smoothing
+- STNDT
 
-- `ladys.models.bgpfa`: Bayesian GPFA using the vendored `mgplvm-pytorch`
-  implementation with a differentiable variational ELBO and full-batch
-  gradient strategy.
-- `ladys.models.cassm`: thin adapter around the compact sparse CASSM
-  filtering core in `ladys.models`.
-- `ladys.models.gpfa`: Gaussian-observation GPFA with FA initialization and a
-  differentiable exact marginal negative log likelihood. It trains with the
-  standard PyTorch gradient strategy by default; the older EM adapter remains
-  available through config.
-- `ladys.models.ilqr_vae`: PyTorch iLQR-VAE with random-initialized ELBO
-  training and differentiable posterior-control inference. Pretrained weights
-  are optional, not required by the core 5 ms NLB recipes.
-- `ladys.models.kalman`: dense Kalman filter baseline adapted from the CASSM
-  filtering code, exposed with per-trial rate predictions for benchmark metrics.
-- `ladys.models.langevin_flow`: sequential VAE adapter for LangevinFlow with a
-  GRU encoder, Langevin latent position/velocity dynamics, a locally coupled
-  oscillator potential, and a one-layer Transformer rate decoder. The LaDyS
-  NLB path trains a direct held-in plus held-out readout and scores the
-  held-out slice.
-- `ladys.models.mint`: trainable Mesh of Idealized Neural Trajectories
-  decoder. MINT fits a trajectory library from training spikes, then decodes by Poisson
-  likelihood recursion and interpolation; Lorenz defaults to spike-derived
-  smoothed libraries, while `lorenz_library_source: true_rates` is reserved for
-  oracle/debug checks.
-- `ladys.models.ndt`: masked-count NeuralDataTransformer (NDT)
-  adapter with native LaDyS config, training, prediction, and metrics contracts.
-- `ladys.models.psth`: peri-stimulus time histogram baseline. On NLB H5 files
-  with condition indices, it smooths training held-out spikes, averages them by
-  condition, and maps those condition averages onto eval trials without using
-  target-side PSTH evaluation metadata.
-- `ladys.models.smoothing`: Gaussian spike-smoothing baseline. For NLB
-  co-smoothing, it mirrors the public NLB smoothing baseline by fitting a
-  Poisson readout from log-smoothed held-in counts to training held-out counts.
+## Quickstart
 
-
-## Public Experiment API
-
-LaDyS is organized around three public pieces:
-
-- `ladys.models`: model configs build PyTorch `nn.Module` instances and carry
-  their optimization settings.
-- `ladys.data.DataModule`: creates PyTorch train/validation datasets and
-  dataloaders.
-- `ladys.Experiment`: gathers data, model, training, evaluation metrics, and
-  artifacts into one inspectable run folder.
-
-Run the canonical CLI path with a dataset and model:
+With LaDyS installed, run a Lorenz experiment on CPU:
 
 ```bash
-ladys run -d lorenz -m cassm
+ladys run -d lorenz -m gpfa --epochs 20 --device cpu
 ```
 
-The run folder includes `config.json`, `history.csv`, `metrics.json`,
-`predictions.npz`, `model.pt`, and `report.md`. The CLI also accepts full YAML
-experiment configs:
+The experiment saves its configuration, fitted model, metrics, and predictions
+under `runs/`.
 
-```bash
-ladys run -c configs/experiment/synthetic/lorenz/bgpfa/bgpfa_lorenz.yaml
-ladys run -c configs/experiment/synthetic/lorenz/gpfa/gpfa_lorenz.yaml
-ladys run -c configs/experiment/synthetic/lorenz/langevin_flow/langevin_flow_lorenz.yaml
-ladys run -c configs/experiment/synthetic/lorenz/ndt/ndt_lorenz.yaml
-ladys list datasets
-ladys list models
-```
+## Learn more
 
-Config files are split by how reusable they are. `configs/model/*.yaml` files
-are generic model presets that should not depend on a specific dataset's neuron
-count, time bins, held-out slice, or NLB split. `configs/dataset/*.yaml` files
-are reusable dataset presets. Fully runnable, benchmark-specific settings live
-under `configs/experiment/...` because they intentionally combine a dataset,
-model dimensions, optimizer, trainer, preprocessing, output naming, and any
-task-specific readout slices. For example, LFADS has one generic
-`configs/model/lfads.yaml`, while the NLB reproduction settings live as complete
-experiment YAMLs under each real dataset's `lfads/` folder.
-
-Synthetic and real-data tasks share the same CLI, but use task-specific
-evaluation adapters under the hood. Synthetic datasets such as Lorenz and
-chaotic RNN expose true rates and latents, so the default adapter reports
-ground-truth rate and latent metrics. NLB datasets expose held-in spikes and
-held-out targets, so the NLB co-smoothing adapter reports held-out bits/spike;
-models can override `evaluation_adapter(task)` when they need a method-specific
-readout, such as GPFA fitting a PyTorch linear or Poisson readout from inferred
-features to held-out neurons.
-
-## Neural Latents Benchmark Data
-
-LaDyS can prepare the four core NLB'21 datasets, `area2_bump`, `mc_maze`,
-`mc_rtt`, and `dmfc_rsg`, as held-in/held-out co-smoothing H5 files in
-`data/real/nlb`. All 12 models have core 5 ms validation recipes. With
-`--download`, the command fetches the required DANDI NWB files before building
-LaDyS-ready training and validation tensors:
-
-```bash
-PYTHONPATH=src python3 scripts/prepare_nlb_data.py \
-  --datasets area2_bump mc_maze mc_rtt dmfc_rsg \
-  --splits val \
-  --bin-sizes-ms 5 \
-  --include-psth \
-  --download
-```
-
-If NWB files are already present in a DANDI-style directory, omit `--download`
-and pass `--nwb-root` or repeated `--search-root` values. If the public target
-H5 is already local, pass `--target-h5` when preparing a final test split.
-Dataset configs for 5 ms and 20 ms test files live under `configs/dataset/`.
-Training requires separate `train_spikes_heldin` and `train_spikes_heldout`;
-missing tensors raise an error instead of substituting evaluation data.
-Checkpoint selection and early stopping use validation data only. The STNDT
-and LangevinFlow selection runners derive targets from the configured
-validation H5 and reject external test-target overrides. Fixed-budget test
-runs through `Experiment` do not pass test losses to training schedulers.
-
-After a LaDyS run writes `predictions.npz`, score held-out count predictions
-with the NLB co-smoothing bits/spike metric:
-
-```bash
-ladys run -c configs/experiment/real/mc_maze/ilqr_vae/ilqr_vae_mc_maze_nlb_5ms.yaml
-ladys score-nlb --run-dir runs/ilqr_vae_mc_maze_nlb_5ms
-```
-
-The four iLQR-VAE 5 ms recipes now train from scratch. Their finite-iteration
-solver derivatives have numerical gradient tests; upstream implicit-adjoint
-parity and converged NLB scores are not established. Historical MC_Maze scores
-from the pretrained inference recipe are not evidence for these new recipes.
-
-MINT uses `optimization.name: library_fit`: the trainer fits templates before
-the epoch loop, so `epochs: 0` does not skip that fit. Its MC_RTT recipe trains
-an LFADS rate estimator from training spikes before fitting the library.
-Fitted templates are included in `model.pt`. Dataset-specific hyperparameters
-live in configs, while neuron counts and timing come from prepared data.
-
-After selecting a checkpoint on validation, evaluate it without retraining:
-
-```bash
-PYTHONPATH=src:. python3 scripts/evaluate_nlb_checkpoint.py \
-  --config configs/experiment/real/mc_maze/ilqr_vae/ilqr_vae_mc_maze_nlb_5ms.yaml \
-  --checkpoint runs/ilqr_vae_mc_maze_nlb_5ms/model.pt \
-  --split test --output-dir runs/ilqr_vae_mc_maze_final_test --device cuda
-```
-
-The test H5 must be prepared separately with `--splits test`. `--data-path`
-can point to another prepared H5; no source-code path changes are needed.
-
-For bounded training/checkpoint diagnostics, run
-`PYTHONPATH=src:. python3 scripts/verify_nlb_models.py --data-root DATA_DIR
---output-dir OUTPUT_DIR --device cuda`. This tests MINT, iLQR-VAE, and bGPFA
-on small validation subsets, not benchmark convergence.
-
-For full-data comparisons of MINT, BGPFA, and iLQR-VAE, use
-`scripts/run_nlb_model_comparison.py --data-root DATA_DIR --output-dir OUTPUT_DIR`.
-It retains the checked-in model sizes and training budgets and saves per-epoch
-losses, periodic validation co-BPS, checkpoints, and best-checkpoint predictions.
-These are validation-selected scores, not independent test or leaderboard scores.
-
-Remote runs use `scripts/hal_nlb.sh`, with `status`, `gpu`, `processes`, `run`,
-`start`, `stop`, and `test` actions. `start LOG_DIR PYTHON ...` launches a detached
-run and records its PID and log; the Python executable and data paths are explicit
-arguments, not machine-specific constants in model code. Use the same direct
-SSH prefix for every action, without wrapping it in an additional login shell:
-
-```bash
-ssh -o BatchMode=yes -o ConnectTimeout=10 HAL bash /path/to/checkout/scripts/hal_nlb.sh status
-```
-
-GPFA uses the same real-data path with its NLB adapter:
-
-```bash
-ladys run -c configs/experiment/real/mc_maze/gpfa/gpfa_mc_maze_nlb_5ms.yaml
-ladys score-nlb --run-dir runs/gpfa_mc_maze_nlb_5ms
-```
-
-The lightweight NLB baselines are available through the same experiment API:
-
-```bash
-ladys run -c configs/experiment/real/mc_maze/psth/psth_mc_maze_nlb_5ms.yaml
-ladys run -c configs/experiment/real/mc_maze/smoothing/smoothing_mc_maze_nlb_5ms.yaml
-ladys score-nlb --run-dir runs/psth_mc_maze_nlb_5ms
-ladys score-nlb --run-dir runs/smoothing_mc_maze_nlb_5ms
-```
-
-LangevinFlow configs are included for all four NLB datasets at 5 ms and 20 ms:
-
-```bash
-ladys run -c configs/experiment/real/mc_maze/langevin_flow/langevin_flow_mc_maze_nlb_5ms.yaml
-ladys run -c configs/experiment/real/area2_bump/langevin_flow/langevin_flow_area2_bump_nlb_5ms.yaml
-ladys run -c configs/experiment/real/mc_rtt/langevin_flow/langevin_flow_mc_rtt_nlb_5ms.yaml
-ladys run -c configs/experiment/real/dmfc_rsg/langevin_flow/langevin_flow_dmfc_rsg_nlb_5ms.yaml
-```
-
-Note: LangevinFlow should be run with longer training budgets for meaningful
-results. The NLB YAMLs use released-scale epoch counts, and short runs such as
-20 epochs are only diagnostics to confirm that optimization is moving.
-
-Synthetic Lorenz configs are also included:
-
-```bash
-ladys run -c configs/experiment/synthetic/lorenz/langevin_flow/langevin_flow_lorenz.yaml
-ladys run -c configs/experiment/synthetic/lorenz/psth/psth_lorenz.yaml
-ladys run -c configs/experiment/synthetic/lorenz/smoothing/smoothing_lorenz.yaml
-```
-
-For methods that emit a full EvalAI-style submission H5, the same command can
-delegate to the `nlb_tools` evaluator:
-
-```bash
-ladys score-nlb --submission-h5 path/to/submission.h5 \
-  --target-h5 data/real/nlb/eval_data_test.h5
-```
-
-## Scaling Benchmark
-
-Install the plotting extra before running benchmark artifact scripts in a clean
-environment:
-
-```bash
-pip install -e ".[benchmarks]"
-```
-
-Benchmark figures use a shared LaDyS plotting style backed by TUEplots when it
-is available. On Python versions where TUEplots cannot be installed, LaDyS uses
-a local Matplotlib fallback with the same figure sizing, color, grid, legend,
-and export defaults.
-
-```bash
-PYTHONPATH=src python3 scripts/benchmark_lorenz_scaling.py \
-  --models cassm gpfa kalman ndt \
-  --neurons 10 100 1000 \
-  --seeds 1
-```
-
-The script writes a grouped run under `runs/lorenz_scaling/`, including
-`summary.csv`, `summary.npy`, `summary.md`, and
-`plots/time_vs_neurons.png`.
-
-## Loss-Curve Benchmark
-
-```bash
-PYTHONPATH=src python3 scripts/benchmark_lorenz_loss_curves.py \
-  --models bgpfa cassm gpfa ilqr_vae kalman lfads mint ndt \
-  --neurons 100 \
-  --epochs 50
-```
-
-The script writes a grouped run under `runs/lorenz_loss_curves/`, including
-top-level `summary.csv`/`summary.md`, comparison plots under `plots/`, and
-per-model outputs under `models/<model>/`.
-
-MINT appears in these curves as a horizontal post-fit baseline. Its
-default Lorenz adapter estimates trajectory-library rates from smoothed training
-spikes and repeated-trial averages. Passing
-`--mint-lorenz-library-source true_rates` switches to an oracle sanity check and
-should not be used for fair method ordering.
-
-## Preprocessing
-
-Experiment YAML files can include a `preprocessing` block. The benchmark
-scripts apply this to dataset observations before models see them, while
-leaving Lorenz ground-truth rates unchanged for MSE metrics.
-
-```yaml
-preprocessing:
-  observations:
-    name: smooth_firing_rate
-    sampling_precision: 20.0
-    kern_sd_ms: 50.0
-```
-
-`configs/experiment/synthetic/lorenz/cassm/cassm_lorenz.yaml` and
-`configs/experiment/synthetic/lorenz/kalman/kalman_lorenz.yaml` enable this
-CASSM-style spike smoothing.
-`configs/experiment/synthetic/lorenz/gpfa/gpfa_lorenz.yaml` leaves observations
-raw.
-
-See `website/docs/model_output_contract.md` for the forward-output convention.
-See `website/docs/optimizer_contract.md` for the benchmark epoch definition.
-
-## Documentation Site
-
-The website workspace lives under `website/`. LaDyS docs source lives under
-`website/docs/`, theme overrides live under `website/overrides/`, and MkDocs
-builds generated output into `website/site/`. The standalone zkunkworks
-homepage source lives under `website/home/`.
-
-Model pages under `website/docs/models/` are generated from model class
-docstrings and config defaults. Images referenced from model docstrings should
-live under `website/docs/assets/` and can be linked as `assets/<filename>`:
-
-```bash
-python scripts/generate_model_docs.py
-python scripts/generate_model_docs.py --check
-```
-
-Install the docs extra and serve the site locally:
-
-```bash
-pip install -e ".[docs]"
-mkdocs serve
-```
+- [Lorenz tutorial](tutorials/lorenz.ipynb): configure an experiment, train a model,
+  and plot learning curves and reconstructed activity.
+- [Documentation](https://zkunkworks.com/ladys/): model reference, configuration,
+  and hyperparameter tuning.

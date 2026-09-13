@@ -47,7 +47,7 @@ comparison. Use it only when validating the likelihood/interpolation code.
 
 ## Outputs
 
-`forward` accepts `(batch, time, neurons)` spikes and returns expected spike
+`forward` accepts raw `(batch, time, neurons)` spike counts and returns expected spike
 counts per input bin. Training fits templates once before evaluation;
 checkpoints contain the complete fitted library and neuron layout.
 

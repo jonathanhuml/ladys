@@ -172,19 +172,21 @@ class STNDTConfig(BaseModelConfig):
                 train_dataset = data.train_dataset
                 if train_dataset is None:
                     raise RuntimeError("DataModule.setup() must run before build_from_data().")
-                heldout = getattr(train_dataset, "raw_spikes", None)
-                if heldout is not None:
-                    dataset_config = getattr(train_dataset, "config", None)
+                dataset = getattr(train_dataset, "dataset", train_dataset)
+                heldin = getattr(dataset, "heldin_spikes", None)
+                heldout = getattr(dataset, "raw_spikes", None)
+                if heldin is not None and heldout is not None:
+                    dataset_config = getattr(dataset, "config", None)
                     input_mode = getattr(dataset_config, "input_mode", None)
                     if input_mode != "full_observed":
                         output_neurons = n_neurons + int(heldout.shape[-1])
-                    heldin_forward = getattr(train_dataset, "heldin_forward_spikes", None)
-                    heldout_forward = getattr(train_dataset, "heldout_forward_spikes", None)
+                    heldin_forward = getattr(dataset, "heldin_forward_spikes", None)
+                    heldout_forward = getattr(dataset, "heldout_forward_spikes", None)
                     if heldin_forward is not None and heldout_forward is not None:
                         fwd_steps = fwd_steps or int(heldin_forward.shape[1])
                 elif self.output_mode == "heldin_heldout":
                     raise ValueError(
-                        "output_mode='heldin_heldout' requires a dataset with raw_spikes."
+                        "output_mode='heldin_heldout' requires held-in and held-out dataset channels."
                     )
         return self._build_configured(
             n_neurons=n_neurons,
@@ -512,6 +514,8 @@ class STNDT(BaseDynamicsModel):
         log_rates = output.extras["log_rates"][:, : target.shape[1], : target.shape[2]]
         rates = output.rates[:, : target.shape[1], : target.shape[2]]
         finite = torch.isfinite(target)
+        if not finite.any():
+            raise ValueError("STNDT loss requires at least one finite reconstruction target.")
         safe_target = torch.nan_to_num(target, nan=0.0, posinf=0.0, neginf=0.0)
         loss_mask = self._loss_mask_for_target(batch, output, target).to(target.device)
         loss_mask = loss_mask & finite
@@ -566,7 +570,7 @@ class STNDT(BaseDynamicsModel):
 
     def _forward(self, x: Tensor, should_mask: bool) -> ModelOutput:
         self._validate_input(x)
-        x = x.to(device=self.device, dtype=torch.float32)
+        x = x.to(device=self.device, dtype=next(self.parameters()).dtype)
         masked_observed, labels, observed_loss_mask = self._mask_observations(
             x,
             should_mask=should_mask,
@@ -735,7 +739,7 @@ class STNDT(BaseDynamicsModel):
                 size=x.shape,
                 device=x.device,
                 dtype=torch.long,
-            ).float()
+            ).to(dtype=x.dtype)
             masked_x[random_mask] = random_spikes[random_mask]
 
         return masked_x, labels, mask
@@ -811,6 +815,20 @@ class STNDT(BaseDynamicsModel):
         log_rates: Tensor,
     ) -> Tensor:
         observed = observations_from_batch(batch)
+        if isinstance(batch, dict):
+            reconstruction = batch.get("reconstruction_spikes")
+            if reconstruction is not None:
+                if (
+                    reconstruction.ndim != log_rates.ndim
+                    or reconstruction.shape[0] != log_rates.shape[0]
+                    or reconstruction.shape[1] > log_rates.shape[1]
+                    or reconstruction.shape[2] != log_rates.shape[2]
+                ):
+                    raise ValueError("STNDT reconstruction_spikes shape is incompatible with its readout.")
+                return reconstruction
+            raw = batch.get("raw_spikes")
+            if "heldout_spikes" not in batch and raw is not None and raw.shape == observed.shape:
+                observed = raw
         if isinstance(batch, dict) and "heldout_spikes" in batch:
             heldout = batch["heldout_spikes"]
             total_neurons = observed.shape[-1] + heldout.shape[-1]
@@ -928,6 +946,8 @@ class STNDT(BaseDynamicsModel):
             raise ValueError(f"Expected {self.n_time} time bins, got {x.shape[1]}.")
         if x.shape[-1] != self.n_neurons:
             raise ValueError(f"Expected {self.n_neurons} neurons, got {x.shape[-1]}.")
+        if not torch.isfinite(x).all():
+            raise ValueError("STNDT expects finite spike-count observations.")
         if torch.any(x < 0):
             raise ValueError("STNDT expects nonnegative spike-count observations.")
 

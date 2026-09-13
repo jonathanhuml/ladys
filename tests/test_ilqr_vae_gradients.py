@@ -183,6 +183,27 @@ def test_synthetic_raw_spikes_are_not_duplicated_as_heldout_neurons():
     torch.testing.assert_close(actual, x)
 
 
+@pytest.mark.parametrize("dtype", [torch.int64, torch.bool, torch.float32, torch.float64])
+def test_discrete_count_inputs_preserve_floating_predictions_and_gradients(dtype):
+    _, model = _model()
+    counts = _spikes().unsqueeze(0).to(dtype)
+    output = model(counts)
+    expected = model(counts.to(torch.float64))
+    expected_dtype = dtype if counts.is_floating_point() else model.core.c.dtype
+    for actual, reference in (
+        (output.rates, expected.rates),
+        (output.latents, expected.latents),
+        (output.extras["full_rates"], expected.extras["full_rates"]),
+    ):
+        assert actual.dtype == expected_dtype
+        torch.testing.assert_close(actual, reference.to(expected_dtype))
+    assert (output.rates != output.rates.round()).any()
+    actual_grad = torch.autograd.grad(output.rates.sum(), model.core.c)[0]
+    expected_grad = torch.autograd.grad(expected.rates.sum(), model.core.c)[0]
+    assert actual_grad.abs().max() > 0
+    torch.testing.assert_close(actual_grad, expected_grad)
+
+
 def test_differentiable_lbfgs_rejects_unsupported_gradient_path():
     _, model = _model()
     with pytest.raises(ValueError, match="does not preserve"):

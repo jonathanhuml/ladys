@@ -275,7 +275,8 @@ class Bvfa(GpBase):
 
         if Y is not None:  #initialize from FA
             n_samples_fa, n_fa, m_fa = Y.shape
-            mod = decomposition.FactorAnalysis(n_components=d)
+            fa_rank = min(d, n_fa, n_samples_fa * m_fa)
+            mod = decomposition.FactorAnalysis(n_components=fa_rank)
             Y_fa = Y.transpose(0, 2, 1).reshape(n_samples_fa * m_fa, n_fa)
             mudata = mod.fit_transform(Y_fa)  #m*n_samples x d
             C = torch.tensor(mod.components_.T)  # (n x d)
@@ -289,6 +290,16 @@ class Bvfa(GpBase):
             if ard:
                 _dim_scale = rel_scale * torch.square(C).mean(
                     0).sqrt()  #per latent
+                if _dim_scale.numel() < d or torch.any(_dim_scale <= 0):
+                    # FA cannot identify more factors than the data rank. Keep
+                    # the remaining ARD dimensions positive and learnable.
+                    fallback = _dim_scale.square().mean().sqrt()
+                    fallback = torch.where(fallback > 0, fallback,
+                                           torch.ones_like(fallback))
+                    padded_scale = fallback.expand(d).clone()
+                    padded_scale[:_dim_scale.numel()] = torch.where(
+                        _dim_scale > 0, _dim_scale, fallback)
+                    _dim_scale = padded_scale
 
         ##optionally provide these as params##
         scale = _scale if scale is None else scale

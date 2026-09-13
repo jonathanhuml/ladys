@@ -8,6 +8,7 @@ hooks:
 
 nav:
   - Home: index.md
+  - Hyperparameter Tuning: tuning.md
   - Models:
       - Overview: models/index.md
       - BGPFA: models/bgpfa.md

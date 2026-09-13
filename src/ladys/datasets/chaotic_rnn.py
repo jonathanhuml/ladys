@@ -7,7 +7,7 @@ from typing import Literal
 
 import numpy as np
 import torch
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from torch import Tensor
 from torch.utils.data import Dataset
 
@@ -23,11 +23,11 @@ class ChaoticRNNDatasetConfig(BaseModel):
     num_steps: int = 100
     train_fraction: float = 0.8
     seed: int = 0
-    g: float = 1.5
-    tau: float = 0.025
-    dt: float = 0.010
-    max_firing_rate: float = 30.0
-    x0_std: float = 1.0
+    g: float = Field(default=1.5, allow_inf_nan=False)
+    tau: float = Field(default=0.025, gt=0.0, allow_inf_nan=False)
+    dt: float = Field(default=0.010, gt=0.0, allow_inf_nan=False)
+    max_firing_rate: float = Field(default=30.0, gt=0.0, allow_inf_nan=False)
+    x0_std: float = Field(default=1.0, ge=0.0, allow_inf_nan=False)
 
     @model_validator(mode="after")
     def validate_dataset(self) -> "ChaoticRNNDatasetConfig":
@@ -49,12 +49,6 @@ class ChaoticRNNDatasetConfig(BaseModel):
             raise ValueError("train_fraction leaves no training trials per condition.")
         if int(self.train_fraction * self.num_trials) >= self.num_trials:
             raise ValueError("train_fraction leaves no validation trials per condition.")
-        if self.tau <= 0.0:
-            raise ValueError("tau must be positive.")
-        if self.dt <= 0.0:
-            raise ValueError("dt must be positive.")
-        if self.max_firing_rate <= 0.0:
-            raise ValueError("max_firing_rate must be positive.")
         return self
 
 

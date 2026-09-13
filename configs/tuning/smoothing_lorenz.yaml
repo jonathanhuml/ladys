@@ -1,0 +1,40 @@
+# A small CPU example to verify the study workflow, not a convergence benchmark.
+base:
+  dataset:
+    name: lorenz
+    neurons: 8
+    num_inits: 2
+    num_trials: 4
+    num_steps: 40
+    burn_steps: 100
+    seed: 42
+  model:
+    name: smoothing
+    kern_sd_ms: 50.0
+    bin_size_ms: 20.0
+  trainer:
+    epochs: 0
+    batch_size: 4
+  experiment:
+    save_plots: false
+
+objective:
+  metric: rate_mse
+  mode: min
+  checkpoint: last
+search_space:
+  model.kern_sd_ms:
+    distribution: loguniform
+    low: 10.0
+    high: 100.0
+algorithm: random
+num_samples: 4
+include_base: true
+training_seeds: [0]
+search_seed: 7
+resources:
+  cpu: 1
+  gpu: 0
+max_concurrent_trials: 2
+output_dir: studies
+name: smoothing_lorenz

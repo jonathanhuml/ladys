@@ -224,9 +224,10 @@ class GPFA(BaseDynamicsModel):
         return bool(self._initialized.item())
 
     def forward(self, x: Tensor) -> ModelOutput:
+        x = self._coerce_observations(x)
         if not self.initialized:
             self.initialize(x)
-        posterior = self._e_step(x.float(), get_ll=True)
+        posterior = self._e_step(x, get_ll=True)
         reconstruction = self._decode(posterior.latents)
         latents_orth, corth = self.orthonormalize_latents(posterior.latents)
         return ModelOutput(
@@ -272,7 +273,7 @@ class GPFA(BaseDynamicsModel):
     def fit_em_epoch(self, x: Tensor, epoch: int = 0) -> LossOutput:
         """Run one full E/M update and report normalized negative LL."""
 
-        x = x.float()
+        x = self._coerce_observations(x)
         with torch.no_grad():
             if not self.initialized:
                 self.initialize(x)
@@ -294,7 +295,7 @@ class GPFA(BaseDynamicsModel):
     def initialize(self, x: Tensor) -> None:
         """Initialize observation parameters from data moments."""
 
-        x = x.float()
+        x = self._coerce_observations(x)
         flat = x.reshape(-1, self.n_neurons)
         n_points = flat.shape[0]
         mean = flat.mean(dim=0)
@@ -441,6 +442,9 @@ class GPFA(BaseDynamicsModel):
 
     def _decode(self, latents: Tensor) -> Tensor:
         return torch.einsum("btd,nd->btn", latents, self.C) + self.d
+
+    def _coerce_observations(self, x: Tensor) -> Tensor:
+        return x.to(device=self.C.device, dtype=self.C.dtype)
 
     def orthonormalize_latents(self, latents: Tensor) -> tuple[Tensor, Tensor]:
         """Elephant-style postprocessing for latent visualization.

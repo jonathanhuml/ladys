@@ -35,6 +35,19 @@ readout reconstructs the observed neurons. When built by `Experiment` on an
 NLB dataset, `output_mode: auto` sizes the readout to reconstruct held-in
 plus held-out training neurons and evaluates the held-out output slice.
 
+## Reference Differences
+
+`encoder_input_alignment: current` follows Algorithm 1, line 9 in the
+[paper](https://arxiv.org/html/2507.11531v2), consuming each observed bin once.
+`upstream_lagged` reproduces the encoder indexing in the
+[released code](https://github.com/KingJamesSong/LangevinFlow_CCN/blob/main/nlb_lightning/models.py):
+bin 0 initializes the GRU and is consumed again for bin 1; the final
+observed bin enters only forward prediction steps. Paper and code disagree
+here, so alignment is explicit rather than a claim of exact reproduction.
+Both modes compute transition KL from the Gaussian mean and log variance,
+correcting the released code's sampled-mean/variance arguments to match
+the transition distribution in the paper's Equation 17.
+
 ## Outputs
 
 `forward` returns natural-space firing rates, concatenated
@@ -52,6 +65,7 @@ Config for the LangevinFlow sequential VAE.
 | `objective` | `str` | `'langevin_flow_elbo'` |
 | `hidden_size` | `int` | `64` |
 | `initialization` | `Literal['ladys', 'upstream']` | `'ladys'` |
+| `encoder_input_alignment` | `Literal['current', 'upstream_lagged']` | `'current'` |
 | `output_neurons` | `Optional[int]` | `None` |
 | `output_mode` | `Literal['auto', 'heldin', 'heldin_heldout']` | `'auto'` |
 | `fwd_steps` | `int` | `0` |

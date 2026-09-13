@@ -16,18 +16,31 @@ from pathlib import Path
 import sys
 
 roots = [Path(value) for value in sys.argv[1:]] or sorted(Path("runs").glob("*/summary.json"))
+groups = []
+latest = {}
 for root in roots:
     summary = root if root.is_file() else root / "summary.json"
     if not summary.exists():
         print(f"No summary yet: {summary}")
         continue
-    print(f"\n{summary.parent}")
-    print("Dataset       Model     Status    Epoch   Best co-BPS  Minutes  Phase")
+    rows = []
     for row in json.loads(summary.read_text()):
         folder = summary.parent / row["dataset"] / row["model"]
         status = folder / "status.json"
         if status.exists():
             row = json.loads(status.read_text())
+        rows.append(row)
+        key = row["dataset"], row["model"]
+        stamp = (status.exists(), status.stat().st_mtime_ns if status.exists() else 0)
+        if key not in latest or stamp > latest[key][0]:
+            latest[key] = (stamp, row)
+    groups.append((str(summary.parent), rows))
+if not sys.argv[1:]:
+    groups = [("Latest NLB runs", [latest[key][1] for key in sorted(latest)])]
+for label, rows in groups:
+    print(f"\n{label}")
+    print("Dataset       Model     Status    Epoch   Best co-BPS  Minutes  Phase")
+    for row in rows:
         score = row.get("best_co_bps")
         score_text = "" if score is None else f"{score:.5f}"
         print(f"{row['dataset']:13} {row['model']:9} {row['status']:9} "
@@ -110,7 +123,7 @@ for value in sys.argv[1:]:
     print(f"Stopped NLB runner PID {pid}")
 PY
     ;;
-  run|test)
+  run|test|report)
     if [ "$#" -eq 0 ]; then
       printf 'Usage: hal_nlb.sh %s <python executable> [arguments...]\n' "$action" >&2
       exit 2
@@ -125,12 +138,14 @@ PY
     export PYTHONUNBUFFERED=1
     if [ "$action" = run ]; then
       exec "$python" scripts/run_nlb_model_comparison.py "$@"
+    elif [ "$action" = report ]; then
+      exec "$python" scripts/report_nlb_model_comparison.py "$@"
     else
       exec "$python" -m pytest "$@"
     fi
     ;;
   *)
-    printf 'Usage: hal_nlb.sh {status [run directories...]|gpu|processes|run <python> [args...]|start <log directory> <python> [args...]|stop <runner PIDs...>|test <python> [args...]}\n' >&2
+    printf 'Usage: hal_nlb.sh {status [run directories...]|gpu|processes|run <python> [args...]|start <log directory> <python> [args...]|stop <runner PIDs...>|test <python> [args...]|report <python> [args...]}\n' >&2
     exit 2
     ;;
 esac

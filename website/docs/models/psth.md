@@ -32,7 +32,7 @@ condition, so this is a deliberately weak time-only baseline.
 
 ## Outputs
 
-`forward` returns the fitted time-varying mean rates when available. NLB
+`forward` requires a fitted training time-varying mean rate. NLB
 evaluation bypasses `forward` and returns condition-matched held-out
 training PSTH rates directly from the prepared H5 tensors.
 
@@ -47,7 +47,7 @@ Config for the peri-stimulus time histogram baseline.
 | `kern_sd_ms` | `float` | `70.0` |
 | `bin_size_ms` | `float` | `5.0` |
 | `prediction_floor` | `float` | `1e-09` |
-| `optimization` | `OptimizationConfig` | `OptimizationConfig(name='inference_only')` |
+| `optimization` | `OptimizationConfig` | `OptimizationConfig(name='library_fit')` |
 
 ## Contracts
 

@@ -234,10 +234,11 @@ def test_langevin_flow_prediction_samples_average_log_rates():
     assert torch.allclose(rates, torch.full_like(x, 4.0))
 
 
-def test_langevin_flow_upstream_parity_defaults_and_recurrent_inputs():
+def test_langevin_flow_defaults_and_current_bin_recurrent_inputs():
     config = LangevinFlowConfig()
     assert config.potential_kernel_size == 3
     assert config.transformer_heads == 2
+    assert config.encoder_input_alignment == "current"
 
     model = config.build(n_neurons=2, n_time=3)
     assert model.potential.kernel_size == 3
@@ -263,8 +264,8 @@ def test_langevin_flow_upstream_parity_defaults_and_recurrent_inputs():
 
     assert len(recorder.calls) == 3
     assert torch.equal(recorder.calls[0], x[:, 0])
-    assert torch.equal(recorder.calls[1], x[:, 0])
-    assert torch.equal(recorder.calls[2], x[:, 1])
+    assert torch.equal(recorder.calls[1], x[:, 1])
+    assert torch.equal(recorder.calls[2], x[:, 2])
 
 
 def test_langevin_flow_uses_valid_forward_steps_when_train_forward_missing():

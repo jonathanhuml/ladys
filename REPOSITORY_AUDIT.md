@@ -69,6 +69,99 @@ remote repository were not overwritten. The repeatable diagnostic is
 
 These are correctness and lifecycle checks, **not converged benchmarks**.
 
+## Synthetic Follow-Up
+
+This pass read every registered method implementation, including its training,
+prediction, and evaluation paths, and added small Lorenz **and chaotic-RNN**
+checks. Method-level runtime checks are not a guarantee of scientific parity.
+
+### Additional Corrections
+
+| Method | Confirmed corrections |
+| --- | --- |
+| MINT | Absolute Newton-step convergence; single-state interpolation; raw-count fitting; unsmoothed bin aggregation; nested-Subset condition mapping; dataset-derived exposure in the synthetic runner. |
+| iLQR-VAE | Floating predictions for integer/bool spikes; raw-count posterior/ELBO/initialization; exposure and dimension validation; rejection of ELBOs missing parameter-dependent normalization. |
+| bGPFA | Low-neuron factor-analysis initialization preserves requested latent rank and learnable scales; reject one-bin sequences; benchmark preserves full-batch trial identity. |
+| GPFA | Initialization, EM, and prediction follow model dtype/device. |
+| Kalman | Correct Matern process noise, verified by stationary covariance identity and gradients. |
+| CASSM | Correct Gaussian KL trace sign and dimension term; use same-time posterior residual/covariance in the expected likelihood; reject sparse projections that would drop neurons. Full-projection losses and gradients match exact Gaussian references. |
+| NDT | Correct synthetic/NLB readout sizing; raw/reconstruction targets; finite-target masking; no visible-input fallback when masked targets are missing; dtype compatibility. |
+| STNDT | Correct synthetic/NLB readout sizing, raw/reconstruction targets, float64 embedding paths, and missing-target validation. |
+| LFADS | Preserve raw Poisson targets with configurable recognition inputs; reject entirely missing targets. Dataset-derived exposure and empirical training bias are used in the benchmark. |
+| LangevinFlow | Correct transition KL mean/log-variance arguments; synthetic/NLB readout sizing; raw/reconstruction targets; input precision and target validation; explicit paper-current versus released-code-lagged encoder alignment. |
+| PSTH | Fit training state through the trainer; portable checkpoint buffers; no evaluation-batch fitting or missing-training fallback. |
+| Smoothing | Raw-count synthetic evaluation; shared preprocessing preserves sequence length even when the kernel is longer than the trial. |
+
+Lorenz now rejects invalid or empty splits and nonpositive/nonfinite numerical
+parameters. Chaotic RNN rejects nonfinite dynamics/exposure parameters. Tests
+cover both generators' rates/counts units and independent, balanced spike
+repeats. Neither generator currently holds out entire condition trajectories.
+
+The shared small-run driver now constructs models from dataset metadata, saves
+completed epochs atomically, isolates the metric RNG, and distinguishes MINT
+library growth from optimizer epochs and fixed baselines. The supervisor adds
+a hard per-method timeout; a timeout is not reported as successful completion.
+
+CASSM/Kalman's legacy model-local `save_model=True` only created hard-coded
+directories without writing checkpoints. It now raises an actionable error;
+`Experiment.run()` owns actual model checkpoint saving under `output_dir`.
+
+LangevinFlow's default `encoder_input_alignment: current` follows
+[paper Algorithm 1, line 9](https://arxiv.org/html/2507.11531v2).
+The [released code](https://github.com/KingJamesSong/LangevinFlow_CCN/blob/main/nlb_lightning/models.py)
+instead feeds the first bin twice and does not consume the last observed bin;
+that behavior is available explicitly as `upstream_lagged`. Both modes are
+tested. Final diagnostic curves use the current-bin mode; the earlier lagged
+fits are archived separately. The corrected KL also intentionally differs
+from the released code's variance/log-variance arguments.
+
+Final verification: **424 passed, 6 skipped locally; 429 passed, 1 skipped on
+HAL**, including CUDA checks. All 24 method/dataset jobs completed, with 40
+epochs for the nine iterative methods, four MINT library fits, and one point
+for each fixed baseline. The slowest fit took about 109 seconds. These counts
+include the full repository suite, not only tests added in this audit.
+
+### Remaining Priorities
+
+1. Establish performance, not only runtime correctness. These small single-seed
+   runs are diagnostics; 40 epochs can leave optimizer/regularization warmups
+   unfinished. Revisit methods that do not beat smoothing before scaling up.
+   In particular, the paper-current LangevinFlow chaotic-RNN run worsens from
+   188 to 628 Hz squared despite improving count-reconstruction loss. GPFA and
+   Kalman also worsen on chaotic RNN, and LFADS' best epoch precedes its final
+   epoch. These are failed quality checks, even though execution is finite.
+2. Consolidate synthetic recipes. Chaotic RNN currently has only an NDT
+   experiment YAML; other methods run from explicit generated configurations
+   or generic defaults. Lorenz also lacks a canonical STNDT YAML. Save tested
+   dataset-aware recipes, with suitable Gaussian preprocessing, rather than
+   treating config presence as evidence of tuned performance.
+3. Finish iLQR's real-data convergence work and upstream comparison. Its
+   finite unrolled solver is not the upstream implicit adjoint; prediction
+   currently decodes posterior-mean controls rather than averaging covariance.
+4. Revalidate historical results affected by objective, MINT interpolation,
+   masking, or unit changes. The earlier full-data NLB scores are artifacts of
+   their recorded snapshot, not scores for every subsequent source revision.
+5. Make bGPFA ELBO diagnostics independent of evaluation minibatch partition
+   and align their reported annealing schedule with the optimizer. Rate-error
+   checks avoid comparing these non-equivalent native ELBO values.
+6. Document intentional upstream architecture choices separately from bugs.
+   STNDT uses spatial attention weights without its computed spatial value
+   output, leaving spatial output-projection parameters unused. Altering that
+   requires an explicit method variant or upstream parity investigation.
+7. Add multi-seed checks and held-out-condition experiments. The present
+   independent-spike-repeat split tests denoising familiar trajectories, not
+   generalization to unseen dynamics. Keep 20 ms NLB secondary to 5 ms work.
+
+### Reproduction
+
+The bounded runner is `scripts/run_synthetic_readiness.py`. On HAL the stable
+entry is `scripts/hal_synthetic.sh run <python> --device cuda --output-dir <run>`
+through the approved `ssh -o BatchMode=yes -o ConnectTimeout=10 HAL` prefix.
+It runs 12 neurons, 3 conditions, 6 trials per condition, 60 time bins, up to
+40 epochs, and a 600-second hard cap per method/dataset. No host-specific data
+or environment paths are embedded in these scripts. The results and plots are
+in [the synthetic report](runs/synthetic_readiness_20260913/report.md).
+
 ## Original Audit
 
 The repository contains substantial implementations and working training code, but it is not yet a consistent, portable benchmark for fitting every method from scratch. MINT, iLQR-VAE, and bGPFA require particular attention. Shared evaluation bugs also affect models whose NLB config coverage looks complete.

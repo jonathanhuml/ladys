@@ -157,6 +157,8 @@ class BGPFA(BaseDynamicsModel):
         super().__init__()
         self.n_neurons = int(n_neurons)
         self.n_time = int(n_time)
+        if self.n_time < 2:
+            raise ValueError("BGPFA requires at least two time bins for its GP prior.")
         self.latent_dim = int(latent_dim)
         self.binsize = float(binsize)
         self.ell0 = float(ell0) if ell0 is not None else 200.0 / self.binsize

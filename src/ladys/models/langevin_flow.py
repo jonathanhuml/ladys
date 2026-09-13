@@ -1,4 +1,10 @@
-"""LangevinFlow adapter for neural spike-count sequence modeling."""
+"""LangevinFlow adapter for neural spike-count sequence modeling.
+
+The encoder defaults to the current-bin alignment in Algorithm 1 of
+arXiv:2507.11531v2. The reference code's lagged alignment is available explicitly.
+The transition KL uses the actual Gaussian mean and log variance, correcting
+the reference code's sampled-mean/variance inputs.
+"""
 
 from __future__ import annotations
 
@@ -13,6 +19,7 @@ import torch.nn.functional as F
 from ladys.metrics import EvaluationAdapter, EvaluationResult, NLBCoSmoothingAdapter
 from ladys.metrics import compute_available_metrics
 from ladys.models.base import BaseDynamicsModel, BaseModelConfig, OptimizationConfig
+from ladys.preprocessing import PreprocessedDataset
 from ladys.types import LossOutput, ModelOutput, move_batch_to_device, observations_from_batch
 
 
@@ -83,6 +90,7 @@ class LangevinFlowConfig(BaseModelConfig):
     objective: str = "langevin_flow_elbo"
     hidden_size: int = 64
     initialization: Literal["ladys", "upstream"] = "ladys"
+    encoder_input_alignment: Literal["current", "upstream_lagged"] = "current"
     output_neurons: Optional[int] = None
     output_mode: Literal["auto", "heldin", "heldin_heldout"] = "auto"
     fwd_steps: int = 0
@@ -119,6 +127,8 @@ class LangevinFlowConfig(BaseModelConfig):
     def validate_dimensions(self) -> "LangevinFlowConfig":
         if self.hidden_size < 1:
             raise ValueError("hidden_size must be positive.")
+        if self.potential_groups < 1:
+            raise ValueError("potential_groups must be positive.")
         if self.hidden_size % self.potential_groups != 0:
             raise ValueError("hidden_size must be divisible by potential_groups.")
         if self.transformer_heads < 1:
@@ -166,9 +176,11 @@ class LangevinFlowConfig(BaseModelConfig):
                 train_dataset = data.train_dataset
                 if train_dataset is None:
                     raise RuntimeError("DataModule.setup() must run before build_from_data().")
+                while isinstance(train_dataset, PreprocessedDataset):
+                    train_dataset = train_dataset.dataset
                 heldout = getattr(train_dataset, "raw_spikes", None)
-                if heldout is not None:
-                    heldin = getattr(train_dataset, "heldin_spikes", None)
+                heldin = getattr(train_dataset, "heldin_spikes", None)
+                if heldout is not None and heldin is not None:
                     if heldin is not None and n_neurons >= int(heldin.shape[-1]) + int(
                         heldout.shape[-1]
                     ):
@@ -183,6 +195,8 @@ class LangevinFlowConfig(BaseModelConfig):
                         heldin_forward is None or heldout_forward is None
                     ):
                         valid_dataset = getattr(data, "valid_dataset", None)
+                        while isinstance(valid_dataset, PreprocessedDataset):
+                            valid_dataset = valid_dataset.dataset
                         if valid_dataset is not None:
                             heldin_forward = getattr(
                                 valid_dataset,
@@ -198,7 +212,7 @@ class LangevinFlowConfig(BaseModelConfig):
                         fwd_steps = fwd_steps or int(heldin_forward.shape[1])
                 elif self.output_mode == "heldin_heldout":
                     raise ValueError(
-                        "output_mode='heldin_heldout' requires a dataset with raw_spikes."
+                        "output_mode='heldin_heldout' requires NLB held-in and held-out spikes."
                     )
         return self._build(
             n_neurons=n_neurons,
@@ -221,6 +235,7 @@ class LangevinFlowConfig(BaseModelConfig):
             output_neurons=output_neurons,
             hidden_size=self.hidden_size,
             initialization=self.initialization,
+            encoder_input_alignment=self.encoder_input_alignment,
             fwd_steps=fwd_steps,
             dropout=self.dropout,
             gamma=self.gamma,
@@ -272,6 +287,19 @@ class LangevinFlow(BaseDynamicsModel):
     NLB dataset, `output_mode: auto` sizes the readout to reconstruct held-in
     plus held-out training neurons and evaluates the held-out output slice.
 
+    ## Reference Differences
+
+    `encoder_input_alignment: current` follows Algorithm 1, line 9 in the
+    [paper](https://arxiv.org/html/2507.11531v2), consuming each observed bin once.
+    `upstream_lagged` reproduces the encoder indexing in the
+    [released code](https://github.com/KingJamesSong/LangevinFlow_CCN/blob/main/nlb_lightning/models.py):
+    bin 0 initializes the GRU and is consumed again for bin 1; the final
+    observed bin enters only forward prediction steps. Paper and code disagree
+    here, so alignment is explicit rather than a claim of exact reproduction.
+    Both modes compute transition KL from the Gaussian mean and log variance,
+    correcting the released code's sampled-mean/variance arguments to match
+    the transition distribution in the paper's Equation 17.
+
     ## Outputs
 
     `forward` returns natural-space firing rates, concatenated
@@ -308,13 +336,17 @@ class LangevinFlow(BaseDynamicsModel):
         sample_eval: bool = False,
         prediction_samples: int = 1,
         objective: str = "langevin_flow_elbo",
+        encoder_input_alignment: Literal["current", "upstream_lagged"] = "current",
     ) -> None:
         super().__init__()
+        if encoder_input_alignment not in ("current", "upstream_lagged"):
+            raise ValueError("encoder_input_alignment must be 'current' or 'upstream_lagged'.")
         self.n_neurons = int(n_neurons)
         self.n_time = int(n_time)
         self.output_neurons = int(output_neurons)
         self.hidden_size = int(hidden_size)
         self.initialization = initialization
+        self.encoder_input_alignment = encoder_input_alignment
         self.fwd_steps = int(fwd_steps)
         self.dropout_rate = float(dropout)
         self.gamma = float(gamma)
@@ -390,6 +422,8 @@ class LangevinFlow(BaseDynamicsModel):
         target = target.to(device=self.device, dtype=log_rates.dtype)
         log_rates = log_rates[:, : target.shape[1], : target.shape[2]]
         finite = torch.isfinite(target)
+        if not bool(finite.any()):
+            raise ValueError("LangevinFlow loss requires at least one finite target count.")
         safe_target = torch.nan_to_num(target, nan=0.0, posinf=0.0, neginf=0.0)
         recon = F.poisson_nll_loss(log_rates, safe_target, log_input=True, reduction="none")
         cd_mask = output.extras.get("coordinated_dropout_mask")
@@ -461,6 +495,8 @@ class LangevinFlow(BaseDynamicsModel):
         if torch.any(x < 0):
             raise ValueError("LangevinFlow expects nonnegative spike-count observations.")
 
+        x = x.to(device=self.device, dtype=next(self.parameters()).dtype)
+        x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
         observ, cd_mask = self._coordinated_dropout(x)
         total_steps = self.n_time + self.fwd_steps
         hidden = self.dropout(self.encoder(observ[:, 0]))
@@ -478,7 +514,8 @@ class LangevinFlow(BaseDynamicsModel):
         noise_std = math.sqrt(noise_var)
         for t in range(1, total_steps):
             if t < self.n_time:
-                hidden_input = observ[:, t - 1]
+                input_index = t if self.encoder_input_alignment == "current" else t - 1
+                hidden_input = observ[:, input_index]
             else:
                 hidden_input = observ[:, -1]
             hidden = self.dropout(self.encoder(hidden_input, hidden))
@@ -527,8 +564,8 @@ class LangevinFlow(BaseDynamicsModel):
         else:
             v_next = v_mean
         step_kl = self._kl_diag_gaussian(
-            v_next,
-            torch.full_like(v_next, 2.0 * self.gamma),
+            v_mean,
+            torch.full_like(v_mean, math.log(noise_std ** 2)),
             prior_var=self.velocity_prior_var,
         )
         return z_next, v_next, step_kl
@@ -548,8 +585,18 @@ class LangevinFlow(BaseDynamicsModel):
         log_rates: Tensor,
     ) -> Tensor:
         observed = observations_from_batch(batch)
+        if isinstance(batch, dict):
+            reconstruction = batch.get("reconstruction_spikes")
+            if reconstruction is not None and reconstruction.shape == log_rates.shape:
+                return reconstruction
+            raw = batch.get("raw_spikes")
+            if "heldout_spikes" not in batch and raw is not None and raw.shape == observed.shape:
+                observed = raw
         if isinstance(batch, dict) and "heldout_spikes" in batch:
             heldout = batch["heldout_spikes"]
+            heldin = batch.get("heldin_spikes")
+            if heldin is not None:
+                observed = heldin
             total_neurons = observed.shape[-1] + heldout.shape[-1]
             if log_rates.shape[-1] >= total_neurons:
                 target = torch.cat([observed, heldout], dim=-1)

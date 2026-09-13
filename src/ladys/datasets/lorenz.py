@@ -13,7 +13,7 @@ from typing import Literal
 
 import numpy as np
 import torch
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from torch import Tensor
 from torch.utils.data import Dataset
 
@@ -22,16 +22,23 @@ class LorenzDatasetConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = "lorenz"
-    neurons: int = 32
-    num_inits: int = 4
-    num_trials: int = 8
-    num_steps: int = 100
-    burn_steps: int = 1_000
-    train_fraction: float = 0.8
+    neurons: int = Field(default=32, ge=1)
+    num_inits: int = Field(default=4, ge=1)
+    num_trials: int = Field(default=8, ge=2)
+    num_steps: int = Field(default=100, ge=1)
+    burn_steps: int = Field(default=1_000, ge=0)
+    train_fraction: float = Field(default=0.8, gt=0.0, lt=1.0)
     seed: int = 0
-    latent_dt: float = 0.015
-    spike_bin_size: float = 1.0
-    base_rate: float = 1.0
+    latent_dt: float = Field(default=0.015, gt=0.0, allow_inf_nan=False)
+    spike_bin_size: float = Field(default=1.0, gt=0.0, allow_inf_nan=False)
+    base_rate: float = Field(default=1.0, gt=0.0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def validate_split(self) -> "LorenzDatasetConfig":
+        n_train = int(self.train_fraction * self.num_trials)
+        if not 1 <= n_train < self.num_trials:
+            raise ValueError("train_fraction must leave training and validation trials per condition.")
+        return self
 
 
 @dataclass

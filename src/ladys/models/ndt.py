@@ -17,6 +17,7 @@ from ladys.metrics import (
     compute_available_metrics,
 )
 from ladys.models.base import BaseDynamicsModel, BaseModelConfig, OptimizationConfig
+from ladys.preprocessing import PreprocessedDataset
 from ladys.types import LossOutput, ModelOutput, move_batch_to_device, observations_from_batch
 
 
@@ -133,9 +134,11 @@ class NDTConfig(BaseModelConfig):
                 train_dataset = data.train_dataset
                 if train_dataset is None:
                     raise RuntimeError("DataModule.setup() must run before build_from_data().")
+                while isinstance(train_dataset, PreprocessedDataset):
+                    train_dataset = train_dataset.dataset
                 heldout = getattr(train_dataset, "raw_spikes", None)
-                if heldout is not None:
-                    heldin = getattr(train_dataset, "heldin_spikes", None)
+                heldin = getattr(train_dataset, "heldin_spikes", None)
+                if heldout is not None and heldin is not None:
                     if heldin is not None and n_neurons >= int(heldin.shape[-1]) + int(
                         heldout.shape[-1]
                     ):
@@ -150,7 +153,7 @@ class NDTConfig(BaseModelConfig):
                         fwd_steps = fwd_steps or int(heldin_forward.shape[1])
                 elif self.output_mode == "heldin_heldout":
                     raise ValueError(
-                        "output_mode='heldin_heldout' requires a dataset with raw_spikes."
+                        "output_mode='heldin_heldout' requires NLB held-in and held-out spikes."
                     )
         return self._build(
             n_neurons=n_neurons,
@@ -403,12 +406,19 @@ class NDT(BaseDynamicsModel):
             device=self.device,
             dtype=output.rates.dtype,
         )
+        _, finite = self._pad_target_and_mask_to_rates(
+            target, torch.isfinite(target), output.extras["log_rates"],
+        )
         mask = self._loss_mask_for_target(batch, output, target)
         target, mask = self._pad_target_and_mask_to_rates(
             target,
             mask,
             output.extras["log_rates"],
         )
+        mask = mask & finite
+        if not bool(finite.any()):
+            raise ValueError("NDT loss requires at least one finite target count.")
+        target = torch.where(finite, target, torch.zeros_like(target))
 
         if self.lograte:
             log_rates = output.extras["log_rates"].to(device=target.device, dtype=target.dtype)
@@ -424,13 +434,11 @@ class NDT(BaseDynamicsModel):
             per_entry = rates - target * torch.log(rates)
 
         masked = per_entry[mask]
-        if masked.numel() == 0:
-            masked = per_entry.reshape(-1)
         if self.topk_loss_fraction < 1.0 and masked.numel() > 1:
             k = max(1, int(masked.numel() * self.topk_loss_fraction))
             masked = torch.topk(masked, k=k).values
 
-        total = masked.mean()
+        total = masked.mean() if masked.numel() else masked.sum()
         return LossOutput(
             total=total,
             named_terms={
@@ -466,7 +474,8 @@ class NDT(BaseDynamicsModel):
         if torch.any(x < 0):
             raise ValueError("NDT expects nonnegative spike-count observations.")
 
-        x = x.to(device=self.device, dtype=torch.float32)
+        x = x.to(device=self.device, dtype=next(self.parameters()).dtype)
+        x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
         masked_x, labels, loss_mask = self._mask_observations(x, should_mask=should_mask)
         full_input = self._pad_observed(masked_x)
         embedded = self._embed(full_input) * self.input_scale
@@ -505,8 +514,18 @@ class NDT(BaseDynamicsModel):
         log_rates: Tensor,
     ) -> Tensor:
         observed = observations_from_batch(batch)
+        if isinstance(batch, dict):
+            reconstruction = batch.get("reconstruction_spikes")
+            if reconstruction is not None and reconstruction.shape == log_rates.shape:
+                return reconstruction
+            raw = batch.get("raw_spikes")
+            if "heldout_spikes" not in batch and raw is not None and raw.shape == observed.shape:
+                observed = raw
         if isinstance(batch, dict) and "heldout_spikes" in batch:
             heldout = batch["heldout_spikes"]
+            heldin = batch.get("heldin_spikes")
+            if heldin is not None:
+                observed = heldin
             total_neurons = observed.shape[-1] + heldout.shape[-1]
             if log_rates.shape[-1] >= total_neurons:
                 target = torch.cat([observed, heldout], dim=-1)
@@ -535,14 +554,14 @@ class NDT(BaseDynamicsModel):
         )
         if not self.training:
             return torch.ones_like(target, dtype=torch.bool)
-        if target.shape == observed_mask.shape:
-            return observed_mask
-
         mask = torch.zeros_like(target, dtype=torch.bool)
         mask[:, : self.n_time, : self.n_neurons] = observed_mask
         if isinstance(batch, dict) and "heldout_spikes" in batch:
             n_heldout = int(batch["heldout_spikes"].shape[-1])
-            mask[:, : self.n_time, self.n_neurons : self.n_neurons + n_heldout] = True
+            heldin = batch.get("heldin_spikes")
+            n_heldin = self.n_neurons if heldin is None else int(heldin.shape[-1])
+            unobserved_start = max(self.n_neurons, n_heldin)
+            mask[:, : self.n_time, unobserved_start : n_heldin + n_heldout] = True
             if target.shape[1] > self.n_time:
                 mask[:, self.n_time :, :] = True
         return mask
@@ -588,9 +607,9 @@ class NDT(BaseDynamicsModel):
 
     def _embed(self, x: Tensor) -> Tensor:
         if self.linear_embedder:
-            return self.embedder(x.float())
+            return self.embedder(x)
         if self.embed_dim == 0:
-            return x.float()
+            return x
         tokens = x.round().long().clamp(min=0, max=self.max_spike_count + 1)
         embedded = self.embedder(tokens)
         return embedded.flatten(start_dim=-2)
@@ -622,7 +641,7 @@ class NDT(BaseDynamicsModel):
                 size=x.shape,
                 device=x.device,
                 dtype=torch.long,
-            ).float()
+            ).to(dtype=x.dtype)
             masked_x[random_mask] = random_spikes[random_mask]
 
         return masked_x, labels, mask

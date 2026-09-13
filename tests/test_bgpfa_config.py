@@ -37,6 +37,49 @@ def small_config(**kwargs):
     )
 
 
+@pytest.mark.parametrize("n_neurons,latent_dim", [(1, 1), (1, 3), (2, 2), (2, 3), (3, 5)])
+@pytest.mark.parametrize("initialization", ["gp_prior", "fa"])
+def test_low_neuron_training_preserves_all_latent_dimensions(n_neurons, latent_dim, initialization):
+    torch.manual_seed(24)
+    x = torch.poisson(torch.ones(4, 8, n_neurons))
+    config = BGPFAConfig(
+        latent_dim=latent_dim,
+        ell0=2.0,
+        latent_init=initialization,
+        observation_init="fa" if initialization == "fa" else "mgplvm",
+        n_mc_train=1,
+        n_mc_eval=1,
+        nlb_latent_infer_steps=2,
+        nlb_latent_infer_n_mc=1,
+        optimization={"name": "mgplvm_full_batch_gradient", "n_mc": 1, "lr": 0.02},
+    )
+    model = config.build(n_neurons=n_neurons, n_time=8)
+    strategy = build_strategy(config.optimization)
+    strategy.setup(model)
+    for epoch in range(2):
+        assert np.isfinite(strategy.step(model, x, epoch).loss)
+    assert model._train_mod.obs.dim_scale.shape == (latent_dim, 1)
+    assert (model._train_mod.obs.dim_scale > 0).all()
+    assert all(torch.isfinite(value).all() for value in model.state_dict().values())
+    model.eval()
+    expected = model(x)
+    assert expected.latents.shape == (4, 8, latent_dim)
+    assert torch.isfinite(expected.rates).all()
+    heldout = model(x[:2] + 1)
+    assert heldout.latents.shape == (2, 8, latent_dim)
+    assert torch.isfinite(heldout.rates).all()
+    restored = config.build(n_neurons=n_neurons, n_time=8)
+    restored.load_state_dict(model.state_dict())
+    restored.eval()
+    torch.testing.assert_close(restored(x).rates, expected.rates, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("n_time", [0, 1])
+def test_bgpfa_rejects_time_axes_without_a_gp_interval(n_time):
+    with pytest.raises(ValueError, match="at least two time bins"):
+        BGPFAConfig().build(n_neurons=3, n_time=n_time)
+
+
 @pytest.fixture
 def fitted():
     torch.manual_seed(42)

@@ -19,6 +19,7 @@ import numpy as np
 import torch
 from pydantic import Field
 from torch import Tensor
+from torch.utils.data import Subset
 
 from ladys.models.base import BaseDynamicsModel, BaseModelConfig, OptimizationConfig
 from ladys.types import LossOutput, ModelOutput
@@ -292,7 +293,7 @@ class MINT(BaseDynamicsModel):
 
     ## Outputs
 
-    `forward` accepts `(batch, time, neurons)` spikes and returns expected spike
+    `forward` accepts raw `(batch, time, neurons)` spike counts and returns expected spike
     counts per input bin. Training fits templates once before evaluation;
     checkpoints contain the complete fitted library and neuron layout.
     """
@@ -345,7 +346,10 @@ class MINT(BaseDynamicsModel):
 
     def configure_training_data(self, dataset) -> None:
         """Read the training layout without fitting or inspecting validation data."""
+        indices = np.arange(len(dataset))
         while hasattr(dataset, "dataset"):
+            if isinstance(dataset, Subset):
+                indices = np.asarray(dataset.indices, dtype=np.int64)[indices]
             dataset = dataset.dataset
         if len(dataset) == 0:
             raise ValueError("MINT requires nonempty training data.")
@@ -384,6 +388,8 @@ class MINT(BaseDynamicsModel):
                 self._training_conditions = np.repeat(np.arange(cfg.num_conditions), repeats)
                 if len(self._training_conditions) != len(dataset):
                     raise ValueError("MINT condition metadata does not match the training trial count.")
+        if self._training_conditions is not None:
+            self._training_conditions = self._training_conditions[indices]
         self._refresh_runtime_params()
 
     def fit_training_data(self, loader, *, device) -> None:
@@ -402,7 +408,7 @@ class MINT(BaseDynamicsModel):
             if self.n_heldin is not None:
                 full = torch.cat([sample["heldin_spikes"], sample["heldout_spikes"]], dim=-1)
             else:
-                full = sample["spikes"]
+                full = sample.get("raw_spikes", sample["spikes"])
             trials.append(full.T.to(device=device, dtype=TORCH_DTYPE).contiguous())
             cond = sample.get("condition_id")
             if self.config.allen_condition_mode == "trial_index" and self.config.dataset == "allen_vcn":
@@ -641,6 +647,10 @@ class MINT(BaseDynamicsModel):
     def evaluation_adapter(self, task: str):
         if task == "nlb":
             return _MINTPreparedAdapter()
+        if task == "synthetic":
+            from ladys.metrics import SyntheticEvaluationAdapter
+
+            return SyntheticEvaluationAdapter(use_raw_spikes=True)
         return None
 
     def predict_spike_trials(
@@ -658,6 +668,8 @@ class MINT(BaseDynamicsModel):
         S_bar = []
         for spikes in S:
             binned = bin_data(spikes, self.Delta, "sum")
+            if binned.shape[1] <= self.tau_prime:
+                raise ValueError("MINT query duration must cover its likelihood window.")
             binned = torch.nan_to_num(binned, nan=0.0, posinf=float(self.max_spikes), neginf=0.0)
             S_bar.append(torch.clamp(binned, 0, self.max_spikes).to(torch.long))
 
@@ -982,7 +994,9 @@ class MINT(BaseDynamicsModel):
         idx0 = int(torch.argmax(torch.nan_to_num(q, nan=-torch.inf)).item())
         c0, k1 = ind2ck(idx0, self.first_idx0)
         q_c = q[self.first_idx0[c0] : self.first_idx0[c0] + lengths[c0]]
-        if k1 > self.tau_prime + 1 and k1 < lengths[c0]:
+        if lengths[c0] == self.tau_prime + 1:
+            k2 = k1
+        elif k1 > self.tau_prime + 1 and k1 < lengths[c0]:
             if q_c[k1 - 2] > q_c[k1]:
                 k2 = k1 - 1
             else:
@@ -1419,7 +1433,7 @@ def fit_poisson_interp(S: Tensor, X1: Tensor, X2: Tensor, options: InterpOptions
         deriv2 = -torch.sum(S * (fraction**2))
         alpha_step = float((deriv1 / deriv2).item())
         alpha = alpha - alpha_step
-        if alpha_step < options.step_tol or alpha < 0.0 or alpha > 1.0:
+        if abs(alpha_step) < options.step_tol or alpha < 0.0 or alpha > 1.0:
             alpha = max(min(alpha, 1.0), 0.0)
             break
         i += 1
@@ -2020,7 +2034,7 @@ def fit_trajectories(S, Z, condition, settings, hyperparams):
                     for spikes in S
                 ]
             else:
-                rate_trials = [spikes.to(TORCH_DTYPE) for spikes in S]
+                rate_trials = [spikes.to(TORCH_DTYPE) * hyperparams.Delta for spikes in S]
         else:
             raise ValueError(f"Unknown Lorenz MINT library source: {source}")
 

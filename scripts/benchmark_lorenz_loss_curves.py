@@ -32,6 +32,7 @@ import os
 import tempfile
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "ladys_matplotlib"))
 os.environ.setdefault("XDG_CACHE_HOME", str(Path(tempfile.gettempdir()) / "ladys_cache"))
@@ -63,6 +64,8 @@ from ladys.models import (
     MINTConfig,
     NDTConfig,
     STNDTConfig,
+    PSTHConfig,
+    SmoothingConfig,
 )
 from ladys.models.base import BaseModelConfig
 from ladys.metrics import _batch_bin_widths, _target_rate_unit
@@ -76,6 +79,7 @@ from ladys.plotting import (
 )
 from ladys.preprocessing import PreprocessedDataset, PreprocessingConfig
 from ladys.training import Trainer, TrainerConfig
+from ladys.training.checkpoint import evaluation_rng
 from ladys.training.strategies import build_strategy
 from ladys.types import ModelOutput, move_batch_to_device
 from ladys.utils.yaml import load_yaml
@@ -92,10 +96,13 @@ MODEL_CONFIGS = {
     "mint": MINTConfig,
     "ndt": NDTConfig,
     "stndt": STNDTConfig,
+    "psth": PSTHConfig,
+    "smoothing": SmoothingConfig,
 }
+STATIC_MODELS = {"psth", "smoothing"}
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--models",
@@ -111,6 +118,8 @@ def parse_args() -> argparse.Namespace:
             "mint",
             "ndt",
             "stndt",
+            "psth",
+            "smoothing",
         ],
     )
     parser.add_argument(
@@ -122,6 +131,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--neurons", type=int, default=100)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--max-seconds", type=float, default=None,
+                        help="Per-method time budget, checked after each complete training/evaluation epoch.")
     parser.add_argument("--num-inits", type=int, default=10)
     parser.add_argument(
         "--num-conditions",
@@ -247,7 +258,10 @@ def parse_args() -> argparse.Namespace:
             "the models requested in --models."
         ),
     )
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.max_seconds is not None and args.max_seconds <= 0:
+        parser.error("max-seconds must be positive")
+    return args
 
 
 def main() -> None:
@@ -306,15 +320,48 @@ def run_case(
     )
     train_ds = PreprocessedDataset(train_ds, preprocessing)
     test_ds = PreprocessedDataset(test_ds, preprocessing)
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
-    test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False)
     n_time, n_neurons = train_ds.spikes.shape[1:]
-
     model_config = build_model_config(args, model_name, n_neurons)
-    model = model_config.build(n_neurons=n_neurons, n_time=n_time)
-    if model_name == "mint":
-        started = time.perf_counter()
-        try:
+    model, model_config = build_synthetic_model(model_config, train_ds, dataset_config)
+    strategy = build_strategy(model_config.optimization)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size,
+                              shuffle=not strategy.requires_ordered_training_data)
+    test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False)
+    trainer = Trainer(TrainerConfig(epochs=args.epochs, device=args.device))
+    started = time.perf_counter()
+    rows = []
+    cumulative_optimizer_seconds = 0.0
+
+    def expired():
+        limit = getattr(args, "max_seconds", None)
+        return limit is not None and time.perf_counter() - started >= limit
+
+    def persist(current_rows):
+        nonlocal rows
+        rows = list(current_rows)
+        write_model_artifacts(model_dir, args, model_name, model_config,
+                              dataset_config, current_rows, [], model, finished=False)
+        print(json.dumps(_json_ready(current_rows[-1]), sort_keys=True), flush=True)
+
+    def on_epoch(report):
+        nonlocal cumulative_optimizer_seconds
+        cumulative_optimizer_seconds += report.seconds
+        rows.append(dict(
+            status="ok", model=model_name, neurons=args.neurons, seed=args.seed,
+            epoch=report.epoch + 1, training_axis="epochs",
+            optimizer_seconds=report.seconds,
+            cumulative_optimizer_seconds=cumulative_optimizer_seconds,
+            wall_seconds=time.perf_counter() - started,
+            train_loss=report.train.loss,
+            test_loss=np.nan if report.valid is None else report.valid.loss,
+            test_rate_mse=report.metrics.get("test_rate_mse", np.nan),
+            objective=report.train.objective, error="",
+        ))
+        persist(rows)
+        return not expired()
+
+    try:
+        if model_name == "mint":
             rows = rows_for_mint_lorenz_epochs(
                 args=args,
                 model=model,
@@ -324,84 +371,58 @@ def run_case(
                 train_loader=train_loader,
                 test_loader=test_loader,
                 started=started,
+                progress_callback=persist,
             )
-            trace_rows = collect_rate_trace_rows(
-                model=model,
-                dataset=test_ds,
-                device=args.device,
-                model_name=model_name,
-                num_neurons=args.num_rate_traces,
-                sample_index=args.trace_sample_index,
-                bgpfa_infer_steps=args.bgpfa_infer_steps,
-                bgpfa_infer_mc=args.bgpfa_infer_mc,
-                bgpfa_infer_lr=args.bgpfa_infer_lr,
-            )
-            write_rate_traces(model_dir / "rate_traces.csv", trace_rows)
-            plot_rate_traces(
-                trace_rows,
-                model_dir / "rate_traces.png",
-                title=f"{model_name} held-out firing-rate traces",
-            )
-            write_model_artifacts(
-                model_dir,
-                args,
-                model_name,
-                model_config,
-                dataset_config,
-                rows,
-                trace_rows,
-                model,
-            )
-            return rows, trace_rows
-        except Exception as exc:
-            elapsed = time.perf_counter() - started
-            print(f"Error for model={model_name}: {exc}")
-            rows = [
-                {
-                    "status": "error",
-                    "model": model_name,
-                    "neurons": args.neurons,
-                    "seed": args.seed,
-                    "epoch": -1,
-                    "optimizer_seconds": elapsed,
-                    "wall_seconds": elapsed,
-                    "train_loss": np.nan,
-                    "test_loss": np.nan,
-                    "test_rate_mse": np.nan,
-                    "objective": "",
-                    "error": str(exc),
-                }
-            ]
-            write_model_artifacts(model_dir, args, model_name, model_config, dataset_config, rows, [], None)
-            return rows, []
+        elif model_name in STATIC_MODELS:
+            model.to(args.device)
+            model.fit_training_data(train_loader, device=torch.device(args.device))
+            fit_seconds = time.perf_counter() - started
+            train_loss = evaluate_poisson_nll(model, train_loader, args.device, use_raw_spikes=True)
+            test_loss = evaluate_poisson_nll(model, test_loader, args.device, use_raw_spikes=True)
+            rate_mse = evaluate_rate_mse(model, test_loader, args.device, use_raw_spikes=True)
+            rows.append(dict(status="ok", model=model_name, neurons=args.neurons, seed=args.seed,
+                             epoch=0, training_axis="static", optimizer_seconds=fit_seconds,
+                             cumulative_optimizer_seconds=fit_seconds,
+                             wall_seconds=time.perf_counter() - started, train_loss=train_loss,
+                             test_loss=test_loss, test_rate_mse=rate_mse,
+                             objective=model.objective, error=""))
+            persist(rows)
+        else:
+            def rate_metric(current_model):
+                with evaluation_rng(args.seed + 10000, args.device):
+                    return evaluate_rate_mse(
+                        current_model, test_loader, args.device,
+                        bgpfa_infer_steps=args.bgpfa_infer_steps,
+                        bgpfa_infer_mc=args.bgpfa_infer_mc,
+                        bgpfa_infer_lr=args.bgpfa_infer_lr,
+                    )
 
-    strategy = build_strategy(model_config.optimization)
-    trainer = Trainer(TrainerConfig(epochs=args.epochs, device=args.device))
-    metric_fns = {
-        "test_rate_mse": lambda current_model: evaluate_rate_mse(
-            current_model,
-            test_loader,
-            args.device,
-            bgpfa_infer_steps=args.bgpfa_infer_steps,
-            bgpfa_infer_mc=args.bgpfa_infer_mc,
+            metric_fns = {"test_rate_mse": rate_metric}
+            valid_loader = None if model_name == "bgpfa" else test_loader
+            trainer.fit(model, strategy, train_loader, valid_loader, metric_fns,
+                        epoch_callback=on_epoch)
+
+        trace_rows = [] if expired() else collect_rate_trace_rows(
+            model=model, dataset=test_ds, device=args.device, model_name=model_name,
+            num_neurons=args.num_rate_traces, sample_index=args.trace_sample_index,
+            bgpfa_infer_steps=args.bgpfa_infer_steps, bgpfa_infer_mc=args.bgpfa_infer_mc,
             bgpfa_infer_lr=args.bgpfa_infer_lr,
         )
-    }
-
-    started = time.perf_counter()
-    try:
-        valid_loader = None if model_name == "bgpfa" else test_loader
-        history = trainer.fit(model, strategy, train_loader, valid_loader, metric_fns)
+        write_rate_traces(model_dir / "rate_traces.csv", trace_rows)
+        plot_rate_traces(trace_rows, model_dir / "rate_traces.png",
+                         title=f"{model_name} held-out firing-rate traces")
+        write_model_artifacts(model_dir, args, model_name, model_config, dataset_config,
+                              rows, trace_rows, model)
+        return rows, trace_rows
     except Exception as exc:
         elapsed = time.perf_counter() - started
         print(f"Error for model={model_name}: {exc}")
-        rows = [
-            {
+        rows.append({
                 "status": "error",
                 "model": model_name,
                 "neurons": args.neurons,
                 "seed": args.seed,
-                "epoch": -1,
+                "epoch": int(rows[-1]["epoch"]) + 1 if rows else -1,
                 "optimizer_seconds": elapsed,
                 "wall_seconds": elapsed,
                 "train_loss": np.nan,
@@ -409,53 +430,22 @@ def run_case(
                 "test_rate_mse": np.nan,
                 "objective": "",
                 "error": str(exc),
-            }
-        ]
+            })
         write_model_artifacts(model_dir, args, model_name, model_config, dataset_config, rows, [], None)
         return rows, []
 
-    trace_rows = collect_rate_trace_rows(
-        model=model,
-        dataset=test_ds,
-        device=args.device,
-        model_name=model_name,
-        num_neurons=args.num_rate_traces,
-        sample_index=args.trace_sample_index,
-        bgpfa_infer_steps=args.bgpfa_infer_steps,
-        bgpfa_infer_mc=args.bgpfa_infer_mc,
-        bgpfa_infer_lr=args.bgpfa_infer_lr,
-    )
-    write_rate_traces(model_dir / "rate_traces.csv", trace_rows)
-    plot_rate_traces(
-        trace_rows,
-        model_dir / "rate_traces.png",
-        title=f"{model_name} held-out firing-rate traces",
-    )
 
-    wall_seconds = time.perf_counter() - started
-    rows = []
-    cumulative_optimizer_seconds = 0.0
-    for report in history:
-        cumulative_optimizer_seconds += report.seconds
-        rows.append(
-            {
-                "status": "ok",
-                "model": model_name,
-                "neurons": args.neurons,
-                "seed": args.seed,
-                "epoch": report.epoch + 1,
-                "optimizer_seconds": report.seconds,
-                "cumulative_optimizer_seconds": cumulative_optimizer_seconds,
-                "wall_seconds": wall_seconds,
-                "train_loss": report.train.loss,
-                "test_loss": np.nan if report.valid is None else report.valid.loss,
-                "test_rate_mse": report.metrics.get("test_rate_mse", np.nan),
-                "objective": report.train.objective,
-                "error": "",
-            }
-        )
-    write_model_artifacts(model_dir, args, model_name, model_config, dataset_config, rows, trace_rows, model)
-    return rows, trace_rows
+def build_synthetic_model(model_config, train_dataset, dataset_config):
+    n_time, n_neurons = train_dataset.spikes.shape[1:]
+    if isinstance(model_config, (ILQRVAEConfig, LFADSConfig)):
+        model_config = model_config.model_copy(update={"dt": float(train_dataset.arrays.dt)})
+    data = SimpleNamespace(config=dataset_config, train_dataset=train_dataset,
+                           n_neurons=n_neurons, n_time=n_time)
+    if hasattr(model_config, "build_from_data"):
+        model = model_config.build_from_data(data)
+    else:
+        model = model_config.build(n_neurons=n_neurons, n_time=n_time)
+    return model, model_config
 
 
 def build_synthetic_dataset_config(
@@ -506,9 +496,9 @@ def fit_mint_lorenz_library(
 
     torch_device = torch.device(device)
     model.to(torch_device)
+    model.configure_training_data(dataset)
     spikes = getattr(dataset, "raw_spikes", dataset.spikes)
     rates = getattr(dataset, "rates", None)
-    latents = getattr(dataset, "latents", None)
     condition = synthetic_condition_labels(dataset_config, int(spikes.shape[0]))
     if max_repeats_per_condition is not None:
         subset_idx = balanced_condition_subset_indices(condition, max_repeats_per_condition)
@@ -516,14 +506,18 @@ def fit_mint_lorenz_library(
         condition = condition[subset_idx]
         if rates is not None:
             rates = rates[subset_idx]
-        if latents is not None:
-            latents = latents[subset_idx]
     library_source = getattr(getattr(model, "config", None), "lorenz_library_source", "smoothed_spikes")
     if library_source == "true_rates" and rates is None:
         raise AttributeError("MINT Lorenz fitting requires true training rates.")
-    z_source = rates if library_source == "true_rates" else latents
-    if z_source is None:
-        z_source = spikes
+    z_source = spikes
+    model.settings.library_rate_source = "prepared_spikes"
+    if library_source == "true_rates":
+        unit = dataset[0].get("rates_unit")
+        if unit not in {"hz", "counts"}:
+            raise ValueError("Oracle MINT fitting requires explicit training rate units.")
+        scale = model.dt if unit == "hz" else model.Delta
+        z_source = rates * scale
+        model.settings.library_rate_source = "prepared_rates"
     if spikes.ndim != 3 or z_source.ndim != 3:
         raise ValueError("MINT Lorenz fitting expects trial x time x feature tensors.")
 
@@ -537,18 +531,15 @@ def fit_mint_lorenz_library(
     if hasattr(model, "hyperparams"):
         model.hyperparams.trajectories_alignment = range(0, n_time)
 
-    if hasattr(model, "hyperparams"):
-        n_conditions = int(np.unique(condition).size)
-        model.hyperparams.n_candidates = min(int(model.hyperparams.n_candidates), n_conditions)
-        if model.hyperparams.n_candidates < 2:
-            model.hyperparams.interp = 1
-
     spike_trials = [spikes[i].T.contiguous().to(torch_device) for i in range(n_trials)]
     z_trials = [
         z_source[i].T.contiguous().to(device=torch_device, dtype=torch.float64)
         for i in range(n_trials)
     ]
     model.fit_library(spike_trials, z_trials, condition)
+    model.library_training.update(source=model.config.train_source, trials=n_trials,
+                                  trajectories=len(model.Omega_plus),
+                                  library_source=library_source)
 
 
 def rows_for_mint_lorenz_epochs(
@@ -560,6 +551,7 @@ def rows_for_mint_lorenz_epochs(
     train_loader: DataLoader,
     test_loader: DataLoader,
     started: float,
+    progress_callback=None,
 ) -> list[dict[str, str | int | float]]:
     rows = []
     cumulative_optimizer_seconds = 0.0
@@ -607,6 +599,7 @@ def rows_for_mint_lorenz_epochs(
                 "neurons": args.neurons,
                 "seed": args.seed,
                 "epoch": epoch,
+                "training_axis": "trials_per_condition",
                 "optimizer_seconds": optimizer_seconds,
                 "cumulative_optimizer_seconds": cumulative_optimizer_seconds,
                 "wall_seconds": time.perf_counter() - started,
@@ -617,6 +610,11 @@ def rows_for_mint_lorenz_epochs(
                 "error": "",
             }
         )
+        if progress_callback is not None:
+            progress_callback(rows)
+        limit = getattr(args, "max_seconds", None)
+        if limit is not None and time.perf_counter() - started >= limit:
+            break
     return rows
 
 
@@ -689,6 +687,9 @@ def build_model_config(
     if path.exists():
         model_data = dict(load_yaml(path)["model"])
 
+    if model_name in STATIC_MODELS:
+        return BaseModelConfig.from_dict(model_data) if model_data else MODEL_CONFIGS[model_name]()
+
     if model_name == "cassm":
         projection_dim = args.cassm_projection_dim
         if projection_dim is None:
@@ -749,17 +750,19 @@ def build_model_config(
             model_data["output_neuron_start"] = 0
             model_data["output_neurons"] = n_neurons
             model_data["max_iter"] = args.ilqr_max_iter
+            model_data["init_seed"] = args.seed
             return BaseModelConfig.from_dict(model_data)
         return ILQRVAEConfig(
             objective="ilqr_vae_elbo",
             params_path=None,
             initialization="random",
             trainable_parameters=True,
+            init_seed=args.seed,
             max_iter=args.ilqr_max_iter,
             held_in_neurons=n_neurons,
             output_neuron_start=0,
             output_neurons=n_neurons,
-            dt=1.0,
+            dt=None,
             optimization={
                 "name": "gradient",
                 "optimizer": "Adam",
@@ -772,6 +775,7 @@ def build_model_config(
         if model_data is None:
             model_data = {"name": "mint", "dataset": args.dataset}
         model_data["dataset"] = args.dataset
+        model_data["lfads_seed"] = args.seed
         if args.mint_n_candidates is not None:
             model_data["n_candidates"] = args.mint_n_candidates
         if args.mint_window_length is not None:
@@ -786,8 +790,6 @@ def build_model_config(
     if model_name == "lfads":
         if model_data is not None:
             return BaseModelConfig.from_dict(model_data)
-        if args.dataset == "chaotic_rnn":
-            return LFADSConfig(dt=0.01)
         return LFADSConfig()
     if model_name in {"langevin_flow", "ndt", "stndt"}:
         if model_data is not None:
@@ -854,6 +856,7 @@ def evaluate_rate_mse(
     """Mean squared firing-rate error in Hz squared."""
 
     model.eval()
+    use_raw_spikes = use_raw_spikes or _uses_raw_counts(model)
     if hasattr(model, "infer_latents"):
         return evaluate_bgpfa_rate_mse(
             model,
@@ -894,6 +897,7 @@ def evaluate_poisson_nll(
     """Poisson count NLL including the spike-factorial constant."""
 
     model.eval()
+    use_raw_spikes = use_raw_spikes or _uses_raw_counts(model)
     losses = []
     weights = []
     torch_device = torch.device(device)
@@ -916,6 +920,11 @@ def _input_spikes(batch: dict, use_raw_spikes: bool) -> torch.Tensor:
     if use_raw_spikes and "raw_spikes" in batch:
         return batch["raw_spikes"]
     return batch["spikes"]
+
+
+def _uses_raw_counts(model) -> bool:
+    factory = getattr(model, "evaluation_adapter", None)
+    return callable(factory) and bool(getattr(factory("synthetic"), "use_raw_spikes", False))
 
 
 def _target_spikes(batch: dict) -> torch.Tensor:
@@ -990,13 +999,13 @@ def collect_rate_trace_rows(
 
     sample_index = min(max(sample_index, 0), len(dataset) - 1)
     sample = dataset[sample_index]
-    spikes = sample["spikes"].unsqueeze(0).to(device)
+    model_input = _input_spikes(sample, _uses_raw_counts(model)).cpu()
+    spikes = model_input.unsqueeze(0).to(device)
     dt = _batch_bin_widths(sample, spikes, model=model)
     true_rates = sample["rates"].to(device).unsqueeze(0)
     if _target_rate_unit(sample, dt) == "counts":
         true_rates = true_rates / dt
     true_rates = true_rates.squeeze(0).cpu()
-    model_input = sample["spikes"].cpu()
     observed = sample.get("raw_spikes", sample["spikes"]).cpu()
 
     model.eval()
@@ -1113,6 +1122,7 @@ def write_history(path: Path, rows: list[dict]) -> None:
         "neurons",
         "seed",
         "epoch",
+        "training_axis",
         "optimizer_seconds",
         "cumulative_optimizer_seconds",
         "wall_seconds",
@@ -1122,11 +1132,13 @@ def write_history(path: Path, rows: list[dict]) -> None:
         "objective",
         "error",
     ]
-    with path.open("w", newline="") as handle:
+    temporary = path.with_suffix(".tmp")
+    with temporary.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+    temporary.replace(path)
 
 
 def read_existing_history(path: Path, exclude_models: set[str]) -> list[dict[str, str]]:
@@ -1175,17 +1187,22 @@ def plot_test_rate_mse(rows: list[dict], path: Path, log_y: bool = False) -> Non
             )
             epochs = [int(row["epoch"]) for row in model_rows]
             test_rate_mse = [float(row["test_rate_mse"]) for row in model_rows]
+            if model in STATIC_MODELS:
+                ax.axhline(test_rate_mse[-1], color=model_color(model), linestyle=":",
+                           label=f"{model_label(model)} (static)")
+                continue
             ax.plot(
                 epochs,
                 test_rate_mse,
                 color=model_color(model),
                 linewidth=1.4,
-                label=model_label(model),
+                marker="o" if len(epochs) == 1 or model == "mint" else None,
+                label=f"{model_label(model)} (trials/condition)" if model == "mint" else model_label(model),
             )
 
         if log_y:
             ax.set_yscale("log")
-        ax.set_xlabel("Epoch")
+        ax.set_xlabel("Epoch / MINT Training Trials per Condition" if "mint" in models else "Epoch")
         ax.set_ylabel("Held-out firing-rate MSE (Hz squared)")
         ax.set_title("Held-out Firing-Rate MSE")
         style_axis(ax)
@@ -1200,15 +1217,16 @@ def plot_test_objective(rows: list[dict], path: Path) -> None:
         return
 
     models = sorted({str(row["model"]) for row in ok_rows})
-    with plot_context(nrows=len(models), ncols=1):
+    ncols = 3
+    nrows = int(np.ceil(len(models) / ncols))
+    with plot_context(nrows=nrows, ncols=ncols):
         fig, axes = plt.subplots(
-            len(models),
-            1,
-            sharex=True,
+            nrows,
+            ncols,
             squeeze=False,
         )
 
-        for ax, model in zip(axes[:, 0], models):
+        for ax, model in zip(axes.ravel(), models):
             model_rows = sorted(
                 [row for row in ok_rows if row["model"] == model],
                 key=lambda row: int(row["epoch"]),
@@ -1220,14 +1238,19 @@ def plot_test_objective(rows: list[dict], path: Path) -> None:
                 epochs,
                 test_loss,
                 color=model_color(model),
+                marker="o" if len(epochs) == 1 else None,
                 label="test objective",
             )
             ax.set_ylabel("Objective")
-            ax.set_title(f"{model_label(model)} ({objective})")
+            ax.set_title(f"{model_label(model)}\n{objective.replace('_', ' ')}")
+            ax.set_xlabel(_training_axis_label(model))
+            if model in STATIC_MODELS:
+                ax.set_xticks([])
             style_axis(ax)
             ax.legend()
 
-        axes[-1, 0].set_xlabel("Epoch")
+        for ax in axes.ravel()[len(models):]:
+            ax.axis("off")
         save_figure(fig, path)
         plt.close(fig)
 
@@ -1238,15 +1261,16 @@ def plot_train_test_objective(rows: list[dict], path: Path) -> None:
         return
 
     models = sorted({str(row["model"]) for row in ok_rows})
-    with plot_context(nrows=len(models), ncols=1):
+    ncols = 3
+    nrows = int(np.ceil(len(models) / ncols))
+    with plot_context(nrows=nrows, ncols=ncols):
         fig, axes = plt.subplots(
-            len(models),
-            1,
-            sharex=True,
+            nrows,
+            ncols,
             squeeze=False,
         )
 
-        for ax, model in zip(axes[:, 0], models):
+        for ax, model in zip(axes.ravel(), models):
             model_rows = sorted(
                 [row for row in ok_rows if row["model"] == model],
                 key=lambda row: int(row["epoch"]),
@@ -1256,14 +1280,19 @@ def plot_train_test_objective(rows: list[dict], path: Path) -> None:
             test_loss = [float(row["test_loss"]) for row in model_rows]
             objective = str(model_rows[0]["objective"])
             color = model_color(model)
-            ax.plot(epochs, train_loss, color=color, linestyle="--", label="train")
-            ax.plot(epochs, test_loss, color=color, label="test")
+            marker = "o" if len(epochs) == 1 else None
+            ax.plot(epochs, train_loss, color=color, linestyle="--", marker=marker, label="train")
+            ax.plot(epochs, test_loss, color=color, marker=marker, label="test")
             ax.set_ylabel("Loss")
-            ax.set_title(f"{model_label(model)} ({objective})")
+            ax.set_title(f"{model_label(model)}\n{objective.replace('_', ' ')}")
+            ax.set_xlabel(_training_axis_label(model))
+            if model in STATIC_MODELS:
+                ax.set_xticks([])
             style_axis(ax)
             ax.legend()
 
-        axes[-1, 0].set_xlabel("Epoch")
+        for ax in axes.ravel()[len(models):]:
+            ax.axis("off")
         save_figure(fig, path)
         plt.close(fig)
 
@@ -1291,6 +1320,7 @@ def write_model_artifacts(
     rows: list[dict],
     trace_rows: list[dict],
     model,
+    finished: bool = True,
 ) -> None:
     write_history(model_dir / "history.csv", rows)
     if trace_rows:
@@ -1313,11 +1343,22 @@ def write_model_artifacts(
         "final_test_rate_mse": final.get("test_rate_mse"),
         "wall_seconds": final.get("wall_seconds"),
         "error": final.get("error", ""),
+        "training_axis": final.get("training_axis", "epochs"),
+        "run_status": "complete" if finished else "running",
     }
-    (model_dir / "metrics.json").write_text(json.dumps(_json_ready(metrics), indent=2, sort_keys=True) + "\n")
+    limit = getattr(args, "max_seconds", None)
+    if finished and limit is not None and float(final.get("wall_seconds", 0)) >= limit:
+        metrics["run_status"] = "time_budget"
+    if final.get("status") == "error":
+        metrics["run_status"] = "failed"
+    _write_json_atomic(model_dir / "metrics.json", metrics)
     config = {
         "dataset": dataset_config.model_dump(mode="json"),
         "model": model_config.model_dump(mode="json"),
+        "preprocessing": build_preprocessing_config(
+            model_name, args.experiment_config_dir, args.preprocessing_mode,
+            args.dataset, args.neurons,
+        ).model_dump(mode="json"),
         "trainer": {
             "epochs": args.epochs,
             "batch_size": args.batch_size,
@@ -1325,16 +1366,30 @@ def write_model_artifacts(
         },
         "benchmark_args": _json_ready(vars(args)),
     }
-    (model_dir / "config.json").write_text(json.dumps(_json_ready(config), indent=2, sort_keys=True) + "\n")
+    _write_json_atomic(model_dir / "config.json", config)
     (model_dir / "report.md").write_text(_model_report_text(metrics) + "\n")
     if model is not None:
-        torch.save(model.state_dict(), model_dir / "model.pt")
+        temporary = model_dir / "model.tmp"
+        torch.save(model.state_dict(), temporary)
+        temporary.replace(model_dir / "model.pt")
+
+
+def _write_json_atomic(path: Path, data) -> None:
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(_json_ready(data), indent=2, sort_keys=True) + "\n")
+    temporary.replace(path)
+
+
+def _training_axis_label(model: str) -> str:
+    if model == "mint":
+        return "Training Trials per Condition"
+    return "Static Baseline" if model in STATIC_MODELS else "Epoch"
 
 
 def write_group_summary(path: Path, rows: list[dict]) -> None:
     ok_rows = [row for row in rows if row.get("status") == "ok"]
     lines = [
-        "# Lorenz Loss-Curve Run Group",
+        "# Synthetic Learning-Curve Run Group",
         "",
         (
             "| model | status | best epoch | best test rate MSE | final epoch | "
@@ -1386,7 +1441,7 @@ def write_group_summary(path: Path, rows: list[dict]) -> None:
                 "## Notes",
                 "",
                 (
-                    "- MINT is inference-only here: Lorenz epochs progressively add one complete "
+                    "- MINT fits trajectory libraries: its x-axis progressively adds one complete "
                     "repeat across initial conditions to the trajectory library, capped by the "
                     "available training repeats. Its train/test objective is the Poisson NLL of "
                     "the decoded rates, not a gradient-training loss."
