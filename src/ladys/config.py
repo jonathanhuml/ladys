@@ -42,7 +42,7 @@ class ExperimentConfig:
 
 
 def load_experiment_config(path: str) -> ExperimentConfig:
-    """Load dataset, model, and trainer config blocks from YAML."""
+    """Load an experiment from a YAML recipe or a saved JSON configuration."""
 
     return experiment_config_from_dict(load_yaml(path))
 

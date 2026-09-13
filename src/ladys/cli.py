@@ -51,12 +51,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_parser = subparsers.add_parser(
         "run",
-        help="run an experiment",
-        description="Run a LaDyS experiment and write a self-contained run folder.",
+        help="run one or more experiments",
+        description="Run LaDyS experiments sequentially, saving a separate folder for each run.",
     )
     run_parser.add_argument("-d", "--dataset", default="lorenz", help="dataset name")
     run_parser.add_argument("-m", "--model", default="cassm", help="model name")
-    run_parser.add_argument("-c", "--config", help="full experiment YAML config")
+    run_parser.add_argument(
+        "-c", "--config", nargs="+", metavar="CONFIG",
+        help="one or more experiment YAML recipes or saved config.json files",
+    )
     run_parser.add_argument("--dataset-config", help="dataset YAML config")
     run_parser.add_argument("--model-config", help="model YAML config")
     run_parser.add_argument("--epochs", type=int, help="number of training epochs")
@@ -150,7 +153,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run_command(args: argparse.Namespace) -> int:
-    config = build_experiment_config(args)
+    paths = args.config if isinstance(args.config, list) else [args.config]
+    if len(paths) > 1 and getattr(args, "resume_from", None):
+        raise ValueError("Use --resume-from with a single experiment configuration.")
+    # Validate every recipe before starting any training.
+    configs = [
+        build_experiment_config(argparse.Namespace(**{**vars(args), "config": path}))
+        for path in paths
+    ]
+    for config in configs:
+        _run_experiment(config, resume_from=getattr(args, "resume_from", None))
+    return 0
+
+
+def _run_experiment(config: ExperimentConfig, *, resume_from: str | None = None) -> None:
     if isinstance(config.model, MINTConfig) and config.model.train_source in {"mat", "nwb"}:
         result = run_mint_nlb(config)
         print(f"Wrote LaDyS run: {result.run_dir}")
@@ -160,9 +176,9 @@ def run_command(args: argparse.Namespace) -> int:
             print(f"  {key}: {display}")
         print(f"  predictions: {result.predictions_path}")
         print(f"  submission_h5: {result.submission_path}")
-        return 0
+        return
 
-    result = Experiment(config).run(resume_from=getattr(args, "resume_from", None))
+    result = Experiment(config).run(resume_from=resume_from)
     print(f"Wrote LaDyS run: {result.run_dir}")
     if result.metrics:
         print("Metrics:")
@@ -171,7 +187,6 @@ def run_command(args: argparse.Namespace) -> int:
             print(f"  {key}: {display}")
     else:
         print("Metrics: none available")
-    return 0
 
 
 def tune_command(args: argparse.Namespace) -> int:
@@ -252,8 +267,13 @@ def score_nlb_command(args: argparse.Namespace) -> int:
 
 
 def build_experiment_config(args: argparse.Namespace) -> ExperimentConfig:
-    if args.config:
-        config = load_experiment_config(args.config)
+    config_path = args.config
+    if isinstance(config_path, list):
+        if len(config_path) != 1:
+            raise ValueError("build_experiment_config requires a single configuration.")
+        config_path = config_path[0]
+    if config_path:
+        config = load_experiment_config(config_path)
     else:
         config = ExperimentConfig(
             dataset=_load_dataset_config(args.dataset, args.dataset_config),

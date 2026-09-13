@@ -57,6 +57,7 @@ benchmarks, and prepared Allen VCN or CTD datasets.
 | --- | --- |
 | Discover available models and datasets | `ladys list models` / `ladys list datasets` |
 | Train and evaluate a configured experiment | `ladys run -c experiment.yaml --device cuda` |
+| Run several experiment configs sequentially | `ladys run -c first.yaml second.yaml third.yaml --device cuda` |
 | Search hyperparameters with Ray Tune | `ladys tune -c study.yaml` |
 | Continue an interrupted tuning study | `ladys tune --resume-from studies/my_study` |
 | Download and prepare NLB validation data | `ladys prepare-nlb --datasets mc_maze --splits val --bin-sizes-ms 5 --download` |

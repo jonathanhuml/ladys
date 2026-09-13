@@ -79,7 +79,7 @@ class Experiment:
 
     @classmethod
     def from_config_path(cls, path: str | Path) -> "Experiment":
-        """Create an experiment from a YAML config file."""
+        """Create an experiment from a YAML recipe or saved JSON configuration."""
 
         return cls(load_experiment_config(str(path)))
 

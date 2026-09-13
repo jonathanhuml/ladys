@@ -7,13 +7,18 @@ It supports the simple nested mapping style used by this repository's configs.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 
 def load_yaml(path: str | Path) -> dict[str, Any]:
+    """Load YAML recipes or JSON snapshots, preserving JSON numeric types."""
+
     path = Path(path)
     text = path.read_text()
+    if path.suffix.lower() == ".json":
+        return json.loads(text)
     try:
         import yaml
 
@@ -69,4 +74,3 @@ def _parse_simple_mapping_yaml(text: str) -> dict[str, Any]:
             parent[key] = _parse_scalar(value)
 
     return root
-

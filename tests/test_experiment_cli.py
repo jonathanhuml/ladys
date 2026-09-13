@@ -1,4 +1,8 @@
+import json
 from pathlib import Path
+
+import pytest
+import yaml
 
 from ladys.cli import main
 from ladys.config import ExperimentConfig, load_experiment_config
@@ -150,3 +154,64 @@ def test_experiment_configs_are_nested_by_dataset_and_model():
 
     shallow_yaml = sorted(root.glob("*/*/*.yaml"))
     assert shallow_yaml == []
+
+
+def _write_batch_recipe(path: Path, latent_dim: int) -> Path:
+    recipe = {
+        "dataset": {
+            "name": "lorenz", "neurons": 5, "num_inits": 2,
+            "num_trials": 3, "num_steps": 8, "burn_steps": 5, "seed": 0,
+        },
+        "model": {
+            "name": "gpfa", "latent_dim": latent_dim, "learn_kernel_params": False,
+            "optimization": {"name": "gradient", "optimizer": "Adam", "lr": 2e-4, "weight_decay": 2e-5},
+        },
+        "trainer": {"epochs": 0, "device": "cpu"},
+        "experiment": {"run_name": path.stem, "save_plots": False},
+    }
+    path.write_text(json.dumps(recipe) if path.suffix == ".json" else yaml.safe_dump(recipe))
+    return path
+
+
+def test_cli_runs_multiple_configs_with_shared_overrides(tmp_path: Path, capsys):
+    paths = [
+        _write_batch_recipe(tmp_path / "first.yaml", 1),
+        _write_batch_recipe(tmp_path / "second.json", 2),
+        _write_batch_recipe(tmp_path / "third.yaml", 3),
+    ]
+    output_dir = tmp_path / "runs"
+
+    assert main([
+        "run", "-c", *map(str, paths), "--epochs", "1", "--batch-size", "2",
+        "--device", "cpu", "--output-dir", str(output_dir),
+    ]) == 0
+
+    output = capsys.readouterr().out
+    assert output.count("Wrote LaDyS run:") == 3
+    for latent_dim, path in enumerate(paths, 1):
+        run_dir = output_dir / path.stem
+        saved = load_experiment_config(str(run_dir / "config.json"))
+        assert saved.model.latent_dim == latent_dim
+        assert saved.model.optimization.kwargs()["weight_decay"] == 2e-5
+        assert saved.trainer.epochs == 1
+        assert saved.trainer.device == "cpu"
+        assert saved.batch_size == 2
+        assert json.loads((run_dir / "status.json").read_text())["status"] == "complete"
+        assert (run_dir / "predictions.npz").is_file()
+
+
+def test_cli_validates_all_configs_before_training(tmp_path: Path):
+    valid_path = _write_batch_recipe(tmp_path / "valid.yaml", 2)
+    invalid_path = tmp_path / "invalid.yaml"
+    invalid_path.write_text("dataset: {name: lorenz}\nmodel: {name: unknown_model}\n")
+    output_dir = tmp_path / "runs"
+
+    with pytest.raises(KeyError):
+        main(["run", "-c", str(valid_path), str(invalid_path), "--output-dir", str(output_dir)])
+
+    assert not output_dir.exists()
+
+
+def test_cli_requires_one_config_when_resuming():
+    with pytest.raises(ValueError, match="single experiment configuration"):
+        main(["run", "-c", "first.yaml", "second.yaml", "--resume-from", "training_state.pt"])
