@@ -29,6 +29,13 @@ class CTDDatasetConfig(BaseModel):
     data_path: Path
     observation_key_template: str = "{split}_recon_data"
     rates_key_template: str = "{split}_activity"
+    rates_unit: Literal["counts", "hz"] = Field(
+        default="counts",
+        description=(
+            "Units of stored activity. CTD simulator activity is a Poisson mean "
+            "per bin; set 'hz' explicitly for imported physical firing rates."
+        ),
+    )
     latents_key_template: str = "{split}_latents"
     train_split: str = "train"
     valid_split: str = "valid"
@@ -169,10 +176,11 @@ class CTDDataset(Dataset):
     def __len__(self) -> int:
         return int(self.spikes.shape[0])
 
-    def __getitem__(self, index: int) -> dict[str, Tensor]:
+    def __getitem__(self, index: int) -> dict[str, Tensor | str]:
         return {
             "spikes": self.spikes[index],
             "rates": self.rates[index],
+            "rates_unit": self.config.rates_unit,
             "latents": self.latents[index],
             "dt": torch.tensor(self.arrays.dt, dtype=torch.float32),
         }

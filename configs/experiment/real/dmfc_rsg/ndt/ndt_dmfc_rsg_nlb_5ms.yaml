@@ -1,8 +1,7 @@
 dataset:
   name: dmfc_rsg
-  split: test
+  split: val
   bin_size_ms: 5
-  data_path: data/real/nlb/dmfc_rsg_test_5ms.h5
   input_mode: heldin
 
 model:

@@ -1,3 +1,4 @@
+# Saved prediction provenance, not a trainable experiment configuration.
 candidate_dir: runs/allen_vcn_nlb_style_20260805_tuned_core_v2/classical_fallback_sweep
 combine: arithmetic_mean_pred_rates
 dataset: allen_vcn_bo_drifting_one_tf

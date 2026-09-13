@@ -1,12 +1,8 @@
 name: mint
 objective: mint_likelihood_recursion
-dataset: mc_maze
-train_source: nwb
-train_split: trainval
-nlb_neural_state_defaults: true
-nwb_root: data/real/nlb/dandi
-mat_data_root: data/mint
-target_h5: data/real/nlb/eval_data_test.h5
+dataset: auto
+train_source: h5
+train_split: auto
 eval_bin_size_ms: 5
 lorenz_library_source: smoothed_spikes
 n_candidates: null
@@ -26,4 +22,4 @@ lfads_encoder_dim: 64
 lfads_controller_dim: 64
 lfads_keep_prob: 0.95
 optimization:
-  name: inference_only
+  name: library_fit

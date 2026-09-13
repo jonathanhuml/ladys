@@ -11,7 +11,7 @@ import torch
 from torch import Tensor
 
 from ladys.models.base import BaseDynamicsModel
-from ladys.types import move_batch_to_device, observations_from_batch
+from ladys.types import ModelOutput, move_batch_to_device, observations_from_batch
 
 
 EPS = 1e-8
@@ -54,7 +54,11 @@ class EvaluationAdapter:
 
 
 class SyntheticEvaluationAdapter(EvaluationAdapter):
-    """Evaluate datasets with known firing rates and latent states."""
+    """Evaluate rate errors in Hz and Poisson scores in expected counts per bin.
+
+    Saved `rates` are Hz; `count_rates` are expected counts. Target batches with
+    non-unit bin widths must declare `rates_unit` as `hz` or `counts`.
+    """
 
     task: EvaluationTaskName = "synthetic"
 
@@ -65,6 +69,7 @@ class SyntheticEvaluationAdapter(EvaluationAdapter):
         device: torch.device,
     ) -> EvaluationResult:
         rate_predictions: list[Tensor] = []
+        count_predictions: list[Tensor] = []
         latent_predictions: list[Tensor] = []
         observed_spikes: list[Tensor] = []
         true_rates: list[Tensor] = []
@@ -75,10 +80,17 @@ class SyntheticEvaluationAdapter(EvaluationAdapter):
                 batch = move_batch_to_device(batch, device)
                 x = observations_from_batch(batch)
                 output = model(x)
-                rates = output.rates if output.rates is not None else output.reconstruction
-                if rates is None:
-                    rates = model.predict_rates(x)
-                rate_predictions.append(rates.detach().cpu())
+                dt = _batch_bin_widths(batch, x, model=model)
+                count_rates = output.count_rates(dt)
+                if count_rates is None:
+                    rates = output.reconstruction
+                    if rates is None:
+                        rates = model.predict_rates(x)
+                    count_rates = ModelOutput(
+                        rates=rates, rates_unit=output.rates_unit
+                    ).count_rates(dt)
+                count_predictions.append(count_rates.detach().cpu())
+                rate_predictions.append((count_rates / dt).detach().cpu())
 
                 if output.latents is not None:
                     latent_predictions.append(output.latents.detach().cpu())
@@ -87,7 +99,11 @@ class SyntheticEvaluationAdapter(EvaluationAdapter):
                     if observed is not None:
                         observed_spikes.append(observed.detach().cpu())
                     if "rates" in batch:
-                        true_rates.append(batch["rates"].detach().cpu())
+                        unit = _target_rate_unit(batch, dt)
+                        rates = batch["rates"]
+                        if unit == "counts":
+                            rates = rates / dt
+                        true_rates.append(rates.detach().cpu())
                     if "latents" in batch:
                         true_latents.append(batch["latents"].detach().cpu())
 
@@ -95,6 +111,7 @@ class SyntheticEvaluationAdapter(EvaluationAdapter):
         targets: dict[str, Tensor] = {}
         if rate_predictions:
             predictions["rates"] = torch.cat(rate_predictions, dim=0)
+            predictions["count_rates"] = torch.cat(count_predictions, dim=0)
         if latent_predictions:
             predictions["latents"] = torch.cat(latent_predictions, dim=0)
         if observed_spikes:
@@ -248,7 +265,10 @@ class NLBCoSmoothingAdapter(EvaluationAdapter):
                 x = observations_from_batch(batch)
                 output = None if self.feature_source == "predict_rates" else model(x)
                 target = _nlb_target_from_batch(batch, target=self.target)
-                prediction = self._predict_from_output(output, target, model=model, x=x)
+                prediction = self._predict_from_output(
+                    output, target, model=model, x=x,
+                    dt=_batch_bin_widths(batch, target, model=model),
+                )
                 predictions.append(prediction.detach().cpu())
                 targets.append(target.detach().cpu())
                 if output is not None and output.latents is not None:
@@ -273,6 +293,7 @@ class NLBCoSmoothingAdapter(EvaluationAdapter):
         target: Tensor,
         model: BaseDynamicsModel | None = None,
         x: Tensor | None = None,
+        dt: float | Tensor = 1.0,
     ) -> Tensor:
         if (
             self._allow_direct_prediction()
@@ -280,7 +301,7 @@ class NLBCoSmoothingAdapter(EvaluationAdapter):
             and output.rates is not None
             and output.rates.shape == target.shape
         ):
-            return output.rates.clamp_min(self.prediction_floor)
+            return output.count_rates(dt).clamp_min(self.prediction_floor)
         if self.decoder_weight is None:
             raise RuntimeError(
                 "NLB decoder was not fitted and the model did not directly return held-out rates."
@@ -461,19 +482,24 @@ def compute_available_metrics(
     predictions: dict[str, Tensor],
     targets: dict[str, Tensor],
 ) -> dict[str, float]:
-    """Compute metrics supported by the returned predictions and targets."""
+    """Compute metrics from rate targets and expected-count spike predictions.
+
+    `count_rates` supplies Poisson means when `rates` uses physical rate units.
+    Existing count-only callers may continue supplying just `rates`.
+    """
 
     metrics: dict[str, float] = {}
     pred_rates = predictions.get("rates")
+    pred_counts = predictions.get("count_rates", pred_rates)
     spikes = targets.get("spikes")
     rates = targets.get("rates")
     pred_latents = predictions.get("latents")
     latents = targets.get("latents")
 
-    if pred_rates is not None and spikes is not None and pred_rates.shape == spikes.shape:
-        metrics["co_bps"] = bits_per_spike(pred_rates, spikes)
+    if pred_counts is not None and spikes is not None and pred_counts.shape == spikes.shape:
+        metrics["co_bps"] = bits_per_spike(pred_counts, spikes)
         valid = torch.isfinite(spikes)
-        nll = poisson_negative_log_likelihood(pred_rates[valid], spikes[valid]).mean()
+        nll = poisson_negative_log_likelihood(pred_counts[valid], spikes[valid]).mean()
         metrics["poisson_nll"] = float(nll.detach().cpu())
     if pred_rates is not None and rates is not None and pred_rates.shape == rates.shape:
         metrics["rate_mse"] = float(torch.mean((pred_rates - rates) ** 2).detach().cpu())
@@ -482,3 +508,33 @@ def compute_available_metrics(
         metrics["latent_linear_r2"] = linear_r2_score(pred_latents, latents)
 
     return metrics
+
+
+def _batch_bin_widths(batch, reference: Tensor, *, model: BaseDynamicsModel) -> Tensor:
+    value = batch.get("dt") if isinstance(batch, dict) else None
+    if value is None:
+        value = getattr(model, "dt", None)
+    dt = torch.as_tensor(
+        1.0 if value is None else value,
+        device=reference.device,
+        dtype=reference.dtype if reference.is_floating_point() else torch.get_default_dtype(),
+    )
+    if not bool((torch.isfinite(dt) & (dt > 0)).all()):
+        raise ValueError("Evaluation requires finite positive bin widths (dt).")
+    while dt.ndim < reference.ndim:
+        dt = dt.unsqueeze(-1)
+    if torch.broadcast_shapes(dt.shape, reference.shape) != reference.shape:
+        raise ValueError("dt must broadcast to the observation shape.")
+    return dt
+
+
+def _target_rate_unit(batch: dict, dt: Tensor) -> Literal["counts", "hz"]:
+    unit = batch.get("rates_unit")
+    if unit is None:
+        if not bool((dt == 1).all()):
+            raise ValueError("Synthetic rate targets with dt != 1 must declare rates_unit.")
+        return "hz"
+    units = set(unit) if isinstance(unit, (list, tuple)) else {unit}
+    if len(units) != 1 or not units.issubset({"counts", "hz"}):
+        raise ValueError("Each batch must declare one rates_unit: 'counts' or 'hz'.")
+    return next(iter(units))

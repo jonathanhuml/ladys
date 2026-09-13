@@ -9,6 +9,9 @@ import yaml
 
 
 BASE_CONFIGS = {
+    "mc_maze": Path(
+        "configs/experiment/real/mc_maze/ilqr_vae/ilqr_vae_mc_maze_nlb_5ms.yaml"
+    ),
     "area2_bump": Path(
         "configs/experiment/real/area2_bump/ilqr_vae/ilqr_vae_area2_bump_nlb_5ms_train.yaml"
     ),
@@ -21,6 +24,7 @@ BASE_CONFIGS = {
 }
 
 DEFAULT_BATCH_SIZES = {
+    "mc_maze": 8,
     "area2_bump": 8,
     "dmfc_rsg": 4,
     "mc_rtt": 8,
@@ -42,14 +46,16 @@ def main() -> int:
     )
     parser.add_argument(
         "--differentiate-controls",
-        action="store_true",
-        help="Backpropagate through the unrolled iLQR updates during ELBO training.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Differentiate executed solver updates (default); disabling is an approximation.",
     )
     parser.add_argument(
         "--initialization",
         choices=["checkpoint_transfer", "random"],
-        default="checkpoint_transfer",
+        default="random",
     )
+    parser.add_argument("--template-params-path")
     parser.add_argument("--latent-dim", type=int)
     parser.add_argument("--input-dim", type=int)
     parser.add_argument(
@@ -61,6 +67,8 @@ def main() -> int:
     parser.add_argument("--live-eval-interval", type=int, default=2)
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
+    if args.initialization == "checkpoint_transfer" and not args.template_params_path:
+        parser.error("--initialization checkpoint_transfer requires --template-params-path")
 
     root = Path(args.output_dir)
     config_dir = root / "configs"
@@ -80,6 +88,8 @@ def main() -> int:
         cfg["model"]["params_path"] = None
         if args.initialization == "random":
             cfg["model"]["template_params_path"] = None
+        else:
+            cfg["model"]["template_params_path"] = args.template_params_path
         if args.latent_dim is not None:
             cfg["model"]["latent_dim"] = int(args.latent_dim)
         if args.input_dim is not None:

@@ -19,6 +19,13 @@ negative log likelihood and runs one standard PyTorch backward/optimizer step.
 The older full-dataset EM adapter remains available by setting
 `optimization.name: em`.
 
+Library methods use `optimization.name: library_fit`. Before optimizer setup
+and the epoch loop, the trainer calls `model.fit_training_data(train_loader,
+device=device)`. MINT uses this hook to fit templates once and optionally
+train its LFADS rate estimator. This also runs with `epochs: 0`; decoder
+inference does not imply the library was never trained. Fitted library state
+must survive checkpoint restoration and device moves.
+
 The reporting contract is shared across strategies: every epoch returns a
 `StepResult`, and benchmark plots use `seconds_per_epoch`. The benchmark
 records optimizer epoch time only; validation and downstream metric computation

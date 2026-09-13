@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PYTHON_BIN="${PYTHON_BIN:-/home/jon/torch-gpu/bin/python}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 DEVICE="${DEVICE:-cuda}"
 LOG_DIR="${LOG_DIR:-runs/ilqr_vae_hal_logs}"
 
@@ -23,9 +23,10 @@ should_run() {
 }
 
 if should_run "mc_maze"; then
-  run_job "mc_maze_checkpoint" \
+  run_job "mc_maze_train" \
     -c configs/experiment/real/mc_maze/ilqr_vae/ilqr_vae_mc_maze_nlb_5ms.yaml \
-    --run-name ilqr_vae_mc_maze_nlb_5ms_checkpoint_gpu
+    --epochs "${EPOCHS_MC_MAZE:-25}" \
+    --run-name ilqr_vae_mc_maze_nlb_5ms_train_gpu
 fi
 
 if should_run "area2_bump"; then

@@ -29,12 +29,13 @@ structure used by the original tutorial code.
 ## Inference-only checkpoint mode
 
 With `objective="posterior_control"` and `initialization="pretrained"`, the
-model loads `final_params.bin` and uses iLQR only to infer posterior
-controls for each evaluation trial. This is the mode used to reproduce the
-MC_Maze tutorial result. It can register the checkpoint tensors either as
+model loads the supplied `params_path` and uses iLQR only to infer posterior
+controls for each evaluation trial. It can register checkpoint tensors as
 buffers (`trainable_parameters=false`) or as `nn.Parameter`s
 (`trainable_parameters=true`) for regression checks; with zero training
-epochs both paths are numerically identical.
+epochs both paths are numerically identical. The corrected solver includes
+the terminal observation likelihood and is not an exact reproduction of
+historical predictions made before that correction.
 
 For NLB-style co-smoothing, the inner solve can be restricted to held-in
 neurons by setting `held_in_neurons`, and the returned rates can be sliced to
@@ -52,10 +53,14 @@ ELBO = H[q(u | o)] + E_q[log p(u) + log p(o | z(u))]
 loss = -ELBO / num_observations + regularizer
 ```
 
-The inner iLQR solve provides the posterior mean controls and is treated as
-an implicit inference step; the outer PyTorch backward pass differentiates
-the sampled ELBO through the Student prior, dynamics, likelihood readout,
-and shared posterior covariance parameters. Bounded parameters such as prior
+The inner iLQR solve provides the posterior mean controls. By default the
+outer backward pass differentiates through the executed solver updates as
+well as the sampled ELBO, including the Student prior, dynamics, likelihood,
+and shared posterior covariance. This unrolled finite-iteration derivative
+differs from the upstream implicit adjoint at an optimum. Adam fallback
+also preserves its control gradient; a detached-control approximation is
+available only by explicitly setting `differentiate_controls=false`.
+Bounded parameters such as prior
 scales, degrees of freedom, gains, and covariance diagonals are projected
 back into their valid domains after optimizer steps.
 
@@ -74,11 +79,10 @@ population for comparison with LFADS and NDT.
 
 Config for the PyTorch iLQR-VAE adapter.
 
-Use `objective="posterior_control"` with `initialization="pretrained"` and
-`optimization.name="inference_only"` to reproduce a fixed checkpoint, such
-as the MC_Maze tutorial model. Use `objective="ilqr_vae_elbo"`,
-`initialization="random"`, `trainable_parameters=true`, and a gradient
-optimizer to train a new model from scratch.
+The default ELBO objective trains a randomly initialized model. Loading a
+fixed tutorial checkpoint is opt-in through `initialization="pretrained"`,
+an explicit `params_path`, `objective="posterior_control"`, and
+`optimization.name="inference_only"`.
 
 `latent_dim` is the recurrent latent state dimension and `input_dim` is the
 dimensionality of the inferred control input. The current trainable LaDyS
@@ -86,21 +90,32 @@ path uses the translated Student prior, Mini-GRU-IO dynamics, Poisson
 likelihood, and shared Kronecker posterior covariance. For co-smoothing
 datasets, `held_in_neurons` selects the neurons used by the inner posterior
 solve, while `output_neuron_start` and `output_neurons` select the decoded
-prediction slice returned to the benchmark metrics.
+prediction slice returned to the benchmark metrics. `build_from_data`
+derives those slices and `dt` from the dataset; explicit inconsistent
+values are rejected. Direct `build` uses unit-width bins if `dt` is omitted.
 
 | Field | Type | Default |
 | --- | --- | --- |
 | `name` | `Literal['ilqr_vae']` | `'ilqr_vae'` |
-| `objective` | `Literal['posterior_control', 'ilqr_vae_elbo']` | `'posterior_control'` |
-| `params_path` | `Optional[str]` | `'data/real/ilqr_vae/final_params.bin'` |
-| `initialization` | `Literal['pretrained', 'random']` | `'pretrained'` |
+| `objective` | `Literal['posterior_control', 'ilqr_vae_elbo']` | `'ilqr_vae_elbo'` |
+| `params_path` | `Optional[str]` | `None` |
+| `initialization` | `Literal['pretrained', 'random', 'checkpoint_transfer']` | `'random'` |
+| `template_params_path` | `Optional[str]` | `None` |
+| `random_init_profile` | `Literal['default', 'tutorial_mc_maze']` | `'default'` |
+| `readout_bias_initialization` | `Literal['none', 'empirical_rates']` | `'none'` |
+| `empirical_rate_floor_hz` | `float` | `0.001` |
 | `latent_dim` | `int` | `20` |
 | `input_dim` | `int` | `5` |
 | `init_seed` | `int` | `0` |
 | `solver` | `Literal['ilqr', 'lbfgs', 'adam']` | `'ilqr'` |
-| `max_iter` | `int` | `100` |
+| `max_iter` | `int` | `5` |
 | `lr` | `Optional[float]` | `None` |
-| `trainable_parameters` | `bool` | `False` |
+| `control_hessian_mode` | `Literal['true', 'fisher', 'clamped']` | `'true'` |
+| `ilqr_failure_fallback` | `Literal['none', 'adam', 'lbfgs']` | `'adam'` |
+| `ilqr_fallback_max_iter` | `int` | `25` |
+| `ilqr_fallback_lr` | `Optional[float]` | `None` |
+| `differentiate_controls` | `bool` | `True` |
+| `trainable_parameters` | `bool` | `True` |
 | `n_posterior_samples` | `int` | `1` |
 | `include_elbo_constants` | `bool` | `True` |
 | `dynamics_regularizer` | `float` | `0.0` |
@@ -108,8 +123,8 @@ prediction slice returned to the benchmark metrics.
 | `output_neuron_start` | `Optional[int]` | `None` |
 | `output_neurons` | `Optional[int]` | `None` |
 | `rate_mode` | `Literal['likelihood', 'pre_sample']` | `'likelihood'` |
-| `dt` | `float` | `0.005` |
-| `optimization` | `OptimizationConfig` | `OptimizationConfig(name='inference_only')` |
+| `dt` | `Optional[float]` | `None` |
+| `optimization` | `OptimizationConfig` | `OptimizationConfig(name='gradient', lr=0.001)` |
 
 ## Contracts
 

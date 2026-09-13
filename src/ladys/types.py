@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
 
 import torch
 from torch import Tensor
@@ -22,6 +22,35 @@ class ModelOutput:
     reconstruction: Tensor | None = None
     distribution: Any | None = None
     extras: dict[str, Any] = field(default_factory=dict)
+    rates_unit: Literal["counts", "hz"] = "counts"
+    full_rates_unit: Literal["counts", "hz"] | None = None
+
+    def count_rates(self, dt: float | Tensor, *, full: bool = False) -> Tensor | None:
+        """Return expected counts per bin, converting Hz exactly once.
+
+        `extras['full_rates']` may contain unsliced neural predictions, but
+        must declare its units independently of the main prediction slice.
+        """
+
+        rates = self.rates
+        unit = self.rates_unit
+        if full and self.extras.get("full_rates") is not None:
+            rates = self.extras["full_rates"]
+            unit = self.full_rates_unit
+        if rates is None:
+            return None
+        if unit == "counts":
+            return rates
+        if unit == "hz":
+            bin_width = torch.as_tensor(dt, dtype=rates.dtype, device=rates.device)
+            if not bool((torch.isfinite(bin_width) & (bin_width > 0)).all()):
+                raise ValueError("Converting Hz to counts requires a finite positive dt.")
+            while bin_width.ndim < rates.ndim:
+                bin_width = bin_width.unsqueeze(-1)
+            if torch.broadcast_shapes(bin_width.shape, rates.shape) != rates.shape:
+                raise ValueError("dt must broadcast to the rate prediction shape.")
+            return rates * bin_width
+        raise ValueError("Rate predictions must declare units as 'counts' or 'hz'.")
 
 
 @dataclass
@@ -78,4 +107,3 @@ def move_batch_to_device(batch: Any, device: torch.device | str) -> Any:
     if isinstance(batch, (tuple, list)):
         return type(batch)(move_batch_to_device(value, device) for value in batch)
     return batch
-

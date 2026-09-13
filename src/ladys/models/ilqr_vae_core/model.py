@@ -150,6 +150,16 @@ class ILQRVAE(torch.nn.Module):
             raise ValueError(f"expected spikes with shape time x neurons, got {tuple(obs.shape)}")
         if held_in_neurons is None:
             held_in_neurons = obs.shape[1]
+        if not 0 < held_in_neurons <= min(obs.shape[1], self.n_neurons):
+            raise ValueError("held_in_neurons must select available observation/readout channels")
+        obs = obs[:, :held_in_neurons]
+        if max_iter < 0:
+            raise ValueError("max_iter must be nonnegative")
+        if differentiable and solver == "lbfgs":
+            raise ValueError(
+                "Differentiable controls require solver='ilqr' or 'adam'; "
+                "torch.optim.LBFGS does not preserve the inference graph."
+            )
 
         n_controls = obs.shape[0] + self.n_beg - 1
         controls = torch.zeros(
@@ -182,7 +192,7 @@ class ILQRVAE(torch.nn.Module):
                 )
         elif solver == "adam":
             with torch.enable_grad():
-                self._infer_adam(
+                final_controls = self._infer_adam(
                     controls,
                     obs,
                     held_in_neurons=held_in_neurons,
@@ -194,6 +204,7 @@ class ILQRVAE(torch.nn.Module):
                     trace_evaluations=trace_evaluations,
                     trace_losses=trace_losses,
                     trace_controls=trace_controls,
+                    differentiable=differentiable,
                 )
         elif solver == "ilqr":
             if differentiable:
@@ -231,18 +242,18 @@ class ILQRVAE(torch.nn.Module):
 
         if final_controls is None:
             final_controls = controls.detach()
-        if differentiable and solver == "ilqr":
+        if differentiable:
             latents = self.integrate(final_controls)
-            final_loss = float(
-                self.ilqr_objective(
-                    final_controls,
-                    obs,
-                    held_in_neurons=held_in_neurons,
-                    include_constants=include_constants,
+            with torch.no_grad():
+                final_loss = float(
+                    self.ilqr_objective(
+                        final_controls,
+                        obs,
+                        held_in_neurons=held_in_neurons,
+                        include_constants=include_constants,
+                    )
+                    .cpu()
                 )
-                .detach()
-                .cpu()
-            )
         else:
             with torch.no_grad():
                 final_controls = final_controls.detach()
@@ -299,27 +310,18 @@ class ILQRVAE(torch.nn.Module):
         held_in_neurons: int,
         include_constants: bool = False,
     ) -> torch.Tensor:
-        """Posterior objective as used by the original DILQR solve.
+        """Control objective with observation costs before each transition.
 
-        The original recognition code places observation losses on the state
-        before each transition for ``k >= n_beg``.
+        The last observed state follows the final transition, so its likelihood
+        is a terminal cost. All solvers therefore use the same full likelihood.
         """
 
-        x = torch.zeros(1, self.n_latent, dtype=controls.dtype, device=controls.device)
-        loss = torch.zeros((), dtype=controls.dtype, device=controls.device)
-        for k in range(controls.shape[0]):
-            u = controls[k : k + 1]
-            loss = loss + self._prior_nll_t(k, u, include_constants=include_constants)
-            obs_idx = k - self.n_beg
-            if 0 <= obs_idx < spikes.shape[0]:
-                loss = loss + self._poisson_nll_t(
-                    x,
-                    spikes[obs_idx : obs_idx + 1],
-                    held_in_neurons=held_in_neurons,
-                    include_constants=include_constants,
-                )
-            x = self._dynamics_step(k, x, u)
-        return loss
+        return self.posterior_objective(
+            controls,
+            spikes,
+            held_in_neurons=held_in_neurons,
+            include_constants=include_constants,
+        )
 
     def integrate(self, controls: torch.Tensor) -> torch.Tensor:
         """Propagate controls through Mini_GRU_IO dynamics."""
@@ -396,9 +398,10 @@ class ILQRVAE(torch.nn.Module):
     ) -> torch.Tensor:
         rates_hz = self.firing_rates(latents, mode="likelihood")[:, :held_in_neurons]
         lambdas = (self.dt * rates_hz).clamp_min(1e-12)
-        nll = torch.sum(lambdas - spikes * torch.log(lambdas))
+        observed = spikes[:, :held_in_neurons]
+        nll = torch.sum(lambdas - observed * torch.log(lambdas))
         if include_constants:
-            nll = nll + torch.sum(torch.lgamma(spikes + 1.0))
+            nll = nll + torch.sum(torch.lgamma(observed + 1.0))
         return nll
 
     def posterior_cov_sample(
@@ -517,7 +520,7 @@ class ILQRVAE(torch.nn.Module):
         n_posterior_samples: int = 1,
         include_constants: bool = True,
     ) -> torch.Tensor:
-        """Original iLQR-VAE ELBO using detached posterior-mean controls."""
+        """Sampled iLQR-VAE ELBO, preserving the supplied control gradient."""
 
         if controls.ndim != 2:
             raise ValueError("expected posterior mean controls with shape time x input_dim")
@@ -644,7 +647,7 @@ class ILQRVAE(torch.nn.Module):
         grad = (0.5 * (nu + self.n_input)) * (2.0 * u / sigma2 / nu) / tau
         cst = (nu + self.n_input) / nu / (tau**2)
         term1 = torch.diag(tau / sigma2)
-        term2 = 2.0 * torch.outer(u_over_s, u_over_s) / nu
+        term2 = 2.0 * torch.outer(u / sigma2, u / sigma2) / nu
         hess = cst * (term1 - term2)
         return grad.reshape(1, -1), hess
 
@@ -661,9 +664,10 @@ class ILQRVAE(torch.nn.Module):
         gain = self._positive(self.gain[:, :held_in_neurons])
         linear = state @ c.T + bias
         rates = (self.dt * gain * (1e-3 + _safe_exp(linear))).clamp_min(1e-12)
-        nll = torch.sum(rates - spikes_t * torch.log(rates))
+        observed = spikes_t[:, :held_in_neurons]
+        nll = torch.sum(rates - observed * torch.log(rates))
         if include_constants:
-            nll = nll + torch.sum(torch.lgamma(spikes_t + 1.0))
+            nll = nll + torch.sum(torch.lgamma(observed + 1.0))
         return nll
 
     def _poisson_grad_hess_t(
@@ -760,27 +764,28 @@ class ILQRVAE(torch.nn.Module):
         trace_evaluations: list[int],
         trace_losses: list[float],
         trace_controls: list[torch.Tensor],
-    ) -> None:
-        optimizer = torch.optim.Adam([controls], lr=lr)
+        differentiable: bool = False,
+    ) -> torch.Tensor:
+        # Functional updates retain the posterior-mean derivative for training.
+        current = controls
+        first_moment = torch.zeros_like(controls)
+        second_moment = torch.zeros_like(controls)
         best_loss = float("inf")
-        best_controls = controls.detach().clone()
-        for _ in range(max_iter):
-            optimizer.zero_grad(set_to_none=True)
+        best_controls = current
+        for iteration in range(max_iter + 1):
             loss = self.posterior_objective(
-                controls,
+                current,
                 spikes,
                 held_in_neurons=held_in_neurons,
                 include_constants=include_constants,
             )
-            loss.backward(inputs=[controls])
             loss_value = float(loss.detach().cpu())
             if loss_value < best_loss:
                 best_loss = loss_value
-                best_controls = controls.detach().clone()
-            optimizer.step()
+                best_controls = current
             history.append(loss_value)
             _maybe_record_trace(
-                controls,
+                current,
                 loss_value,
                 evaluation=len(history),
                 trace_every=trace_every,
@@ -788,8 +793,21 @@ class ILQRVAE(torch.nn.Module):
                 trace_losses=trace_losses,
                 trace_controls=trace_controls,
             )
-        with torch.no_grad():
-            controls.copy_(best_controls)
+            if iteration == max_iter:
+                break
+            gradient = torch.autograd.grad(loss, current, create_graph=differentiable)[0]
+            first_moment = 0.9 * first_moment + 0.1 * gradient
+            second_moment = 0.999 * second_moment + 0.001 * gradient.square()
+            step = iteration + 1
+            mean = first_moment / (1.0 - 0.9**step)
+            variance = second_moment / (1.0 - 0.999**step)
+            # Smooth at zero so inactive controls have finite second derivatives.
+            current = current - lr * mean / torch.sqrt(variance + 1.0e-16)
+            if not differentiable:
+                current = current.detach().requires_grad_(True)
+        if not math.isfinite(best_loss):
+            raise RuntimeError("Adam posterior-control inference produced no finite objective")
+        return best_controls if differentiable else best_controls.detach()
 
     def _infer_ilqr(
         self,
@@ -835,7 +853,9 @@ class ILQRVAE(torch.nn.Module):
                 break
 
             tape = self._ilqr_tape(controls, spikes, held_in_neurons=held_in_neurons)
-            gains, df1, df2 = self._ilqr_backward(tape)
+            gains, df1, df2 = self._ilqr_backward(
+                tape, spikes[-1:], held_in_neurons=held_in_neurons
+            )
             next_controls = self._ilqr_linesearch(
                 controls,
                 spikes,
@@ -875,13 +895,13 @@ class ILQRVAE(torch.nn.Module):
         current = controls
         prev_loss = 1e9
         for iteration in range(max_iter + 1):
-            loss_tensor = self.ilqr_objective(
-                current,
-                spikes,
-                held_in_neurons=held_in_neurons,
-                include_constants=include_constants,
-            )
-            loss = float(loss_tensor.detach().cpu())
+            with torch.no_grad():
+                loss = float(self.ilqr_objective(
+                    current,
+                    spikes,
+                    held_in_neurons=held_in_neurons,
+                    include_constants=include_constants,
+                ).cpu())
             history.append(loss)
             _maybe_record_trace(
                 current,
@@ -900,7 +920,9 @@ class ILQRVAE(torch.nn.Module):
                 break
 
             tape = self._ilqr_tape(current, spikes, held_in_neurons=held_in_neurons)
-            gains, df1, df2 = self._ilqr_backward(tape)
+            gains, df1, df2 = self._ilqr_backward(
+                tape, spikes[-1:], held_in_neurons=held_in_neurons
+            )
             current = self._ilqr_linesearch(
                 current,
                 spikes,
@@ -921,34 +943,63 @@ class ILQRVAE(torch.nn.Module):
         *,
         held_in_neurons: int,
     ) -> list[_TapeStep]:
-        x = torch.zeros(1, self.n_latent, dtype=controls.dtype, device=controls.device)
-        tape = []
-        for k in range(controls.shape[0]):
-            u = controls[k : k + 1]
-            a = self._dynamics_x(k, x, u)
-            b = self._dynamics_u(k, x)
-            rlu, rluu = self._prior_grad_hess_t(k, u)
-            obs_idx = k - self.n_beg
-            if 0 <= obs_idx < spikes.shape[0]:
-                rlx, rlxx = self._poisson_grad_hess_t(
-                    x,
-                    spikes[obs_idx : obs_idx + 1],
-                    held_in_neurons=held_in_neurons,
-                )
-            else:
-                rlx = torch.zeros(1, self.n_latent, dtype=controls.dtype, device=controls.device)
-                rlxx = torch.zeros(self.n_latent, self.n_latent, dtype=controls.dtype, device=controls.device)
-            rlux = torch.zeros(self.n_input, self.n_latent, dtype=controls.dtype, device=controls.device)
-            tape.append(_TapeStep(x=x, u=u, a=a, b=b, rlx=rlx, rlu=rlu, rlxx=rlxx, rluu=rluu, rlux=rlux))
-            x = self._dynamics_step(k, x, u)
-        return tape
+        # Once the recurrent rollout is known, all local derivatives are
+        # independent over time. Unbind once to avoid a scatter per timestep
+        # when the sequential Riccati recursion backpropagates into this tape.
+        states = torch.cat([controls.new_zeros(1, self.n_latent), self.integrate(controls)[:-1]])
+        state_rows, control_rows = states.unsqueeze(1), controls.unsqueeze(1)
+        start = self.n_beg if self.n_beg != 1 else 0
+        if len(controls) > start:
+            a = torch.vmap(lambda x, u: self._dynamics_x(self.n_beg, x, u))(
+                state_rows[start:], control_rows[start:]
+            )
+            b = torch.vmap(lambda x: self._dynamics_u(self.n_beg, x))(state_rows[start:])
+        else:
+            a = controls.new_zeros(0, self.n_latent, self.n_latent)
+            b = controls.new_zeros(0, self.n_input, self.n_latent)
+        if self.n_beg != 1:
+            identity = torch.eye(self.n_latent, dtype=controls.dtype, device=controls.device)
+            a = torch.cat([identity.expand(self.n_beg, -1, -1), a])
+            b = torch.cat([self.beg_bs, b])
+        initial_grad, initial_hess = torch.vmap(
+            lambda u: self._prior_grad_hess_t(0, u)
+        )(control_rows[:self.n_beg])
+        if len(controls) > self.n_beg:
+            rest_grad, rest_hess = torch.vmap(
+                lambda u: self._prior_grad_hess_t(self.n_beg, u)
+            )(control_rows[self.n_beg:])
+            likelihood_grad, likelihood_hess = torch.vmap(
+                lambda x, obs: self._poisson_grad_hess_t(x, obs, held_in_neurons=held_in_neurons)
+            )(state_rows[self.n_beg:], spikes[:-1].unsqueeze(1))
+        else:
+            rest_grad = controls.new_zeros(0, 1, self.n_input)
+            rest_hess = controls.new_zeros(0, self.n_input, self.n_input)
+            likelihood_grad = controls.new_zeros(0, 1, self.n_latent)
+            likelihood_hess = controls.new_zeros(0, self.n_latent, self.n_latent)
+        rlu = torch.cat([initial_grad, rest_grad])
+        rluu = torch.cat([initial_hess, rest_hess])
+        rlx = torch.cat([controls.new_zeros(self.n_beg, 1, self.n_latent), likelihood_grad])
+        rlxx = torch.cat([
+            controls.new_zeros(self.n_beg, self.n_latent, self.n_latent), likelihood_hess
+        ])
+        rlux = controls.new_zeros(self.n_input, self.n_latent)
+        fields = (state_rows, control_rows, a, b, rlx, rlu, rlxx, rluu)
+        return [
+            _TapeStep(x=x, u=u, a=at, b=bt, rlx=lx, rlu=lu, rlxx=lxx, rluu=luu, rlux=rlux)
+            for x, u, at, bt, lx, lu, lxx, luu in zip(*(value.unbind(0) for value in fields))
+        ]
 
     def _ilqr_backward(
         self,
         tape: list[_TapeStep],
+        terminal_spikes: torch.Tensor,
+        *,
+        held_in_neurons: int,
     ) -> tuple[list[tuple[_TapeStep, torch.Tensor, torch.Tensor]], float, float]:
-        flxx = torch.zeros(self.n_latent, self.n_latent, dtype=self.c.dtype, device=self.c.device)
-        flx = torch.zeros(1, self.n_latent, dtype=self.c.dtype, device=self.c.device)
+        terminal_state = self._dynamics_step(len(tape) - 1, tape[-1].x, tape[-1].u)
+        flx, flxx = self._poisson_grad_hess_t(
+            terminal_state, terminal_spikes, held_in_neurons=held_in_neurons
+        )
         eye_u = torch.eye(self.n_input, dtype=self.c.dtype, device=self.c.device)
 
         delta = 1.0
@@ -1000,8 +1051,8 @@ class ILQRVAE(torch.nn.Module):
                 vxx = 0.5 * (vxx + vxx.T)
                 vx = qx + qu @ feedback.T
                 acc_reversed.append((step, feedback, feedforward))
-                df1 = df1 + torch.sum(feedforward @ quu @ feedforward.T)
-                df2 = df2 + torch.sum(feedforward @ quu.T)
+                df1 = df1 + torch.sum(feedforward * qu)
+                df2 = df2 + torch.sum(feedforward @ quu @ feedforward.T)
 
             if not restart:
                 acc = list(reversed(acc_reversed))
@@ -1027,21 +1078,21 @@ class ILQRVAE(torch.nn.Module):
         alpha = tau
         while alpha >= alpha_min:
             candidate = self._ilqr_forward_update(gains, alpha)
-            candidate_loss = float(
-                self.ilqr_objective(
-                    candidate,
-                    spikes,
-                    held_in_neurons=held_in_neurons,
-                    include_constants=include_constants,
+            with torch.no_grad():
+                candidate_loss = float(
+                    self.ilqr_objective(
+                        candidate,
+                        spikes,
+                        held_in_neurons=held_in_neurons,
+                        include_constants=include_constants,
+                    )
+                    .cpu()
                 )
-                .detach()
-                .cpu()
-            )
             if not math.isfinite(candidate_loss):
                 alpha *= tau
                 continue
-            predicted_decrease = alpha * df1 + 0.5 * alpha * alpha * df2
-            if not (f0 <= candidate_loss + beta * predicted_decrease):
+            predicted_change = alpha * df1 + 0.5 * alpha * alpha * df2
+            if candidate_loss <= f0 + beta * min(predicted_change, 0.0):
                 return candidate
             alpha *= tau
         raise RuntimeError("iLQR line search did not converge")

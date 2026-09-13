@@ -41,6 +41,9 @@ Config for the masked-count NeuralDataTransformer (NDT) adapter.
 | --- | --- | --- |
 | `name` | `Literal['ndt']` | `'ndt'` |
 | `objective` | `str` | `'masked_poisson_nll'` |
+| `output_neurons` | `Optional[int]` | `None` |
+| `output_mode` | `Literal['auto', 'heldin', 'heldin_heldout']` | `'auto'` |
+| `fwd_steps` | `int` | `0` |
 | `context_forward` | `int` | `4` |
 | `context_backward` | `int` | `8` |
 | `context_wrap_initial` | `bool` | `False` |
@@ -71,8 +74,11 @@ Config for the masked-count NeuralDataTransformer (NDT) adapter.
 | `mask_random_ratio` | `float` | `0.5` |
 | `mask_max_span` | `int` | `1` |
 | `mask_span_expand_prob` | `float` | `0.0` |
+| `mask_span_ramp_start` | `int` | `0` |
+| `mask_span_ramp_end` | `int` | `0` |
 | `use_zero_mask` | `bool` | `True` |
 | `topk_loss_fraction` | `float` | `1.0` |
+| `nlb_decoder` | `Literal['direct', 'latents']` | `'direct'` |
 | `optimization` | `OptimizationConfig` | `OptimizationConfig(name='gradient', optimizer='Adam', lr=0.001, weight_decay=0.0, gradient_clip=200.0)` |
 
 ## Contracts

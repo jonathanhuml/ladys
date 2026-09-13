@@ -17,27 +17,29 @@ MINT builds a library of idealized neural trajectories (`Omega_plus`) and
 paired task-state trajectories (`Phi_plus`). Prediction does not optimize
 model parameters. Instead, it bins incoming spikes, updates a Poisson
 likelihood recursion over the library, and estimates rates by interpolating
-between likely library states. This makes MINT a library/inference method
-rather than a differentiable PyTorch training loop.
+between likely library states. Training is a statistical template fit;
+optional LFADS rate estimation has its own gradient training stage.
 
 ## NLB datasets
 
 The native LaDyS MINT port supports the three MINT/NLB datasets used in the
 original repository: `area2_bump`, `mc_maze`, and `mc_rtt`, plus a
 LaDyS-native `dmfc_rsg` adapter built from the NLB 5 ms H5 tensors. Area2
-and Maze smooth and average repeated condition-aligned trials; RTT can use
-single-trial AutoLFADS-rate trajectories from the MINT MATLAB data; DMFC
-averages the NLB condition-indexed reproduction trials. The `ladys run`
-command dispatches MINT NLB configs through `ladys.mint_nlb`, which writes a
-hidden-test H5 submission and a `report.md` with co-BPS.
+and Maze smooth and average repeated condition-aligned trials; the RTT
+config trains LFADS from raw training spikes and fits single-trial rate
+trajectories. DMFC averages prepared condition-indexed trials. This H5
+adapter does not reproduce the original event-warped DMFC NWB procedure.
+Prepared NLB and Allen data use the standard `Experiment` and `ladys run`
+fit/save/load workflow. Legacy NWB/MAT adapters remain explicit options.
 
-## Lorenz datasets
+## Synthetic datasets
 
-The synthetic Lorenz adapter is a LaDyS-specific trajectory builder. With
-the default `lorenz_library_source="smoothed_spikes"`, the library is
-estimated from training spikes by Gaussian smoothing and condition averaging.
-This keeps the comparison non-oracular while still matching MINT's
-assumption that useful trajectory templates are learned before inference.
+The synthetic Lorenz and chaotic-RNN adapters are LaDyS-specific trajectory
+builders. With the default `lorenz_library_source="smoothed_spikes"`, the
+library is estimated from training spikes by Gaussian smoothing and
+condition averaging. This keeps the comparison non-oracular while still
+matching MINT's assumption that useful trajectory templates are learned
+before inference.
 
 The `true_rates` library source is intentionally exposed for debugging. It
 reproduces an oracle/template-retrieval sanity check, not a fair method
@@ -45,33 +47,31 @@ comparison. Use it only when validating the likelihood/interpolation code.
 
 ## Outputs
 
-`forward` accepts `(batch, time, neurons)` spikes and returns decoded rates
-in the standard `ModelOutput.rates` field. `loss` returns a zero scalar so
-the common trainer can record inference-only epochs without updating model
-parameters.
+`forward` accepts `(batch, time, neurons)` spikes and returns expected spike
+counts per input bin. Training fits templates once before evaluation;
+checkpoints contain the complete fitted library and neuron layout.
 
 ## Configuration
 
 Config for the MINT trajectory-library decoder.
 
-MINT is inference-only after its trajectory library has been built. The
-optimization block should normally remain `name="inference_only"`. Lorenz
-benchmark epoch curves can progressively add repeated trials to the
-trajectory library, but those curves still do not imply a backward pass or
-EM loop.
+Training fits trajectory templates by smoothing and averaging training
+trials, optionally after training an LFADS rate estimator. This statistical
+fit uses `optimization.name="library_fit"` and needs no gradient epochs
+for the MINT decoder itself.
 
-For NLB tasks, `dataset` selects a task-specific trajectory builder.
-`area2_bump` and `mc_maze` can build libraries from DANDI NWBs, `mc_rtt`
-uses the downloaded MINT MATLAB data by default, and `dmfc_rsg` can use
-DANDI/NWB trials, prepared NLB H5 tensors, or an experimental LFADS-derived
-trajectory library. The NLB runner writes EvalAI-style held-out rate
-submissions and reports co-smoothing bits/spike.
+Prepared NLB H5 tensors are the default input. Neuron dimensions and sample
+intervals come from the dataset; condition metadata, when available, groups
+training trials. `train_source="lfads"` trains LFADS from those same spikes
+before fitting templates. Explicit NWB/MAT sources retain the original
+task-specific reproduction adapters.
 
-For the synthetic Lorenz task, LaDyS builds the MINT trajectory library from
-repeated training trials. The default `lorenz_library_source="smoothed_spikes"`
-estimates library rates by Gaussian-smoothing training spikes and averaging
-by initial condition. `lorenz_library_source="true_rates"` is an oracle
-sanity-check mode only and should not be used for fair method comparisons.
+For synthetic Lorenz and chaotic-RNN tasks, LaDyS builds the MINT trajectory
+library from repeated training trials. The default
+`lorenz_library_source="smoothed_spikes"` estimates library rates by
+Gaussian-smoothing training spikes and averaging by condition.
+`lorenz_library_source="true_rates"` is an oracle sanity-check mode only
+and should not be used for fair method comparisons.
 The default Lorenz split repeats the same initial-condition trajectories
 across train and validation trials, so this benchmark measures denoising of
 seen trajectories rather than interpolation to unseen trajectories.
@@ -80,21 +80,29 @@ seen trajectories rather than interpolation to unseen trajectories.
 | --- | --- | --- |
 | `name` | `Literal['mint']` | `'mint'` |
 | `objective` | `str` | `'mint_likelihood_recursion'` |
-| `dataset` | `Literal['area2_bump', 'dmfc_rsg', 'mc_maze', 'mc_rtt', 'lorenz']` | `'mc_maze'` |
-| `train_source` | `Literal['h5', 'lfads', 'mat', 'nwb']` | `'nwb'` |
+| `dataset` | `Literal['auto', 'area2_bump', 'chaotic_rnn', 'dmfc_rsg', 'mc_maze', 'mc_rtt', 'lorenz', 'allen_vcn']` | `'auto'` |
+| `train_source` | `Literal['h5', 'lfads', 'mat', 'nwb']` | `'h5'` |
 | `train_split` | `Literal['auto', 'train', 'trainval']` | `'trainval'` |
 | `nlb_neural_state_defaults` | `bool` | `True` |
-| `nwb_root` | `str` | `'data/real/nlb/dandi'` |
-| `mat_data_root` | `str` | `'data/mint'` |
+| `nwb_root` | `Optional[str]` | `None` |
+| `mat_data_root` | `Optional[str]` | `None` |
 | `target_h5` | `Optional[str]` | `None` |
 | `eval_bin_size_ms` | `int` | `5` |
 | `lorenz_library_source` | `Literal['smoothed_spikes', 'true_rates']` | `'smoothed_spikes'` |
 | `n_candidates` | `Optional[int]` | `None` |
 | `window_length` | `Optional[int]` | `None` |
 | `delta` | `Optional[int]` | `None` |
+| `interp` | `Optional[Literal[0, 1, 2]]` | `None` |
+| `interp_within_trajectories` | `Optional[bool]` | `None` |
+| `allen_condition_mode` | `Literal['condition_id', 'trial_index']` | `'condition_id'` |
+| `allen_library_source` | `Literal['spikes', 'lfads_checkpoint']` | `'spikes'` |
+| `allen_lfads_run_dir` | `Optional[str]` | `None` |
 | `sigma` | `Optional[int]` | `None` |
 | `min_rate` | `Optional[float]` | `None` |
 | `causal` | `Optional[bool]` | `None` |
+| `n_neural_dims` | `Optional[int]` | `None` |
+| `n_cond_dims` | `Optional[int]` | `None` |
+| `n_trial_dims` | `Optional[int]` | `None` |
 | `lfads_epochs` | `int` | `25` |
 | `lfads_batch_size` | `int` | `16` |
 | `lfads_train_bin_size` | `int` | `1` |
@@ -105,7 +113,8 @@ seen trajectories rather than interpolation to unseen trajectories.
 | `lfads_encoder_dim` | `int` | `64` |
 | `lfads_controller_dim` | `int` | `64` |
 | `lfads_keep_prob` | `float` | `0.95` |
-| `optimization` | `OptimizationConfig` | `OptimizationConfig(name='inference_only')` |
+| `lfads_seed` | `int` | `0` |
+| `optimization` | `OptimizationConfig` | `OptimizationConfig(name='library_fit')` |
 
 ## Contracts
 

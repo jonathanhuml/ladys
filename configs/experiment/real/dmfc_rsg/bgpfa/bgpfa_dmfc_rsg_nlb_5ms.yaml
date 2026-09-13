@@ -1,0 +1,45 @@
+dataset:
+  name: dmfc_rsg
+  split: val
+  bin_size_ms: 5
+  seed: 0
+
+model:
+  name: bgpfa
+  objective: negative_elbo
+  latent_dim: 16
+  binsize: 5.0
+  likelihood: gaussian
+  dtype: float32
+  latent_init: fa
+  observation_init: fa
+  n_mc_train: 3
+  n_mc_eval: 5
+  kl_burnin_epochs: 50
+  nlb_feature_source: latents
+  nlb_decoder: poisson
+  nlb_ridge_alpha: 0.01
+  nlb_poisson_max_iter: 100
+  nlb_latent_infer_steps: 300
+  nlb_latent_infer_n_mc: 5
+  nlb_latent_infer_lr: 0.02
+  optimization:
+    name: mgplvm_full_batch_gradient
+    optimizer: Adam
+    lr: 0.02
+    burnin: 150
+    n_mc: 3
+    gradient_clip: 200.0
+
+preprocessing:
+  observations: null
+
+trainer:
+  epochs: 350
+  batch_size: 64
+  device: cuda
+
+experiment:
+  output_dir: runs
+  run_name: bgpfa_dmfc_rsg_nlb_5ms
+  save_predictions: true

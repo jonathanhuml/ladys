@@ -1,8 +1,7 @@
 dataset:
   name: dmfc_rsg
-  split: test
+  split: val
   bin_size_ms: 5
-  data_path: data/real/nlb/dmfc_rsg_test_5ms.h5
   max_trials: null
 
 model:
@@ -10,18 +9,13 @@ model:
   objective: mint_likelihood_recursion
   dataset: dmfc_rsg
   train_source: lfads
-  train_split: trainval
-  nlb_neural_state_defaults: true
-  nwb_root: data/real/nlb/dandi
-  mat_data_root: data/mint
-  target_h5: data/real/nlb/eval_data_test.h5
   eval_bin_size_ms: 5
-  n_candidates: null
-  window_length: null
-  delta: null
+  n_candidates: 2
+  window_length: 100
+  delta: 4
   sigma: null
-  min_rate: null
-  causal: null
+  min_rate: 0.1
+  causal: false
   lfads_epochs: 100
   lfads_batch_size: 256
   lfads_train_bin_size: 4
@@ -33,7 +27,7 @@ model:
   lfads_controller_dim: 32
   lfads_keep_prob: 1.0
   optimization:
-    name: inference_only
+    name: library_fit
 
 preprocessing:
   observations: null

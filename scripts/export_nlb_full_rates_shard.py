@@ -134,16 +134,13 @@ def collect_full_rate_parts(
                 )
             batch = move_batch_to_device(batch, device)
             output = model(observations_from_batch(batch))
-            extras = getattr(output, "extras", {})
-            full_rates = extras.get("full_rates") if isinstance(extras, dict) else None
-            if full_rates is None:
-                full_rates = output.rates if getattr(output, "rates", None) is not None else None
-            if full_rates is None:
+            full_counts = output.count_rates(dt, full=True)
+            if full_counts is None:
                 raise RuntimeError(
                     f"{type(model).__name__} did not return rates or extras['full_rates']."
                 )
 
-            full_counts = (full_rates * dt).clamp_min(prediction_floor)
+            full_counts = full_counts.clamp_min(prediction_floor)
             heldin = batch.get("heldin_spikes", batch.get("spikes"))
             heldout = batch.get("heldout_spikes", batch.get("raw_spikes"))
             if heldin is None or heldout is None:

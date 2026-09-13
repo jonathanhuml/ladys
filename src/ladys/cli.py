@@ -144,7 +144,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def run_command(args: argparse.Namespace) -> int:
     config = build_experiment_config(args)
-    if isinstance(config.model, MINTConfig):
+    if isinstance(config.model, MINTConfig) and config.model.train_source in {"mat", "nwb"}:
         result = run_mint_nlb(config)
         print(f"Wrote LaDyS run: {result.run_dir}")
         print("Metrics:")

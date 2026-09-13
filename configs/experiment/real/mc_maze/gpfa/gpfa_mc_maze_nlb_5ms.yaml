@@ -1,7 +1,6 @@
 dataset:
   name: mc_maze
-  data_path: data/real/nlb/mc_maze_test_5ms.h5
-  split: test
+  split: val
   bin_size_ms: 5
   max_trials: null
 
@@ -13,23 +12,27 @@ model:
   start_tau: 100.0
   start_eps: 1.0e-3
   min_var_frac: 0.01
-  init_method: fa
+  init_method: kaiming_normal
   init_seed: 0
-  learn_kernel_params: false
+  learn_kernel_params: true
   fa_max_iters: 500
   fa_tol: 1.0e-8
   kernel_param_max_iters: 8
   kernel_param_lr: 1.0
   jitter: 1.0e-5
   optimization:
-    name: inference_only
+    name: gradient
+    optimizer: Adam
+    lr: 1.0e-2
+    weight_decay: 0.0
+    gradient_clip: 100.0
 
 preprocessing:
   observations: null
 
 trainer:
-  epochs: 0
-  batch_size: 4096
+  epochs: 20
+  batch_size: 64
   device: cpu
 
 experiment:

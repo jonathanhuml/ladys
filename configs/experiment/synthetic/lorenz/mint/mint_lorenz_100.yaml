@@ -23,13 +23,13 @@ model:
   min_rate: 0.0
   causal: false
   optimization:
-    name: inference_only
+    name: library_fit
 
 preprocessing:
   observations: null
 
 trainer:
-  epochs: 50
+  epochs: 0
   batch_size: 4
   device: cpu
 

@@ -18,6 +18,7 @@ import torch
 
 from ladys.config import ExperimentConfig, load_experiment_config
 from ladys.data import DataModule
+from ladys.datasets.nlb import NLBDatasetConfig
 from ladys.metrics import EvaluationResult, evaluate_model
 from ladys.models.base import BaseDynamicsModel
 from ladys.nlb_eval import evaluate_model_nlb_submission
@@ -79,6 +80,12 @@ class Experiment:
     def run(self) -> ExperimentResult:
         """Train the model, evaluate it, and write a self-contained run folder."""
 
+        is_test_split = isinstance(self.config.dataset, NLBDatasetConfig) and self.config.dataset.split == "test"
+        if is_test_split and self.config.trainer.live_eval_interval > 0:
+            raise ValueError(
+                "NLB checkpoint selection requires split='val'. Test targets may only "
+                "be scored after training, with live_eval_interval=0."
+            )
         self._set_seeds()
         self.data.setup()
         model = self.build_model()
@@ -168,7 +175,7 @@ class Experiment:
                 model=model,
                 strategy=strategy,
                 train_loader=train_loader,
-                valid_loader=valid_loader,
+                valid_loader=None if is_test_split else valid_loader,
                 epoch_callback=epoch_callback,
             )
             evaluation = evaluate_model(

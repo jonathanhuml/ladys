@@ -18,6 +18,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from torch import Tensor
 from torch.utils.data import Dataset
 
+from ladys.datasets._nlb_resample import resample_nwb_dataset
+
 
 NLBCoreDataset = Literal[
     "mc_maze",
@@ -142,8 +144,8 @@ class NLBDatasetConfig(BaseModel):
 class NLBArrays:
     """Loaded held-in input and held-out target arrays."""
 
-    train_heldin_spikes: Tensor
-    train_heldout_spikes: Tensor
+    train_heldin_spikes: Tensor | None
+    train_heldout_spikes: Tensor | None
     eval_heldin_spikes: Tensor
     eval_heldout_spikes: Tensor
     train_heldin_forward_spikes: Tensor | None
@@ -167,7 +169,7 @@ def default_nlb_h5_path(dataset: str, split: str, bin_size_ms: int) -> Path:
     return Path("data") / "real" / "nlb" / f"{dataset}_{split}_{bin_size_ms}ms.h5"
 
 
-def load_nlb_h5(config: NLBDatasetConfig) -> NLBArrays:
+def load_nlb_h5(config: NLBDatasetConfig, *, require_training: bool = True) -> NLBArrays:
     """Load held-in and held-out spikes from a LaDyS/NLB H5 file."""
 
     path = config.resolved_data_path
@@ -179,10 +181,18 @@ def load_nlb_h5(config: NLBDatasetConfig) -> NLBArrays:
 
     with h5py.File(path, "r") as handle:
         group = _select_h5_group(handle, config.resolved_group)
+        training_keys = ("train_spikes_heldin", "train_spikes_heldout")
+        missing = [key for key in training_keys if key not in group]
+        if require_training and missing:
+            raise ValueError(
+                f"{path}: missing training tensors {', '.join(missing)}. "
+                "Training requires separate training data; evaluation tensors cannot "
+                "be substituted. Prepare an NLB train/evaluation file first."
+            )
         eval_heldin = np.asarray(group[config.input_key])
         eval_heldout = np.asarray(group[config.target_key])
-        train_heldin = np.asarray(group.get("train_spikes_heldin", eval_heldin))
-        train_heldout = np.asarray(group.get("train_spikes_heldout", eval_heldout))
+        train_heldin = _optional_array(group, "train_spikes_heldin")
+        train_heldout = _optional_array(group, "train_spikes_heldout")
         train_heldin_forward = _optional_array(group, "train_spikes_heldin_forward")
         train_heldout_forward = _optional_array(group, "train_spikes_heldout_forward")
         eval_heldin_forward = _optional_array(group, "eval_spikes_heldin_forward")
@@ -193,7 +203,11 @@ def load_nlb_h5(config: NLBDatasetConfig) -> NLBArrays:
             f"{path}: eval held-in shape {eval_heldin.shape} is incompatible with "
             f"held-out {eval_heldout.shape}."
         )
-    if train_heldin.shape[:2] != train_heldout.shape[:2]:
+    if (
+        train_heldin is not None
+        and train_heldout is not None
+        and train_heldin.shape[:2] != train_heldout.shape[:2]
+    ):
         raise ValueError(
             f"{path}: train held-in shape {train_heldin.shape} is incompatible with "
             f"held-out {train_heldout.shape}."
@@ -202,16 +216,16 @@ def load_nlb_h5(config: NLBDatasetConfig) -> NLBArrays:
     if config.max_trials is not None:
         eval_heldin = eval_heldin[: config.max_trials]
         eval_heldout = eval_heldout[: config.max_trials]
-        train_heldin = train_heldin[: config.max_trials]
-        train_heldout = train_heldout[: config.max_trials]
+        train_heldin = _slice_optional(train_heldin, config.max_trials)
+        train_heldout = _slice_optional(train_heldout, config.max_trials)
         train_heldin_forward = _slice_optional(train_heldin_forward, config.max_trials)
         train_heldout_forward = _slice_optional(train_heldout_forward, config.max_trials)
         eval_heldin_forward = _slice_optional(eval_heldin_forward, config.max_trials)
         eval_heldout_forward = _slice_optional(eval_heldout_forward, config.max_trials)
 
     return NLBArrays(
-        train_heldin_spikes=torch.from_numpy(train_heldin.copy()).float(),
-        train_heldout_spikes=torch.from_numpy(train_heldout.copy()).float(),
+        train_heldin_spikes=_optional_tensor(train_heldin),
+        train_heldout_spikes=_optional_tensor(train_heldout),
         eval_heldin_spikes=torch.from_numpy(eval_heldin.copy()).float(),
         eval_heldout_spikes=torch.from_numpy(eval_heldout.copy()).float(),
         train_heldin_forward_spikes=_optional_tensor(train_heldin_forward),
@@ -285,8 +299,10 @@ class NLBDataset(Dataset):
     ) -> None:
         self.config = config or NLBDatasetConfig()
         self.split = split
-        self.arrays = arrays or load_nlb_h5(self.config)
+        self.arrays = arrays or load_nlb_h5(self.config, require_training=split == "train")
         if split == "train":
+            if self.arrays.train_heldin_spikes is None or self.arrays.train_heldout_spikes is None:
+                raise ValueError("Training requires train_spikes_heldin and train_spikes_heldout.")
             self.heldin_spikes = self.arrays.train_heldin_spikes
             self.raw_spikes = self.arrays.train_heldout_spikes
             self.heldin_forward_spikes = self.arrays.train_heldin_forward_spikes
@@ -595,7 +611,7 @@ def _prepare_validation_h5(
             raise RuntimeError("nlb_tools is required to build NLB tensors from NWB.") from exc
 
         dataset_obj = NWBDataset(nwb_path)
-        dataset_obj.resample(bin_size_ms)
+        resample_nwb_dataset(dataset_obj, bin_size_ms)
         make_train_input_tensors(
             dataset_obj,
             dataset_name=dataset,
@@ -647,7 +663,7 @@ def _build_train_tensors(
             raise RuntimeError("nlb_tools is required to build NLB tensors from NWB.") from exc
 
         dataset_obj = NWBDataset(nwb_path)
-        dataset_obj.resample(bin_size_ms)
+        resample_nwb_dataset(dataset_obj, bin_size_ms)
         make_train_input_tensors(
             dataset_obj,
             dataset_name=dataset,
@@ -678,7 +694,7 @@ def _build_eval_heldin(
             raise RuntimeError("nlb_tools is required to build NLB tensors from NWB.") from exc
 
         dataset_obj = NWBDataset(nwb_path)
-        dataset_obj.resample(bin_size_ms)
+        resample_nwb_dataset(dataset_obj, bin_size_ms)
         make_eval_input_tensors(
             dataset_obj,
             dataset_name=dataset,

@@ -1,14 +1,14 @@
 """MINT as a native LaDyS model.
 
 This file intentionally keeps the PyTorch MINT implementation self-contained
-instead of importing a copied helper package. MINT is an inference-only library
-method: fitting builds condition/trajectory libraries, and prediction runs the
+instead of importing a copied helper package. Training learns condition and
+trajectory libraries from spikes, and prediction runs the
 Poisson likelihood recursion plus interpolation against those libraries.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from itertools import combinations
 import json
 from pathlib import Path
@@ -26,26 +26,11 @@ from ladys.types import LossOutput, ModelOutput
 
 TORCH_DTYPE = torch.float64
 
-HELDOUT_COUNTS = {
-    "area2_bump": 16,
-    "dmfc_rsg": 14,
-    "mc_maze": 45,
-    "mc_rtt": 32,
-}
-
-TRAIN_NWB_REL = {
-    "area2_bump": Path("000127/sub-Han/sub-Han_desc-train_behavior+ecephys.nwb"),
-    "dmfc_rsg": Path("000130/sub-Haydn/sub-Haydn_desc-train_ecephys.nwb"),
-    "mc_maze": Path("000128/sub-Jenkins/sub-Jenkins_ses-full_desc-train_behavior+ecephys.nwb"),
-    "mc_rtt": Path("000129/sub-Indy/sub-Indy_desc-train_behavior+ecephys.nwb"),
-}
-
-
 @dataclass
 class Settings:
     task: str
-    data_path: Path
-    results_path: Path
+    data_path: Optional[Path]
+    results_path: Optional[Path]
     Ts: float = 0.001
     trial_alignment: range = range(0)
     test_alignment: range = range(0)
@@ -179,18 +164,16 @@ DATASET_FIELDS: Mapping[str, Mapping[str, Mapping[str, str]]] = {
 class MINTConfig(BaseModelConfig):
     """Config for the MINT trajectory-library decoder.
 
-    MINT is inference-only after its trajectory library has been built. The
-    optimization block should normally remain `name="inference_only"`. Lorenz
-    benchmark epoch curves can progressively add repeated trials to the
-    trajectory library, but those curves still do not imply a backward pass or
-    EM loop.
+    Training fits trajectory templates by smoothing and averaging training
+    trials, optionally after training an LFADS rate estimator. This statistical
+    fit uses `optimization.name="library_fit"` and needs no gradient epochs
+    for the MINT decoder itself.
 
-    For NLB tasks, `dataset` selects a task-specific trajectory builder.
-    `area2_bump` and `mc_maze` can build libraries from DANDI NWBs, `mc_rtt`
-    uses the downloaded MINT MATLAB data by default, and `dmfc_rsg` can use
-    DANDI/NWB trials, prepared NLB H5 tensors, or an experimental LFADS-derived
-    trajectory library. The NLB runner writes EvalAI-style held-out rate
-    submissions and reports co-smoothing bits/spike.
+    Prepared NLB H5 tensors are the default input. Neuron dimensions and sample
+    intervals come from the dataset; condition metadata, when available, groups
+    training trials. `train_source="lfads"` trains LFADS from those same spikes
+    before fitting templates. Explicit NWB/MAT sources retain the original
+    task-specific reproduction adapters.
 
     For synthetic Lorenz and chaotic-RNN tasks, LaDyS builds the MINT trajectory
     library from repeated training trials. The default
@@ -206,6 +189,7 @@ class MINTConfig(BaseModelConfig):
     name: Literal["mint"] = "mint"
     objective: str = "mint_likelihood_recursion"
     dataset: Literal[
+        "auto",
         "area2_bump",
         "chaotic_rnn",
         "dmfc_rsg",
@@ -213,24 +197,24 @@ class MINTConfig(BaseModelConfig):
         "mc_rtt",
         "lorenz",
         "allen_vcn",
-    ] = "mc_maze"
-    train_source: Literal["h5", "lfads", "mat", "nwb"] = "nwb"
+    ] = "auto"
+    train_source: Literal["h5", "lfads", "mat", "nwb"] = "h5"
     train_split: Literal["auto", "train", "trainval"] = "trainval"
     nlb_neural_state_defaults: bool = True
-    nwb_root: str = "data/real/nlb/dandi"
-    mat_data_root: str = "data/mint"
+    nwb_root: Optional[str] = None
+    mat_data_root: Optional[str] = None
     target_h5: Optional[str] = None
     eval_bin_size_ms: int = 5
     lorenz_library_source: Literal["smoothed_spikes", "true_rates"] = "smoothed_spikes"
-    n_candidates: Optional[int] = None
-    window_length: Optional[int] = None
-    delta: Optional[int] = None
-    interp: Optional[int] = None
+    n_candidates: Optional[int] = Field(default=None, ge=1)
+    window_length: Optional[int] = Field(default=None, ge=1)
+    delta: Optional[int] = Field(default=None, ge=1)
+    interp: Optional[Literal[0, 1, 2]] = None
     interp_within_trajectories: Optional[bool] = None
     allen_condition_mode: Literal["condition_id", "trial_index"] = "condition_id"
     allen_library_source: Literal["spikes", "lfads_checkpoint"] = "spikes"
     allen_lfads_run_dir: Optional[str] = None
-    sigma: Optional[int] = None
+    sigma: Optional[int] = Field(default=None, ge=0)
     min_rate: Optional[float] = None
     causal: Optional[bool] = None
     n_neural_dims: Optional[int] = None
@@ -246,13 +230,27 @@ class MINTConfig(BaseModelConfig):
     lfads_encoder_dim: int = 64
     lfads_controller_dim: int = 64
     lfads_keep_prob: float = 0.95
+    lfads_seed: int = 0
     optimization: OptimizationConfig = Field(
-        default_factory=lambda: OptimizationConfig(name="inference_only")
+        default_factory=lambda: OptimizationConfig(name="library_fit")
     )
 
     def build(self, n_neurons: int, n_time: int) -> "MINT":
         del n_neurons, n_time
         return MINT(self)
+
+    def build_from_data(self, data) -> "MINT":
+        config = self
+        if self.dataset == "auto":
+            name = str(getattr(data.config, "name", "auto"))
+            if name.startswith("allen_vcn"):
+                name = "allen_vcn"
+            if name not in {"area2_bump", "dmfc_rsg", "mc_maze", "mc_rtt", "lorenz", "chaotic_rnn", "allen_vcn"}:
+                name = "auto"
+            config = self.model_copy(update={"dataset": name})
+        model = config.build(data.n_neurons, data.n_time)
+        model.configure_training_data(data.train_dataset)
+        return model
 
 
 class MINT(BaseDynamicsModel):
@@ -264,19 +262,20 @@ class MINT(BaseDynamicsModel):
     paired task-state trajectories (`Phi_plus`). Prediction does not optimize
     model parameters. Instead, it bins incoming spikes, updates a Poisson
     likelihood recursion over the library, and estimates rates by interpolating
-    between likely library states. This makes MINT a library/inference method
-    rather than a differentiable PyTorch training loop.
+    between likely library states. Training is a statistical template fit;
+    optional LFADS rate estimation has its own gradient training stage.
 
     ## NLB datasets
 
     The native LaDyS MINT port supports the three MINT/NLB datasets used in the
     original repository: `area2_bump`, `mc_maze`, and `mc_rtt`, plus a
     LaDyS-native `dmfc_rsg` adapter built from the NLB 5 ms H5 tensors. Area2
-    and Maze smooth and average repeated condition-aligned trials; RTT can use
-    single-trial AutoLFADS-rate trajectories from the MINT MATLAB data; DMFC
-    averages the NLB condition-indexed reproduction trials. The `ladys run`
-    command dispatches MINT NLB configs through `ladys.mint_nlb`, which writes a
-    hidden-test H5 submission and a `report.md` with co-BPS.
+    and Maze smooth and average repeated condition-aligned trials; the RTT
+    config trains LFADS from raw training spikes and fits single-trial rate
+    trajectories. DMFC averages prepared condition-indexed trials. This H5
+    adapter does not reproduce the original event-warped DMFC NWB procedure.
+    Prepared NLB and Allen data use the standard `Experiment` and `ladys run`
+    fit/save/load workflow. Legacy NWB/MAT adapters remain explicit options.
 
     ## Synthetic datasets
 
@@ -293,19 +292,22 @@ class MINT(BaseDynamicsModel):
 
     ## Outputs
 
-    `forward` accepts `(batch, time, neurons)` spikes and returns decoded rates
-    in the standard `ModelOutput.rates` field. `loss` returns a zero scalar so
-    the common trainer can record inference-only epochs without updating model
-    parameters.
+    `forward` accepts `(batch, time, neurons)` spikes and returns expected spike
+    counts per input bin. Training fits templates once before evaluation;
+    checkpoints contain the complete fitted library and neuron layout.
     """
 
     def __init__(self, config: MINTConfig) -> None:
         super().__init__()
         self.config = config
         self.objective = config.objective
-        self.settings, self.hyperparams = get_mint_config(config.dataset)
+        self.settings, self.hyperparams = get_mint_config(
+            config.dataset,
+            nlb_neural_state_defaults=config.nlb_neural_state_defaults and config.train_source in {"nwb", "mat"},
+        )
         self._apply_config_overrides()
-        self.settings.data_path = Path(config.mat_data_root) / f"{config.dataset}.mat"
+        if config.mat_data_root is not None:
+            self.settings.data_path = Path(config.mat_data_root) / f"{config.dataset}.mat"
 
         self.Ts = self.settings.Ts
         self.Delta = self.hyperparams.Delta
@@ -332,9 +334,151 @@ class MINT(BaseDynamicsModel):
         self.first_tau_prime_idx0: Optional[Tensor] = None
         self.shifted_idx1: Optional[Tensor] = None
         self.shifted_idx2: Optional[Tensor] = None
+        self.n_heldin: Optional[int] = None
+        self.n_heldout: int = 0
+        self._training_conditions: Optional[np.ndarray] = None
+        self._prepared_data = False
+        self.library_training: dict = {}
 
         self.register_buffer("_device_anchor", torch.empty(0))
         self._refresh_runtime_params()
+
+    def configure_training_data(self, dataset) -> None:
+        """Read the training layout without fitting or inspecting validation data."""
+        while hasattr(dataset, "dataset"):
+            dataset = dataset.dataset
+        if len(dataset) == 0:
+            raise ValueError("MINT requires nonempty training data.")
+        sample = dataset[0]
+        self.settings.Ts = float(sample["dt"])
+        n_time = int(sample["spikes"].shape[0])
+        self.settings.trial_alignment = range(n_time)
+        self.settings.test_alignment = range(n_time)
+        self.hyperparams.trajectories_alignment = range(n_time)
+        # Prepared tensors are already aligned and binned by the dataset adapter.
+        self._prepared_data = True
+        if "heldout_spikes" in sample:
+            self.n_heldin = int(sample["heldin_spikes"].shape[-1])
+            self.n_heldout = int(sample["heldout_spikes"].shape[-1])
+            self.output_neuron_start = self.n_heldin
+            self.hyperparams.Delta = self.config.delta or 1
+            self.hyperparams.window_length = self.config.window_length or min(6, n_time)
+            self.hyperparams.sigma = self.config.sigma if self.config.sigma is not None else 2
+            self.hyperparams.n_neural_dims = self.config.n_neural_dims
+            self.hyperparams.n_cond_dims = self.config.n_cond_dims
+            self.hyperparams.n_trial_dims = self.config.n_trial_dims
+            self.hyperparams.causal = self.config.causal if self.config.causal is not None else False
+            cfg = getattr(dataset, "config", None)
+            path = getattr(cfg, "resolved_data_path", None)
+            if path is not None:
+                self._training_conditions = _prepared_training_conditions(
+                    Path(path), getattr(cfg, "group", None), self.config.dataset, len(dataset)
+                )
+        else:
+            cfg = getattr(dataset, "config", None)
+            n_inits = getattr(cfg, "num_inits", None)
+            if n_inits is not None:
+                self._training_conditions = np.arange(len(dataset)) % int(n_inits)
+            elif getattr(cfg, "num_conditions", None) is not None:
+                repeats = int(cfg.train_fraction * cfg.num_trials)
+                self._training_conditions = np.repeat(np.arange(cfg.num_conditions), repeats)
+                if len(self._training_conditions) != len(dataset):
+                    raise ValueError("MINT condition metadata does not match the training trial count.")
+        self._refresh_runtime_params()
+
+    def fit_training_data(self, loader, *, device) -> None:
+        """Fit once from the training split, including optional LFADS training."""
+        if self.V is not None:
+            return
+        if self.config.train_source in {"nwb", "mat"}:
+            raise ValueError("Use run_mint_nlb for explicit NWB/MAT reproduction sources.")
+        if loader is None or not hasattr(loader, "dataset"):
+            raise ValueError("MINT fitting requires a training DataLoader.")
+        self.configure_training_data(loader.dataset)
+        self.to(device)
+        trials, oracle, conditions = [], [], []
+        for index in range(len(loader.dataset)):
+            sample = loader.dataset[index]
+            if self.n_heldin is not None:
+                full = torch.cat([sample["heldin_spikes"], sample["heldout_spikes"]], dim=-1)
+            else:
+                full = sample["spikes"]
+            trials.append(full.T.to(device=device, dtype=TORCH_DTYPE).contiguous())
+            cond = sample.get("condition_id")
+            if self.config.allen_condition_mode == "trial_index" and self.config.dataset == "allen_vcn":
+                cond = index
+            elif cond is None:
+                cond = self._training_conditions[index] if self._training_conditions is not None else index
+            conditions.append(int(cond))
+            if self.config.lorenz_library_source == "true_rates":
+                if "rates" not in sample:
+                    raise ValueError("Oracle MINT fitting requires explicitly provided training rates.")
+                unit = sample.get("rates_unit", "counts")
+                if unit not in {"counts", "hz"}:
+                    raise ValueError("MINT training rates must declare 'counts' or 'hz' units.")
+                scale = self.dt if unit == "hz" else self.Delta
+                oracle.append(sample["rates"].T.to(device=device, dtype=TORCH_DTYPE) * scale)
+        rate_trials = None
+        if self.config.train_source == "lfads":
+            from ladys.mint_nlb import _fit_lfads_rate_trials
+
+            rate_trials = _fit_lfads_rate_trials(trials, self, self.config, torch.device(device))
+        elif self.config.dataset == "allen_vcn" and self.config.allen_library_source == "lfads_checkpoint":
+            adapter = _MINTAllenVCNAdapter(library_source="lfads_checkpoint", lfads_run_dir=self.config.allen_lfads_run_dir)
+            rates = adapter._lfads_rate_trials(
+                [trial[:self.n_heldin].T for trial in trials], n_time=trials[0].shape[1],
+                n_full=trials[0].shape[0], device=torch.device(device),
+            )
+            rate_trials = [rate * self.Delta for rate in rates]
+        elif oracle:
+            rate_trials = oracle
+        self.settings.library_rate_source = "prepared_rates" if rate_trials is not None else "prepared_spikes"
+        self.fit_library(trials, rate_trials or trials, conditions)
+        self.library_training.update(source=self.config.train_source, trials=len(trials), trajectories=len(self.Omega_plus))
+
+    def get_extra_state(self):
+        return {
+            "version": 1, "hyperparams": asdict(self.hyperparams) | {"trajectories_alignment": None},
+            "Ts": self.Ts, "Omega_plus": self.Omega_plus, "Phi_plus": self.Phi_plus,
+            "behavior_labels": self.behavior_labels, "library_ids": self.library_ids,
+            "n_heldin": self.n_heldin, "n_heldout": self.n_heldout,
+            "prepared_data": self._prepared_data, "library_training": self.library_training,
+            "n_rates": self.n_rates, "interp_options": asdict(self.InterpOptions),
+        }
+
+    def set_extra_state(self, state) -> None:
+        if state.get("version") != 1:
+            raise ValueError("Unsupported MINT checkpoint format.")
+        hp = dict(state["hyperparams"])
+        hp["trajectories_alignment"] = range(0)
+        self.hyperparams = HyperParams(**hp)
+        self.n_rates = int(state["n_rates"])
+        self.InterpOptions = InterpOptions(**state["interp_options"])
+        self.settings.Ts = float(state["Ts"])
+        self.Omega_plus = [item.to(self.device) for item in state["Omega_plus"]]
+        self.Phi_plus = [item.to(self.device) for item in state["Phi_plus"]]
+        self.behavior_labels = list(state["behavior_labels"])
+        ids = state["library_ids"]
+        self.library_ids = None if ids is None else ids.to(self.device)
+        self.n_heldin, self.n_heldout = state["n_heldin"], state["n_heldout"]
+        if self.n_heldin is not None:
+            self.output_neuron_start = self.n_heldin
+        self._prepared_data = bool(state["prepared_data"])
+        self.library_training = dict(state["library_training"])
+        self._refresh_runtime_params()
+        if self.Omega_plus:
+            self._index_library()
+
+    def _apply(self, fn, recurse=True):
+        super()._apply(fn, recurse=recurse)
+        self.Omega_plus = [fn(item) for item in self.Omega_plus]
+        self.Phi_plus = [fn(item) for item in self.Phi_plus]
+        for name in ("library_ids", "V", "first_idx0", "last_idx0", "first_tau_prime_idx0", "shifted_idx1", "shifted_idx2"):
+            value = getattr(self, name)
+            if value is not None:
+                setattr(self, name, fn(value))
+        self._refresh_runtime_params()
+        return self
 
     def _apply_config_overrides(self) -> None:
         self.settings.lorenz_library_source = self.config.lorenz_library_source
@@ -373,6 +517,8 @@ class MINT(BaseDynamicsModel):
         self.tau_prime = round(self.window_length / self.Delta) - 1
         self.causal = self.hyperparams.causal
         self.interp = self.hyperparams.interp
+        self.min_prob = self.hyperparams.min_prob
+        self.min_lambda = self.hyperparams.min_lambda
         self.lambda_range = (
             torch.as_tensor([self.min_lambda, 500.0], dtype=TORCH_DTYPE, device=self.device)
             * self.dt
@@ -417,10 +563,20 @@ class MINT(BaseDynamicsModel):
         else:
             self.Omega_plus, self.Phi_plus, self.behavior_labels = fit_result
             self.library_ids = None
+        self._index_library()
+        return self
+
+    def _index_library(self) -> None:
+        if not self.Omega_plus:
+            raise ValueError("MINT fitting produced no trajectories.")
+        if self.Delta < 1 or self.window_length < self.Delta:
+            raise ValueError("MINT requires window_length >= delta >= 1 (in input bins).")
         lambdas = [bin_data(omega, self.Delta, "mean") for omega in self.Omega_plus]
         v_cells = [get_rate_indices(lam, self.lambda_range, self.n_rates) for lam in lambdas]
 
         lengths = [int(v.shape[1]) for v in v_cells]
+        if min(lengths) <= self.tau_prime:
+            raise ValueError("MINT likelihood window exceeds a fitted trajectory's duration.")
         starts = []
         total = 0
         for length in lengths:
@@ -437,7 +593,6 @@ class MINT(BaseDynamicsModel):
         ).sort().values
         self.V = torch.cat([v.T for v in v_cells], dim=0).to(torch.long)
         self._build_shifted_indices()
-        return self
 
     def _build_shifted_indices(self) -> None:
         idx1, idx2 = [], []
@@ -456,9 +611,20 @@ class MINT(BaseDynamicsModel):
     def forward(self, x: Tensor) -> ModelOutput:
         if x.ndim != 3:
             raise ValueError("MINT expects batched spikes with shape (batch, time, neurons).")
+        mask = None
+        if self.n_heldin is not None:
+            if x.shape[-1] < self.n_heldin:
+                raise ValueError("MINT query has fewer held-in neurons than its fitted library.")
+            observed = x[..., :self.n_heldin]
+            x = torch.cat([observed, observed.new_zeros(*observed.shape[:-1], self.n_heldout)], dim=-1)
+            mask = torch.arange(x.shape[-1], device=self.device) < self.n_heldin
         spikes = [trial.T.contiguous() for trial in x]
-        rates, _ = self.predict_spike_trials(spikes, verbose=False)
-        return ModelOutput(rates=torch.stack([item.T for item in rates], dim=0))
+        states, _ = self.predict_spike_trials(spikes, likelihood_neuron_mask=mask, verbose=False)
+        full_counts = torch.stack([item.T for item in states], dim=0) / self.Delta
+        if self.n_heldin is not None:
+            return ModelOutput(rates=full_counts[..., self.n_heldin:], rates_unit="counts",
+                               extras={"full_rates": full_counts}, full_rates_unit="counts")
+        return ModelOutput(rates=full_counts, rates_unit="counts")
 
     def loss(
         self,
@@ -473,12 +639,8 @@ class MINT(BaseDynamicsModel):
         )
 
     def evaluation_adapter(self, task: str):
-        if task == "nlb" and getattr(self.config, "dataset", None) == "allen_vcn":
-            return _MINTAllenVCNAdapter(
-                condition_mode=self.config.allen_condition_mode,
-                library_source=self.config.allen_library_source,
-                lfads_run_dir=self.config.allen_lfads_run_dir,
-            )
+        if task == "nlb":
+            return _MINTPreparedAdapter()
         return None
 
     def predict_spike_trials(
@@ -497,7 +659,7 @@ class MINT(BaseDynamicsModel):
         for spikes in S:
             binned = bin_data(spikes, self.Delta, "sum")
             binned = torch.nan_to_num(binned, nan=0.0, posinf=float(self.max_spikes), neginf=0.0)
-            S_bar.append(torch.clamp(binned, 0, self.max_spikes).to(torch.uint8))
+            S_bar.append(torch.clamp(binned, 0, self.max_spikes).to(torch.long))
 
         n_trials = len(S)
         X_hat, Z_hat, C_hat, K_hat, Alpha_hat = [], [], [], [], []
@@ -611,7 +773,9 @@ class MINT(BaseDynamicsModel):
                 torch.full((1, z.shape[1]), float("nan"), dtype=TORCH_DTYPE, device=self.device),
             )
 
-        if self.interp == 1:
+        if self.interp == 1 or self.hyperparams.n_candidates == 1 or (
+            len(self.Omega_plus) == 1 and not self.hyperparams.interp_within_trajectories
+        ):
             c0, k_hats = self._maximum_likelihood(Q, restricted_conds=[])
             k_idx = get_state_indices(k_hats, f, K_lengths[c0]).to(self.device)
             x, z, _, alpha = self._interp_adjacent_states(S_curr, c0, k_hats, k_idx, likelihood_neuron_mask)
@@ -634,19 +798,34 @@ class MINT(BaseDynamicsModel):
         states_to_exclude = []
         conds_to_exclude: List[int] = []
         min_k_prime_dist = self.hyperparams.min_k_dist / self.Delta
-        for _ in range(self.hyperparams.n_candidates):
-            if self.hyperparams.interp_within_trajectories:
-                c0, k_hats = self._maximum_likelihood(
-                    Q, states_to_exclude=states_to_exclude, min_k_prime_dist=min_k_prime_dist
-                )
-                states_to_exclude.append((c0, k_hats[0]))
-            else:
-                c0, k_hats = self._maximum_likelihood(Q, restricted_conds=conds_to_exclude)
-                conds_to_exclude.append(c0)
+        limit = self.hyperparams.n_candidates
+        if not self.hyperparams.interp_within_trajectories:
+            limit = min(limit, len(self.Omega_plus))
+        for _ in range(limit):
+            try:
+                if self.hyperparams.interp_within_trajectories:
+                    c0, k_hats = self._maximum_likelihood(
+                        Q, states_to_exclude=states_to_exclude, min_k_prime_dist=min_k_prime_dist
+                    )
+                    states_to_exclude.append((c0, k_hats[0]))
+                else:
+                    c0, k_hats = self._maximum_likelihood(Q, restricted_conds=conds_to_exclude)
+                    conds_to_exclude.append(c0)
+            except ValueError:
+                if not candidates:
+                    raise
+                break
             k_idx = get_state_indices(k_hats, f, K_lengths[c0]).to(self.device)
             candidates.append(
                 (*self._interp_adjacent_states(S_curr, c0, k_hats, k_idx, likelihood_neuron_mask), c0, k_idx)
             )
+
+        if len(candidates) == 1:
+            x, z, _, _, _, _ = candidates[0]
+            return (x, z, *[
+                torch.full((rows, z.shape[1]), float("nan"), dtype=TORCH_DTYPE, device=self.device)
+                for rows in (2, 4, 3)
+            ])
 
         interps = []
         for a, b in combinations(range(len(candidates)), 2):
@@ -841,6 +1020,52 @@ class MINT(BaseDynamicsModel):
         return x, z, lam, alpha
 
 
+class _MINTPreparedAdapter:
+    """Score held-out counts from an already fitted MINT library."""
+
+    task = "nlb"
+
+    def fit(self, model, loader, device) -> None:
+        if model.V is None:
+            raise RuntimeError("Train MINT on the training loader before evaluation.")
+
+    def evaluate(self, model, loader, device):
+        from ladys.metrics import EvaluationResult, compute_available_metrics
+
+        predictions, targets = [], []
+        with torch.no_grad():
+            for batch in loader:
+                output = model(batch["heldin_spikes"].to(device))
+                predictions.append(output.rates.detach().cpu())
+                targets.append(batch["heldout_spikes"].cpu())
+        pred = {"rates": torch.cat(predictions)}
+        truth = {"spikes": torch.cat(targets)}
+        return EvaluationResult(
+            metrics=compute_available_metrics(pred, truth),
+            predictions={key: value.numpy() for key, value in pred.items()},
+            targets={key: value.numpy() for key, value in truth.items()},
+        )
+
+
+def _prepared_training_conditions(path: Path, group_name: str | None, dataset: str, n_trials: int) -> np.ndarray:
+    """Use saved training condition membership; unmatched trials keep unique templates."""
+    with h5py.File(path, "r") as handle:
+        group = handle[group_name] if group_name else handle[dataset] if dataset in handle else handle
+        if "train_cond_idx" not in group:
+            return np.arange(n_trials)
+        rows = group["train_cond_idx"][()]
+        conditions = np.arange(n_trials) + len(rows)
+        assigned = np.zeros(n_trials, dtype=bool)
+        for cond, row in enumerate(rows):
+            idx = np.asarray(row, dtype=np.int64).reshape(-1)
+            idx = idx[(idx >= 0) & (idx < n_trials)]
+            if np.any(assigned[idx]):
+                raise ValueError("MINT training condition memberships overlap.")
+            conditions[idx] = cond
+            assigned[idx] = True
+    return conditions
+
+
 class _MINTAllenVCNAdapter:
     """Fit a full-neuron Allen VCN MINT library and score held-out neurons."""
 
@@ -997,112 +1222,25 @@ class _MINTAllenVCNAdapter:
         )
 
 
-def get_mint_config(dataset: str) -> Tuple[Settings, HyperParams]:
-    settings = Settings(
-        task=dataset,
-        data_path=Path("data") / f"{dataset}.mat",
-        results_path=Path("results"),
-    )
-    hp = HyperParams()
-    if dataset == "area2_bump":
-        settings.trial_alignment = range(-700, 851)
-        settings.test_alignment = range(-100, 501)
-        hp.trajectories_alignment = range(-350, 751)
-        hp.sigma = 25
-        hp.n_neural_dims = None
-        hp.n_cond_dims = None
-        hp.n_trial_dims = 1
-        hp.causal = True
-        hp.Delta = 20
-        hp.window_length = 240
-        hp.n_candidates = 2
-        hp.interp_within_trajectories = False
-    elif dataset == "mc_maze":
-        settings.trial_alignment = range(-800, 901)
-        settings.test_alignment = range(-250, 451)
-        hp.trajectories_alignment = range(-500, 701)
-        hp.sigma = 30
-        hp.n_neural_dims = None
-        hp.n_cond_dims = 21
-        hp.n_trial_dims = 1
-        hp.causal = True
-        hp.Delta = 20
-        hp.window_length = 300
-        hp.n_candidates = 2
-        hp.interp_within_trajectories = False
-    elif dataset == "mc_rtt":
-        settings.trial_alignment = range(-600, 1201)
-        settings.test_alignment = range(0, 600)
-        hp.causal = True
-        hp.Delta = 20
-        hp.window_length = 480
-        hp.n_candidates = 6
-        hp.interp_within_trajectories = True
-    elif dataset == "dmfc_rsg":
-        settings.trial_alignment = range(-1950, 750)
-        settings.test_alignment = range(-1500, 0)
-        hp.trajectories_alignment = range(-1950, 750)
-        hp.sigma = 55
-        hp.n_neural_dims = 49
-        hp.n_cond_dims = 17
-        hp.n_trial_dims = None
-        hp.causal = False
-        hp.Delta = 20
-        hp.window_length = 1500
-        hp.n_candidates = 2
-        hp.interp_within_trajectories = False
-        hp.dmfc_section_count = 6
-        hp.dmfc_section_ridge = 100.0
-        hp.dmfc_set_go_weight = 4.0
-    elif dataset == "lorenz":
-        settings.Ts = 0.2
-        settings.trial_alignment = range(0, 100)
-        settings.test_alignment = range(0, 100)
-        hp.trajectories_alignment = range(0, 100)
-        hp.min_lambda = 1e-3
-        hp.sigma = 2
-        hp.Delta = 1
-        hp.window_length = 6
-        hp.n_candidates = 4
-        hp.causal = False
-        hp.interp_within_trajectories = False
-        hp.n_neural_dims = None
-        hp.n_cond_dims = None
-        hp.n_trial_dims = None
-    elif dataset == "chaotic_rnn":
-        settings.Ts = 0.01
-        settings.trial_alignment = range(0, 100)
-        settings.test_alignment = range(0, 100)
-        hp.trajectories_alignment = range(0, 100)
-        hp.min_lambda = 1e-3
-        hp.sigma = 2
-        hp.Delta = 1
-        hp.window_length = 6
-        hp.n_candidates = 4
-        hp.causal = False
-        hp.interp_within_trajectories = False
-        hp.n_neural_dims = None
-        hp.n_cond_dims = None
-        hp.n_trial_dims = None
-    elif dataset == "allen_vcn":
-        settings.Ts = 0.02
-        settings.trial_alignment = range(0, 100)
-        settings.test_alignment = range(0, 100)
-        hp.trajectories_alignment = range(0, 100)
-        hp.min_lambda = 1e-3
-        hp.sigma = 2
-        hp.Delta = 1
-        hp.window_length = 6
-        hp.n_candidates = 4
-        hp.interp = 0
-        hp.causal = False
-        hp.interp_within_trajectories = False
-        hp.n_neural_dims = None
-        hp.n_cond_dims = None
-        hp.n_trial_dims = None
-    else:
+def get_mint_config(dataset: str, *, nlb_neural_state_defaults: bool = False) -> Tuple[Settings, HyperParams]:
+    """Load paper reproduction presets; prepared data overrides sampling/layout."""
+    from importlib.resources import files
+    import yaml
+
+    presets = yaml.safe_load(files("ladys.models").joinpath("mint_presets.yaml").read_text())
+    if dataset not in presets:
         raise ValueError(f"Unknown MINT dataset: {dataset}")
-    return settings, hp
+    preset = presets[dataset]
+    settings_values = dict(preset.get("settings", {}))
+    hp_values = dict(preset.get("hyperparams", {}))
+    if nlb_neural_state_defaults:
+        hp_values.update(preset.get("nlb_hyperparams", {}))
+    for name in ("trial_alignment", "test_alignment"):
+        if name in settings_values:
+            settings_values[name] = range(*settings_values[name])
+    if "trajectories_alignment" in hp_values:
+        hp_values["trajectories_alignment"] = range(*hp_values["trajectories_alignment"])
+    return Settings(task=dataset, data_path=None, results_path=None, **settings_values), HyperParams(**hp_values)
 
 
 def as_tensor(array: np.ndarray, device: Optional[torch.device] = None) -> Tensor:
@@ -1824,6 +1962,20 @@ def _apply_dmfc_transform(source: Tensor, transform: Tuple[Tensor, Tensor]) -> T
 
 
 def fit_trajectories(S, Z, condition, settings, hyperparams):
+    if settings.library_rate_source in {"prepared_spikes", "prepared_rates"}:
+        if settings.library_rate_source == "prepared_rates":
+            rate_trials = [item.to(TORCH_DTYPE) for item in Z]
+        elif hyperparams.sigma > 0:
+            rate_trials = [as_tensor(gauss_filt(item.cpu().numpy(), hyperparams.sigma, hyperparams.Delta), item.device) for item in S]
+        else:
+            rate_trials = [item.to(TORCH_DTYPE) * hyperparams.Delta for item in S]
+        if settings.task == "mc_rtt":
+            grouped = [[item] for item in rate_trials]
+        else:
+            labels = np.asarray(condition)
+            grouped = [[rate_trials[i] for i in np.flatnonzero(labels == cond)] for cond in np.unique(labels)]
+        fitted = smooth_average(grouped, hyperparams, settings.Ts)
+        return fitted, [item.clone() for item in fitted], [f"rate_{i}" for i in range(fitted[0].shape[0])]
     if (
         settings.task == "dmfc_rsg"
         and settings.dmfc_event_offsets is not None
@@ -1854,7 +2006,7 @@ def fit_trajectories(S, Z, condition, settings, hyperparams):
         vel, labels = preprocess_behavior(Z, settings)
         rates = [item[4:] * settings.Ts * hyperparams.Delta for item in Z]
         return rates, vel, labels
-    if settings.task in {"chaotic_rnn", "lorenz", "allen_vcn"}:
+    if settings.task in {"auto", "chaotic_rnn", "lorenz", "allen_vcn"}:
         source = getattr(settings, "lorenz_library_source", "smoothed_spikes")
         if source == "true_rates":
             rate_trials = [item.to(TORCH_DTYPE) for item in Z]
@@ -1888,8 +2040,10 @@ def fit_trajectories(S, Z, condition, settings, hyperparams):
     raise ValueError(f"Unknown task: {settings.task}")
 
 
-def default_train_nwb_path(dataset: str, nwb_dir: Path = Path("data/real/nlb/dandi")) -> Path:
-    return Path(nwb_dir) / TRAIN_NWB_REL[dataset]
+def default_train_nwb_path(dataset: str, nwb_dir: Path) -> Path:
+    from ladys.datasets.nlb import DATASET_TO_DANDISET, DATASET_TO_TRAIN_NWB
+
+    return Path(nwb_dir) / DATASET_TO_DANDISET[dataset] / DATASET_TO_TRAIN_NWB[dataset]
 
 
 def _to_ms(value) -> int:
@@ -2032,12 +2186,7 @@ def _dmfc_nwb_trial_data(ds, settings, split, max_trials, device):
     return S, Z, condition, cond_list
 
 
-def heldout_count(dataset: str) -> int:
-    return HELDOUT_COUNTS[dataset]
-
-
-def observed_neuron_mask(dataset: str, n_neurons: int, device=None) -> Tensor:
-    n_heldout = heldout_count(dataset)
+def observed_neuron_mask(n_heldout: int, n_neurons: int, device=None) -> Tensor:
     mask = torch.ones(n_neurons, dtype=torch.bool, device=device)
     mask[:n_heldout] = False
     return mask

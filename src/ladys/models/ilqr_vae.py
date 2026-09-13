@@ -23,11 +23,10 @@ from ladys.types import LossOutput, ModelOutput, observations_from_batch
 class ILQRVAEConfig(BaseModelConfig):
     """Config for the PyTorch iLQR-VAE adapter.
 
-    Use `objective="posterior_control"` with `initialization="pretrained"` and
-    `optimization.name="inference_only"` to reproduce a fixed checkpoint, such
-    as the MC_Maze tutorial model. Use `objective="ilqr_vae_elbo"`,
-    `initialization="random"`, `trainable_parameters=true`, and a gradient
-    optimizer to train a new model from scratch.
+    The default ELBO objective trains a randomly initialized model. Loading a
+    fixed tutorial checkpoint is opt-in through `initialization="pretrained"`,
+    an explicit `params_path`, `objective="posterior_control"`, and
+    `optimization.name="inference_only"`.
 
     `latent_dim` is the recurrent latent state dimension and `input_dim` is the
     dimensionality of the inferred control input. The current trainable LaDyS
@@ -35,13 +34,15 @@ class ILQRVAEConfig(BaseModelConfig):
     likelihood, and shared Kronecker posterior covariance. For co-smoothing
     datasets, `held_in_neurons` selects the neurons used by the inner posterior
     solve, while `output_neuron_start` and `output_neurons` select the decoded
-    prediction slice returned to the benchmark metrics.
+    prediction slice returned to the benchmark metrics. `build_from_data`
+    derives those slices and `dt` from the dataset; explicit inconsistent
+    values are rejected. Direct `build` uses unit-width bins if `dt` is omitted.
     """
 
     name: Literal["ilqr_vae"] = "ilqr_vae"
-    objective: Literal["posterior_control", "ilqr_vae_elbo"] = "posterior_control"
-    params_path: Optional[str] = "data/real/ilqr_vae/final_params.bin"
-    initialization: Literal["pretrained", "random", "checkpoint_transfer"] = "pretrained"
+    objective: Literal["posterior_control", "ilqr_vae_elbo"] = "ilqr_vae_elbo"
+    params_path: Optional[str] = None
+    initialization: Literal["pretrained", "random", "checkpoint_transfer"] = "random"
     template_params_path: Optional[str] = None
     random_init_profile: Literal["default", "tutorial_mc_maze"] = "default"
     readout_bias_initialization: Literal["none", "empirical_rates"] = "none"
@@ -50,14 +51,14 @@ class ILQRVAEConfig(BaseModelConfig):
     input_dim: int = 5
     init_seed: int = 0
     solver: Literal["ilqr", "lbfgs", "adam"] = "ilqr"
-    max_iter: int = 100
+    max_iter: int = 5
     lr: Optional[float] = None
     control_hessian_mode: Literal["true", "fisher", "clamped"] = "true"
     ilqr_failure_fallback: Literal["none", "adam", "lbfgs"] = "adam"
     ilqr_fallback_max_iter: int = 25
     ilqr_fallback_lr: Optional[float] = None
-    differentiate_controls: bool = False
-    trainable_parameters: bool = False
+    differentiate_controls: bool = True
+    trainable_parameters: bool = True
     n_posterior_samples: int = 1
     include_elbo_constants: bool = True
     dynamics_regularizer: float = 0.0
@@ -65,9 +66,9 @@ class ILQRVAEConfig(BaseModelConfig):
     output_neuron_start: Optional[int] = None
     output_neurons: Optional[int] = None
     rate_mode: Literal["likelihood", "pre_sample"] = "likelihood"
-    dt: float = 5e-3
+    dt: Optional[float] = None
     optimization: OptimizationConfig = Field(
-        default_factory=lambda: OptimizationConfig(name="inference_only")
+        default_factory=lambda: OptimizationConfig(name="gradient", lr=1.0e-3)
     )
 
     def build(self, n_neurons: int, n_time: int) -> "ILQRVAE":
@@ -104,14 +105,42 @@ class ILQRVAEConfig(BaseModelConfig):
             output_neuron_start=self.output_neuron_start,
             output_neurons=self.output_neurons,
             rate_mode=self.rate_mode,
-            dt=self.dt,
+            dt=1.0 if self.dt is None else self.dt,
             objective=self.objective,
         )
 
     def build_from_data(self, data: Any) -> "ILQRVAE":
-        model = self.build(n_neurons=data.n_neurons, n_time=data.n_time)
+        train_dataset = getattr(data, "train_dataset", None)
+        dataset = getattr(train_dataset, "dataset", train_dataset)
+        updates: dict[str, Any] = {}
+        heldin = getattr(dataset, "heldin_spikes", None)
+        heldout = getattr(dataset, "raw_spikes", None)
+        if isinstance(heldin, Tensor) and isinstance(heldout, Tensor):
+            dimensions = {
+                "held_in_neurons": int(heldin.shape[-1]),
+                "output_neuron_start": int(heldin.shape[-1]),
+                "output_neurons": int(heldout.shape[-1]),
+            }
+            for name, value in dimensions.items():
+                configured = getattr(self, name)
+                if configured is not None and configured != value:
+                    raise ValueError(f"{name}={configured} disagrees with dataset value {value}")
+            updates.update(dimensions)
+        dataset_config = getattr(data, "config", None)
+        arrays = getattr(dataset, "arrays", None)
+        data_dt = getattr(arrays, "dt", None)
+        if data_dt is None:
+            data_dt = getattr(dataset_config, "spike_bin_size", None)
+        if data_dt is None:
+            data_dt = getattr(dataset_config, "bin_size", None)
+        if data_dt is not None:
+            if self.dt is not None and abs(self.dt - float(data_dt)) > 1.0e-8:
+                raise ValueError(f"model dt={self.dt} disagrees with dataset bin size {data_dt}")
+            updates["dt"] = float(data_dt)
+        model = self.model_copy(update=updates).build(
+            n_neurons=data.n_neurons, n_time=data.n_time
+        )
         if self.readout_bias_initialization == "empirical_rates":
-            train_dataset = getattr(data, "train_dataset", None)
             full_spikes = _full_spikes_from_dataset(train_dataset)
             if full_spikes is None:
                 raise ValueError(
@@ -146,12 +175,13 @@ class ILQRVAE(BaseDynamicsModel):
     ## Inference-only checkpoint mode
 
     With `objective="posterior_control"` and `initialization="pretrained"`, the
-    model loads `final_params.bin` and uses iLQR only to infer posterior
-    controls for each evaluation trial. This is the mode used to reproduce the
-    MC_Maze tutorial result. It can register the checkpoint tensors either as
+    model loads the supplied `params_path` and uses iLQR only to infer posterior
+    controls for each evaluation trial. It can register checkpoint tensors as
     buffers (`trainable_parameters=false`) or as `nn.Parameter`s
     (`trainable_parameters=true`) for regression checks; with zero training
-    epochs both paths are numerically identical.
+    epochs both paths are numerically identical. The corrected solver includes
+    the terminal observation likelihood and is not an exact reproduction of
+    historical predictions made before that correction.
 
     For NLB-style co-smoothing, the inner solve can be restricted to held-in
     neurons by setting `held_in_neurons`, and the returned rates can be sliced to
@@ -169,10 +199,14 @@ class ILQRVAE(BaseDynamicsModel):
     loss = -ELBO / num_observations + regularizer
     ```
 
-    The inner iLQR solve provides the posterior mean controls and is treated as
-    an implicit inference step; the outer PyTorch backward pass differentiates
-    the sampled ELBO through the Student prior, dynamics, likelihood readout,
-    and shared posterior covariance parameters. Bounded parameters such as prior
+    The inner iLQR solve provides the posterior mean controls. By default the
+    outer backward pass differentiates through the executed solver updates as
+    well as the sampled ELBO, including the Student prior, dynamics, likelihood,
+    and shared posterior covariance. This unrolled finite-iteration derivative
+    differs from the upstream implicit adjoint at an optimum. Adam fallback
+    also preserves its control gradient; a detached-control approximation is
+    available only by explicitly setting `differentiate_controls=false`.
+    Bounded parameters such as prior
     scales, degrees of freedom, gains, and covariance diagonals are projected
     back into their valid domains after optimizer steps.
 
@@ -192,22 +226,22 @@ class ILQRVAE(BaseDynamicsModel):
         self,
         n_neurons: int,
         n_time: int,
-        params_path: Optional[str],
-        initialization: str = "pretrained",
+        params_path: Optional[str] = None,
+        initialization: str = "random",
         template_params_path: Optional[str] = None,
         random_init_profile: str = "default",
         latent_dim: int = 20,
         input_dim: int = 5,
         init_seed: int = 0,
         solver: str = "ilqr",
-        max_iter: int = 100,
+        max_iter: int = 5,
         lr: Optional[float] = None,
         control_hessian_mode: str = "true",
         ilqr_failure_fallback: str = "adam",
         ilqr_fallback_max_iter: int = 25,
         ilqr_fallback_lr: Optional[float] = None,
-        differentiate_controls: bool = False,
-        trainable_parameters: bool = False,
+        differentiate_controls: bool = True,
+        trainable_parameters: bool = True,
         n_posterior_samples: int = 1,
         include_elbo_constants: bool = True,
         dynamics_regularizer: float = 0.0,
@@ -215,8 +249,8 @@ class ILQRVAE(BaseDynamicsModel):
         output_neuron_start: Optional[int] = None,
         output_neurons: Optional[int] = None,
         rate_mode: str = "likelihood",
-        dt: float = 5e-3,
-        objective: str = "posterior_control",
+        dt: float = 1.0,
+        objective: str = "ilqr_vae_elbo",
     ) -> None:
         super().__init__()
         self.n_neurons = int(n_neurons)
@@ -325,6 +359,7 @@ class ILQRVAE(BaseDynamicsModel):
         return ModelOutput(
             rates=torch.stack(rates, dim=0),
             latents=torch.stack(latents, dim=0),
+            full_rates_unit="hz",
             extras={
                 "controls": torch.stack(controls, dim=0),
                 "full_rates": torch.stack(full_rates, dim=0),
@@ -376,7 +411,7 @@ class ILQRVAE(BaseDynamicsModel):
                     solver=self.ilqr_failure_fallback,
                     max_iter=self.ilqr_fallback_max_iter,
                     lr=self.ilqr_fallback_lr,
-                    differentiable=False,
+                    differentiable=differentiable,
                 ),
                 True,
             )
@@ -458,6 +493,13 @@ class ILQRVAE(BaseDynamicsModel):
     def _training_observations(self, batch: Tensor | dict[str, Tensor], x: Tensor) -> Tensor:
         if not isinstance(batch, dict):
             return x
+        reconstruction = batch.get("reconstruction_spikes")
+        if reconstruction is not None:
+            if int(reconstruction.shape[-1]) != self.core.n_neurons:
+                raise ValueError("reconstruction_spikes channels disagree with the model readout")
+            return reconstruction.to(device=x.device, dtype=x.dtype)
+        if int(x.shape[-1]) == self.core.n_neurons:
+            return x
         heldout = batch.get("heldout_spikes")
         if heldout is None:
             heldout = batch.get("raw_spikes")
@@ -469,7 +511,7 @@ class ILQRVAE(BaseDynamicsModel):
 
     def _observed_neurons_for_input(self, x: Tensor) -> int:
         configured = self.held_in_neurons or int(x.shape[-1])
-        if self.objective == "ilqr_vae_elbo" and int(x.shape[-1]) > configured:
+        if self.training and self.objective == "ilqr_vae_elbo" and int(x.shape[-1]) > configured:
             return int(x.shape[-1])
         return configured
 
@@ -559,8 +601,10 @@ def _full_spikes_from_dataset(dataset: Any) -> Tensor | None:
     if dataset is None:
         return None
     base = getattr(dataset, "dataset", dataset)
-    heldin = getattr(base, "spikes", getattr(dataset, "spikes", None))
+    heldin = getattr(base, "heldin_spikes", None)
     heldout = getattr(base, "raw_spikes", None)
+    if heldin is None:
+        return heldout if heldout is not None else getattr(dataset, "spikes", None)
     if heldin is None:
         return None
     if heldout is None:

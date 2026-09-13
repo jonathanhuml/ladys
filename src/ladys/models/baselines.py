@@ -314,43 +314,9 @@ class PSTHEvaluationAdapter:
         loader: Iterable,
         device: torch.device,
     ):
-        from ladys.metrics import EvaluationResult, compute_available_metrics
+        from ladys.metrics import SyntheticEvaluationAdapter
 
-        predictions: list[Tensor] = []
-        spikes: list[Tensor] = []
-        true_rates: list[Tensor] = []
-        true_latents: list[Tensor] = []
-
-        with torch.no_grad():
-            for batch in loader:
-                batch = move_batch_to_device(batch, device)
-                x = observations_from_batch(batch)
-                output = model(x)
-                predictions.append(output.rates.detach().cpu())
-                if isinstance(batch, dict):
-                    observed = batch.get("raw_spikes", batch.get("spikes"))
-                    if observed is not None:
-                        spikes.append(observed.detach().cpu())
-                    if "rates" in batch:
-                        true_rates.append(batch["rates"].detach().cpu())
-                    if "latents" in batch:
-                        true_latents.append(batch["latents"].detach().cpu())
-
-        pred_dict = {"rates": torch.cat(predictions, dim=0)}
-        target_dict: dict[str, Tensor] = {}
-        if spikes:
-            target_dict["spikes"] = torch.cat(spikes, dim=0)
-        if true_rates:
-            target_dict["rates"] = torch.cat(true_rates, dim=0)
-        if true_latents:
-            target_dict["latents"] = torch.cat(true_latents, dim=0)
-
-        metrics = compute_available_metrics(pred_dict, target_dict)
-        return EvaluationResult(
-            metrics=metrics,
-            predictions={key: value.numpy() for key, value in pred_dict.items()},
-            targets={key: value.numpy() for key, value in target_dict.items()},
-        )
+        return SyntheticEvaluationAdapter().evaluate(model, loader, device)
 
     def _evaluate_nlb(
         self,

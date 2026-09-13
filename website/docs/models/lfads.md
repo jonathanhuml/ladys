@@ -43,6 +43,7 @@ Config for LFADS on raw spike-count observations.
 | `name` | `Literal['lfads']` | `'lfads'` |
 | `objective` | `str` | `'lfads_elbo'` |
 | `generator_dim` | `int` | `64` |
+| `initial_condition_dim` | `Optional[int]` | `None` |
 | `inferred_input_dim` | `int` | `2` |
 | `factor_dim` | `int` | `20` |
 | `g0_encoder_dim` | `int` | `64` |
@@ -57,11 +58,27 @@ Config for LFADS on raw spike-count observations.
 | `log_rate_max` | `float` | `8.0` |
 | `posterior_logvar_min` | `float` | `math.log(0.0001)` |
 | `posterior_logvar_max` | `float` | `5.0` |
+| `controller_posterior_logvar_min` | `Optional[float]` | `None` |
+| `controller_posterior_logvar_max` | `Optional[float]` | `None` |
+| `reconstruction_time_steps` | `Optional[int]` | `None` |
+| `controller_lag` | `int` | `0` |
+| `readout_neurons` | `Optional[int]` | `None` |
+| `output_neuron_start` | `Optional[int]` | `None` |
+| `output_neurons` | `Optional[int]` | `None` |
 | `use_log1p_encoder_inputs` | `bool` | `True` |
 | `initialize_log_rate_bias` | `bool` | `True` |
 | `prediction_samples` | `int` | `1` |
+| `loss_scale` | `float` | `1.0` |
+| `reconstruction_reduce_mean` | `bool` | `False` |
+| `coordinated_dropout_rate` | `float` | `0.0` |
+| `coordinated_dropout_pass_rate` | `float` | `0.0` |
+| `coordinated_dropout_ic_enc_seq_len` | `int` | `0` |
+| `inferred_input_prior` | `Literal['independent', 'autoregressive']` | `'independent'` |
+| `inferred_input_prior_tau` | `float` | `10.0` |
 | `kl_weight_schedule_start` | `int` | `0` |
 | `kl_weight_schedule_dur` | `int` | `2000` |
+| `kl_g0_scale` | `float` | `1.0` |
+| `kl_u_scale` | `float` | `1.0` |
 | `l2_weight_schedule_start` | `int` | `0` |
 | `l2_weight_schedule_dur` | `int` | `2000` |
 | `l2_gen_scale` | `float` | `0.0` |

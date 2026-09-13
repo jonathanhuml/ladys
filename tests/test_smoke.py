@@ -394,7 +394,8 @@ def test_chaotic_rnn_dataset_contract():
     assert train_ds.latents.shape == (9, 12, 8)
 
     sample = train_ds[0]
-    assert set(sample) == {"spikes", "rates", "latents", "dt"}
+    assert set(sample) == {"spikes", "rates", "rates_unit", "latents", "dt"}
+    assert sample["rates_unit"] == "counts"
 
 
 def test_ctd_dataset_loads_generated_h5_contract(tmp_path: Path):
@@ -425,7 +426,8 @@ def test_ctd_dataset_loads_generated_h5_contract(tmp_path: Path):
     assert valid_ds.rates.shape == valid_activity.shape
     assert train_ds.latents.shape == train_latents.shape
     assert train_ds[0]["dt"].item() == pytest.approx(0.01)
-    assert set(train_ds[0]) == {"spikes", "rates", "latents", "dt"}
+    assert set(train_ds[0]) == {"spikes", "rates", "rates_unit", "latents", "dt"}
+    assert train_ds[0]["rates_unit"] == "counts"
 
 
 def test_nlb_dataset_loads_grouped_20ms_h5(tmp_path: Path):
@@ -434,6 +436,8 @@ def test_nlb_dataset_loads_grouped_20ms_h5(tmp_path: Path):
     heldout = np.arange(2 * 3 * 2, dtype=np.float32).reshape(2, 3, 2)
     with h5py.File(path, "w") as handle:
         group = handle.create_group("mc_rtt_20")
+        group.create_dataset("train_spikes_heldin", data=heldin + 1)
+        group.create_dataset("train_spikes_heldout", data=heldout + 1)
         group.create_dataset("eval_spikes_heldin", data=heldin)
         group.create_dataset("eval_spikes_heldout", data=heldout)
 

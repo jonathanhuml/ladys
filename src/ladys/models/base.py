@@ -90,6 +90,11 @@ class BaseDynamicsModel(nn.Module, ABC):
         del task
         return None
 
+    def fit_training_data(self, loader: Any, *, device: torch.device) -> None:
+        """Fit data-derived state before optimization, including zero-epoch runs."""
+
+        del loader, device
+
     @property
     def device(self) -> torch.device:
         try:
@@ -117,17 +122,34 @@ class EnsembleDynamicsModel(BaseDynamicsModel):
 
     def forward(self, x: Tensor) -> ModelOutput:
         member_outputs = [member(x) for member in self.members]
+        units = {output.rates_unit for output in member_outputs}
+        if len(units) != 1:
+            raise ValueError("Ensemble members must return rates in the same units.")
+        extras = {"ensemble_size": len(self.members), "member_outputs": member_outputs}
+        full_rates = _mean_optional_tensor(
+            [output.extras.get("full_rates") for output in member_outputs]
+        )
+        full_unit = None
+        if full_rates is not None:
+            full_units = {output.full_rates_unit for output in member_outputs}
+            if len(full_units) != 1 or None in full_units:
+                raise ValueError("Ensemble full rates must declare matching units.")
+            extras["full_rates"] = full_rates
+            full_unit = member_outputs[0].full_rates_unit
         return ModelOutput(
             rates=_mean_optional_tensor([output.rates for output in member_outputs]),
             latents=_mean_optional_tensor([output.latents for output in member_outputs]),
             reconstruction=_mean_optional_tensor(
                 [output.reconstruction for output in member_outputs]
             ),
-            extras={
-                "ensemble_size": len(self.members),
-                "member_outputs": member_outputs,
-            },
+            extras=extras,
+            rates_unit=member_outputs[0].rates_unit,
+            full_rates_unit=full_unit,
         )
+
+    def fit_training_data(self, loader: Any, *, device: torch.device) -> None:
+        for member in self.members:
+            member.fit_training_data(loader, device=device)
 
     def loss(
         self,

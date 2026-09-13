@@ -33,7 +33,10 @@ budgets.
 `forward` returns predictive rates/reconstructions, variational latent
 means, and ELBO terms in `extras`. The core mgplvm implementation is
 vendored in `src/mgplvm`; this class only adapts it to the LaDyS model,
-loss, and trainer contracts.
+loss, and trainer contracts. Evaluation infers a new posterior from each
+input batch with the learned observation model and GP prior held fixed.
+The `nlb_latent_infer_*` options control this inference for both NLB and
+synthetic evaluation. Predictions are expected counts per input bin.
 
 ## Configuration
 
@@ -55,6 +58,16 @@ Config for variational Bayesian GPFA.
 | `learn_scale` | `bool` | `False` |
 | `ard` | `bool` | `True` |
 | `dtype` | `Literal['float64', 'float32']` | `'float64'` |
+| `latent_init` | `Literal['gp_prior', 'fa']` | `'gp_prior'` |
+| `observation_init` | `Literal['mgplvm', 'fa']` | `'mgplvm'` |
+| `nlb_feature_source` | `Literal['latents', 'rates', 'reconstruction']` | `'latents'` |
+| `nlb_decoder` | `Literal['ridge', 'poisson']` | `'poisson'` |
+| `nlb_ridge_alpha` | `float` | `0.01` |
+| `nlb_poisson_max_iter` | `int` | `80` |
+| `nlb_latent_infer_steps` | `int` | `300` |
+| `nlb_latent_infer_n_mc` | `int` | `20` |
+| `nlb_latent_infer_lr` | `float` | `0.1` |
+| `nlb_latent_infer_burnin` | `int` | `1` |
 | `optimization` | `OptimizationConfig` | `OptimizationConfig(name='mgplvm_full_batch_gradient', optimizer='Adam', lr=0.1, steps_per_epoch=1, burnin=150, n_mc=3, weight_decay=0.0)` |
 
 ## Contracts

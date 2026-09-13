@@ -31,6 +31,7 @@ from ladys.experiment import Experiment, _write_json
 from ladys.metrics import EvaluationResult, compute_available_metrics
 from ladys.mint_nlb import _score_full_nlb_metrics
 from ladys.models.stndt import STNDTConfig
+from ladys.nlb_eval import prepare_nlb_selection_target
 from ladys.training import Trainer, TrainerConfig
 from ladys.training.strategies import build_strategy
 from ladys.utils.yaml import load_yaml
@@ -74,7 +75,7 @@ def main() -> int:
     parser.add_argument("--batch-size", type=int, help="Override training batch size.")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--output-dir", default="runs/stndt_nlb_reproduction")
-    parser.add_argument("--target-h5", default="data/real/nlb/eval_data_test.h5")
+    parser.add_argument("--target-h5", type=Path, help="Deprecated: selection targets come from the configured validation H5.")
     parser.add_argument(
         "--eval-every",
         type=int,
@@ -154,7 +155,7 @@ def main() -> int:
         for stage_index, (stage_name, config) in enumerate(stage_configs):
             result = run_config(
                 config=config,
-                target_h5=Path(args.target_h5),
+                target_h5=args.target_h5,
                 eval_every=args.eval_every,
                 patience_evals=args.patience_evals,
                 progress_every=args.progress_every,
@@ -172,7 +173,7 @@ def main() -> int:
         ensemble_rows = _run_artifact_ensembles(
             rows=rows,
             output_dir=Path(args.output_dir),
-            target_h5=Path(args.target_h5),
+            target_h5=args.target_h5,
             max_size=int(args.ensemble_max_size),
         )
         _write_ensemble_summary(Path(args.output_dir), ensemble_rows)
@@ -317,7 +318,7 @@ def _deep_update(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, A
 def run_config(
     *,
     config: ExperimentConfig,
-    target_h5: Path,
+    target_h5: Path | None,
     eval_every: int,
     patience_evals: int,
     progress_every: int,
@@ -328,9 +329,15 @@ def run_config(
     checkpoint_state: dict[str, torch.Tensor] | None = None,
     stage_name: str | None = None,
 ) -> dict[str, Any]:
+    if config.dataset.split != "val":
+        raise ValueError("NLB checkpoint selection requires split='val'; use Experiment for final test scoring.")
+    if target_h5 is not None:
+        raise ValueError("Selection targets are read from dataset.data_path; omit --target-h5.")
     experiment = Experiment(config)
     experiment._set_seeds()
     experiment.data.setup()
+    run_dir = experiment._make_run_dir()
+    target_h5 = prepare_nlb_selection_target(config.dataset, run_dir)
     model = experiment.build_model()
     dataset = str(config.dataset.name)
     start_epoch = 0
@@ -478,11 +485,12 @@ def run_config(
         )
 
     model.load_state_dict(best["state_dict"])
-    run_dir = experiment._make_run_dir()
     result = experiment._write_artifacts(run_dir, model, history, best["full"].evaluation)
     write_full_artifacts(run_dir=result.run_dir, dataset=dataset, full=best["full"])
     metadata = {
         "dataset": dataset,
+        "selection_split": "val",
+        "selection_target_h5": str(target_h5),
         "best_epoch": int(best["epoch"]),
         "best_metrics": best["metrics"],
         "config_epochs": int(config.trainer.epochs),
@@ -559,9 +567,11 @@ def _run_artifact_ensembles(
     *,
     rows: list[dict[str, Any]],
     output_dir: Path,
-    target_h5: Path,
+    target_h5: Path | None,
     max_size: int,
 ) -> list[dict[str, Any]]:
+    if target_h5 is not None:
+        raise ValueError("Ensemble selection must use each run's validation targets; omit --target-h5.")
     by_dataset: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         stage = row.get("stage")
@@ -584,7 +594,8 @@ def _run_artifact_ensembles(
             payload = _average_prediction_payloads(
                 [Path(str(row["run_dir"])) / "full_predictions.npz" for row in selected]
             )
-            metrics = _score_ensemble_payload(dataset=dataset, target_h5=target_h5, payload=payload)
+            selection_target = Path(selected[0]["selection_target_h5"])
+            metrics = _score_ensemble_payload(dataset=dataset, target_h5=selection_target, payload=payload)
             evaluation = EvaluationResult(
                 metrics={"co_bps": float(metrics["co-bps"])},
                 predictions={"rates": payload["eval_rates_heldout"].astype(np.float32)},

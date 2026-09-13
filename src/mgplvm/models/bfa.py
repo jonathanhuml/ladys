@@ -495,6 +495,13 @@ class Bvfa(GpBase):
         x = self.scale * self.dim_scale * x  #multiply each dimension by the prior scale
 
         mu = q_mu.matmul(x)  # n_b x n_samples x n x m
+        if not full_cov and self.d < self.n:
+            # Contract latent pairs instead of materializing a neuron-by-latent
+            # activation for every trial/time bin. Both compute x^T L L^T x.
+            covariance = q_sqrt.matmul(q_sqrt.transpose(-1, -2))
+            latent_pairs = (x.unsqueeze(-2) * x.unsqueeze(-3)).flatten(-3, -2)
+            variance = covariance.flatten(-2).matmul(latent_pairs)
+            return mu, variance.clamp_min(0)
         l = x[..., None, :, :].transpose(-1, -2).matmul(
             q_sqrt)  # n_b x n_samples x m x d
         if not full_cov:

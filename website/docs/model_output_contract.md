@@ -11,8 +11,11 @@ field during the training path, so benchmark metrics should use
 `model.predict_rates(x)` when they specifically need firing-rate curves. The
 stable output fields are:
 
-- `rates`: predicted firing-rate curves in `(batch, time, neurons)` format.
-  This is the primary Lorenz benchmark output.
+- `rates`: predictions in `(batch, time, neurons)` format.
+- `rates_unit`: `"counts"` (expected spikes per input bin, the default) or
+  `"hz"` (spikes per second). Poisson scoring consumes expected counts.
+- `full_rates_unit`: required when `extras["full_rates"]` is present; that
+  tensor may use different units from the primary held-out predictions.
 - `latents`: inferred latent trajectories in `(batch, time, latent_dim)` format
   when the method exposes them.
 - `reconstruction`: model reconstruction in observation space. For count models
@@ -22,8 +25,14 @@ stable output fields are:
 - `extras`: method-specific diagnostics such as posterior variances, ELBO terms,
   marginal log likelihoods, or internal states.
 
-For the Lorenz task, the default accuracy metric should compare
-`model.predict_rates(x)` against the generated ground-truth rates. By default
+Exporters use `output.count_rates(dt, full=True)`. A 20 Hz rate at 5 ms becomes
+0.1 expected spikes; a prediction already equal to 0.1 counts stays 0.1.
+Never multiply every model output by `dt` unconditionally. LFADS declares Hz;
+NDT, STNDT, LangevinFlow, and MINT declare counts. iLQR-VAE's primary output is
+counts while its full-neuron diagnostic output is Hz.
+
+Synthetic evaluation normalizes predictions and declared dataset rate targets
+to Hz for MSE/R2, and uses counts separately for Poisson metrics. By default
 `predict_rates()` uses `ModelOutput.rates` and then `reconstruction`; methods
 such as CASSM can override it to call their native prediction path.
 

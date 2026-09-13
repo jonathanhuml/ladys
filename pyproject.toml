@@ -31,6 +31,8 @@ dependencies = [
   "linear-operator",
   "nlb-tools",
   "numpy>=1.24",
+  # nlb-tools 0.0.4 mutates NumPy views, incompatible with pandas 3 copy-on-write.
+  "pandas>=1.5,<3",
   "pydantic>=2",
   "scikit-learn>=1.0",
   "scipy>=1.10",
@@ -58,3 +60,6 @@ Issues = "https://github.com/jonathanhuml/ladys/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"ladys.models" = ["mint_presets.yaml"]

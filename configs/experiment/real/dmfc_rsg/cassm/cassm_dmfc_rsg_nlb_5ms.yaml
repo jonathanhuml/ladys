@@ -1,7 +1,6 @@
 dataset:
   name: dmfc_rsg
-  data_path: data/real/nlb/dmfc_rsg_test_5ms.h5
-  split: test
+  split: val
   bin_size_ms: 5
   max_trials: null
   seed: 7

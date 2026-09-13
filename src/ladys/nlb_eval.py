@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import json
 from pathlib import Path
 from typing import Any
+import warnings
 
 import h5py
 import numpy as np
@@ -112,12 +113,13 @@ def score_ladys_predictions(path: Path | str) -> NLBScore:
 
     path = Path(path)
     with np.load(path) as data:
-        if "pred_rates" not in data or "target_spikes" not in data:
+        rate_key = "pred_count_rates" if "pred_count_rates" in data else "pred_rates"
+        if rate_key not in data or "target_spikes" not in data:
             keys = ", ".join(data.files)
             raise KeyError(
                 f"{path} must contain pred_rates and target_spikes arrays. Found: {keys}"
             )
-        return score_count_predictions(data["pred_rates"], data["target_spikes"])
+        return score_count_predictions(data[rate_key], data["target_spikes"])
 
 
 def score_run_dir(path: Path | str) -> NLBScore:
@@ -199,7 +201,23 @@ def evaluate_model_nlb_submission(
         _write_rate_parts(group, "train", train_rates)
         _write_rate_parts(group, "eval", eval_rates)
 
-    raw_result = evaluate_nlb_submission(target_path, submission_path)
+    with h5py.File(target_path, "r") as target:
+        target_group = target[group_name]
+        has_behavior = all(key in target_group for key in ("train_behavior", "eval_behavior"))
+        if not has_behavior:
+            co_bps = nlb_bits_per_spike(
+                eval_rates["rates_heldout"], target_group["eval_spikes_heldout"][()]
+            )
+    if has_behavior:
+        raw_result = evaluate_nlb_submission(target_path, submission_path)
+    else:
+        warnings.warn(
+            "NLB data lacks train/eval behavior metadata: exported neural predictions "
+            "and scored co-bps only; full NLB metrics are unavailable.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        raw_result = [{f"{group_name}_split": {"co-bps": co_bps}}]
     result_path = output_dir / "nlb_full_metrics.json"
     result_path.write_text(score_to_json(raw_result) + "\n")
     return NLBFullEvaluation(
@@ -243,6 +261,17 @@ def _write_grouped_target_h5(config: Any, output: Path, group_name: str) -> None
             source_group.copy(key, target_group, name=key)
 
 
+def prepare_nlb_selection_target(config: Any, output_dir: Path | str) -> Path:
+    """Build checkpoint-selection targets from the configured validation data."""
+
+    if getattr(config, "split", None) != "val":
+        raise ValueError("NLB checkpoint selection requires a dataset with split='val'.")
+    output = Path(output_dir) / "nlb_validation_target.h5"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    _write_grouped_target_h5(config, output, _nlb_group_name(config))
+    return output
+
+
 def _collect_full_rate_parts(
     *,
     model: torch.nn.Module,
@@ -273,13 +302,10 @@ def _collect_full_rate_parts(
                     )
             batch = move_batch_to_device(batch, device)
             output = model(observations_from_batch(batch))
-            extras = getattr(output, "extras", {})
-            full_rates = extras.get("full_rates") if isinstance(extras, dict) else None
-            if full_rates is None:
-                full_rates = output.rates if getattr(output, "rates", None) is not None else None
-            if full_rates is None:
+            full_counts = output.count_rates(dt, full=True)
+            if full_counts is None:
                 return None
-            full_counts = (full_rates * dt).clamp_min(prediction_floor)
+            full_counts = full_counts.clamp_min(prediction_floor)
 
             heldin = batch.get("heldin_spikes", batch.get("spikes"))
             heldout = batch.get("heldout_spikes", batch.get("raw_spikes"))

@@ -11,37 +11,29 @@ def test_ilqr_vae_nlb_configs_are_self_contained():
     canonical_path = Path(
         "configs/experiment/real/mc_maze/ilqr_vae/ilqr_vae_mc_maze_nlb_5ms.yaml"
     )
-    transfer_paths = [
+    training_paths = [
         Path("configs/experiment/real/area2_bump/ilqr_vae/ilqr_vae_area2_bump_nlb_5ms_train.yaml"),
         Path("configs/experiment/real/dmfc_rsg/ilqr_vae/ilqr_vae_dmfc_rsg_nlb_5ms_train.yaml"),
         Path("configs/experiment/real/mc_rtt/ilqr_vae/ilqr_vae_mc_rtt_nlb_5ms_train.yaml"),
     ]
-    nlb_paths = sorted(Path("configs/experiment/real").glob("*/ilqr_vae/*.yaml"))
-
-    assert nlb_paths == sorted([canonical_path, *transfer_paths])
-
-    mc_maze = load_experiment_config(canonical_path)
-    assert isinstance(mc_maze.model, ILQRVAEConfig)
-    assert mc_maze.model.params_path == "data/real/ilqr_vae/final_params.bin"
-    assert "ilqr-vae-tutorial" not in str(mc_maze.model.params_path)
-    assert mc_maze.model.initialization == "pretrained"
-    assert mc_maze.model.trainable_parameters is False
-
-    for path in transfer_paths:
+    for path in [canonical_path, *training_paths]:
         config = load_experiment_config(path)
         assert isinstance(config.model, ILQRVAEConfig)
         assert config.model.params_path is None
-        assert config.model.initialization == "checkpoint_transfer"
-        assert config.model.template_params_path == "data/real/ilqr_vae/final_params.bin"
-        assert "ilqr-vae-tutorial" not in str(config.model.template_params_path)
-        assert config.model.random_init_profile == "tutorial_mc_maze"
+        assert config.model.initialization == "random"
+        assert config.model.template_params_path is None
         assert config.model.readout_bias_initialization == "empirical_rates"
-        assert config.model.latent_dim == 90
-        assert config.model.input_dim == 15
-        assert config.model.max_iter == 2
-        assert config.model.differentiate_controls is False
+        assert config.model.differentiate_controls is True
         assert config.model.objective == "ilqr_vae_elbo"
         assert config.model.trainable_parameters is True
+        assert config.model.held_in_neurons is None
+        assert config.model.output_neurons is None
+        assert config.model.output_neuron_start is None
+        assert config.model.dt is None
+        assert config.dataset.split == "val"
+        assert config.dataset.data_path is None
+        assert config.dataset.bin_size_ms == 5
+        assert config.trainer.epochs > 0
         assert config.model.optimization.kwargs()["lr_scheduler"] == "sqrt_decay"
 
 
@@ -80,6 +72,7 @@ def test_ilqr_vae_control_hessian_mode_propagates_to_core():
 def test_ilqr_vae_empirical_readout_bias_initialization():
     class _Dataset:
         spikes = torch.full((2, 4, 3), 0.02)
+        heldin_spikes = spikes
         raw_spikes = torch.full((2, 4, 2), 0.04)
 
     class _Data:

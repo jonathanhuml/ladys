@@ -655,6 +655,7 @@ class LFADS(BaseDynamicsModel):
 
         return ModelOutput(
             rates=rates_tensor,
+            rates_unit="hz",
             latents=factors_tensor,
             reconstruction=rates_tensor,
             extras={

@@ -21,9 +21,9 @@ tensors in `forward`.
   differentiable exact marginal negative log likelihood. It trains with the
   standard PyTorch gradient strategy by default; the older EM adapter remains
   available through config.
-- `ladys.models.ilqr_vae`: PyTorch iLQR-VAE adapter with posterior-control
-  inference for pretrained MC_Maze checkpoints and ELBO training for new
-  spike-count datasets.
+- `ladys.models.ilqr_vae`: PyTorch iLQR-VAE with random-initialized ELBO
+  training and differentiable posterior-control inference. Pretrained weights
+  are optional, not required by the core 5 ms NLB recipes.
 - `ladys.models.kalman`: dense Kalman filter baseline adapted from the CASSM
   filtering code, exposed with per-trial rate predictions for benchmark metrics.
 - `ladys.models.langevin_flow`: sequential VAE adapter for LangevinFlow with a
@@ -31,8 +31,8 @@ tensors in `forward`.
   oscillator potential, and a one-layer Transformer rate decoder. The LaDyS
   NLB path trains a direct held-in plus held-out readout and scores the
   held-out slice.
-- `ladys.models.mint`: inference-only Mesh of Idealized Neural Trajectories
-  decoder. MINT builds a trajectory library once, then decodes by Poisson
+- `ladys.models.mint`: trainable Mesh of Idealized Neural Trajectories
+  decoder. MINT fits a trajectory library from training spikes, then decodes by Poisson
   likelihood recursion and interpolation; Lorenz defaults to spike-derived
   smoothed libraries, while `lorenz_library_source: true_rates` is reserved for
   oracle/debug checks.
@@ -100,21 +100,29 @@ features to held-out neurons.
 
 LaDyS can prepare the four core NLB'21 datasets, `area2_bump`, `mc_maze`,
 `mc_rtt`, and `dmfc_rsg`, as held-in/held-out co-smoothing H5 files in
-`data/real/nlb`. With `--download`, the command fetches the public NLB target
-H5 and the required DANDI NWB files before building LaDyS-ready tensors:
+`data/real/nlb`. All 12 models have core 5 ms validation recipes. With
+`--download`, the command fetches the required DANDI NWB files before building
+LaDyS-ready training and validation tensors:
 
 ```bash
 PYTHONPATH=src python3 scripts/prepare_nlb_data.py \
   --datasets area2_bump mc_maze mc_rtt dmfc_rsg \
-  --splits test \
-  --bin-sizes-ms 5 20 \
+  --splits val \
+  --bin-sizes-ms 5 \
+  --include-psth \
   --download
 ```
 
 If NWB files are already present in a DANDI-style directory, omit `--download`
 and pass `--nwb-root` or repeated `--search-root` values. If the public target
-H5 is already local, pass `--target-h5`. Dataset configs for the 5 ms and 20 ms
-NLB test files live under `configs/dataset/`.
+H5 is already local, pass `--target-h5` when preparing a final test split.
+Dataset configs for 5 ms and 20 ms test files live under `configs/dataset/`.
+Training requires separate `train_spikes_heldin` and `train_spikes_heldout`;
+missing tensors raise an error instead of substituting evaluation data.
+Checkpoint selection and early stopping use validation data only. The STNDT
+and LangevinFlow selection runners derive targets from the configured
+validation H5 and reject external test-target overrides. Fixed-budget test
+runs through `Experiment` do not pass test losses to training schedulers.
 
 After a LaDyS run writes `predictions.npz`, score held-out count predictions
 with the NLB co-smoothing bits/spike metric:
@@ -124,12 +132,49 @@ ladys run -c configs/experiment/real/mc_maze/ilqr_vae/ilqr_vae_mc_maze_nlb_5ms.y
 ladys score-nlb --run-dir runs/ilqr_vae_mc_maze_nlb_5ms
 ```
 
-The canonical iLQR-VAE NLB reproduction is the MC Maze 5 ms config above. It
-reaches co-bps `0.3532`, velocity R2 `0.8991`, and PSTH R2 `0.5877`, compared
-with the public NLB MC Maze row `0.356`, `0.884`, and `0.606`. The Area2,
-DMFC, and MC RTT iLQR-VAE configs are active trainable reproduction attempts
-and should not be reported as reproduced until their full NLB metrics are
-available.
+The four iLQR-VAE 5 ms recipes now train from scratch. Their finite-iteration
+solver derivatives have numerical gradient tests; upstream implicit-adjoint
+parity and converged NLB scores are not established. Historical MC_Maze scores
+from the pretrained inference recipe are not evidence for these new recipes.
+
+MINT uses `optimization.name: library_fit`: the trainer fits templates before
+the epoch loop, so `epochs: 0` does not skip that fit. Its MC_RTT recipe trains
+an LFADS rate estimator from training spikes before fitting the library.
+Fitted templates are included in `model.pt`. Dataset-specific hyperparameters
+live in configs, while neuron counts and timing come from prepared data.
+
+After selecting a checkpoint on validation, evaluate it without retraining:
+
+```bash
+PYTHONPATH=src:. python3 scripts/evaluate_nlb_checkpoint.py \
+  --config configs/experiment/real/mc_maze/ilqr_vae/ilqr_vae_mc_maze_nlb_5ms.yaml \
+  --checkpoint runs/ilqr_vae_mc_maze_nlb_5ms/model.pt \
+  --split test --output-dir runs/ilqr_vae_mc_maze_final_test --device cuda
+```
+
+The test H5 must be prepared separately with `--splits test`. `--data-path`
+can point to another prepared H5; no source-code path changes are needed.
+
+For bounded training/checkpoint diagnostics, run
+`PYTHONPATH=src:. python3 scripts/verify_nlb_models.py --data-root DATA_DIR
+--output-dir OUTPUT_DIR --device cuda`. This tests MINT, iLQR-VAE, and bGPFA
+on small validation subsets, not benchmark convergence.
+
+For full-data comparisons of MINT, BGPFA, and iLQR-VAE, use
+`scripts/run_nlb_model_comparison.py --data-root DATA_DIR --output-dir OUTPUT_DIR`.
+It retains the checked-in model sizes and training budgets and saves per-epoch
+losses, periodic validation co-BPS, checkpoints, and best-checkpoint predictions.
+These are validation-selected scores, not independent test or leaderboard scores.
+
+Remote runs use `scripts/hal_nlb.sh`, with `status`, `gpu`, `processes`, `run`,
+`start`, `stop`, and `test` actions. `start LOG_DIR PYTHON ...` launches a detached
+run and records its PID and log; the Python executable and data paths are explicit
+arguments, not machine-specific constants in model code. Use the same direct
+SSH prefix for every action, without wrapping it in an additional login shell:
+
+```bash
+ssh -o BatchMode=yes -o ConnectTimeout=10 HAL bash /path/to/checkout/scripts/hal_nlb.sh status
+```
 
 GPFA uses the same real-data path with its NLB adapter:
 
@@ -214,7 +259,7 @@ The script writes a grouped run under `runs/lorenz_loss_curves/`, including
 top-level `summary.csv`/`summary.md`, comparison plots under `plots/`, and
 per-model outputs under `models/<model>/`.
 
-MINT appears in these curves as a horizontal inference-only baseline. Its
+MINT appears in these curves as a horizontal post-fit baseline. Its
 default Lorenz adapter estimates trajectory-library rates from smoothed training
 spikes and repeated-trial averages. Passing
 `--mint-lorenz-library-source true_rates` switches to an oracle sanity check and

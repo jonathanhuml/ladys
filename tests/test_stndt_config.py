@@ -142,8 +142,19 @@ def test_obsolete_stndt_experiment_configs_are_absent():
     for path in OBSOLETE_STNDT_CONFIGS:
         assert not path.exists(), f"obsolete STNDT config should not exist: {path}"
 
-    stndt_paths = sorted(Path("configs/experiment").rglob("*stndt*.yaml"))
+    stndt_paths = sorted(
+        path
+        for dataset in ("mc_maze", "area2_bump", "mc_rtt", "dmfc_rsg")
+        for path in (Path("configs/experiment/real") / dataset / "stndt").glob("*.yaml")
+    )
     assert stndt_paths == sorted(VALID_STNDT_NLB_CONFIGS)
     for path in stndt_paths:
         config = load_experiment_config(path)
         assert config.trainer.epochs != 5, f"obsolete 5-epoch STNDT config found: {path}"
+
+
+def test_allen_stndt_configs_load():
+    paths = sorted(Path("configs/experiment/real/allen_vcn/stndt").glob("*.yaml"))
+    assert paths
+    for path in paths:
+        assert isinstance(load_experiment_config(path).model, STNDTConfig)

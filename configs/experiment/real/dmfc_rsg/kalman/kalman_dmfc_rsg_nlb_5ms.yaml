@@ -1,7 +1,6 @@
 dataset:
   name: dmfc_rsg
-  data_path: data/real/nlb/dmfc_rsg_test_5ms.h5
-  split: test
+  split: val
   bin_size_ms: 5
   max_trials: null
 
@@ -13,7 +12,11 @@ model:
   save_model: false
   nlb_ridge_alpha: 500.0
   optimization:
-    name: inference_only
+    name: gradient
+    optimizer: Adam
+    lr: 1.0e-2
+    weight_decay: 0.0
+    gradient_clip: 300.0
 
 preprocessing:
   observations:
@@ -22,7 +25,7 @@ preprocessing:
     kern_sd_ms: 50.0
 
 trainer:
-  epochs: 0
+  epochs: 20
   batch_size: 64
   device: cpu
 

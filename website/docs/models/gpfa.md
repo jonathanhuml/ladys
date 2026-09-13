@@ -57,7 +57,7 @@ co-smoothing bits/spike metric.
 Prepare the NLB H5 first, then run the real-data config:
 
 ```bash
-ladys prepare-nlb --datasets mc_maze --splits test --bin-sizes-ms 5 --download
+ladys prepare-nlb --datasets mc_maze --splits val --bin-sizes-ms 5 --download
 ladys run -c configs/experiment/real/mc_maze/gpfa/gpfa_mc_maze_nlb_5ms.yaml
 ladys score-nlb --run-dir runs/gpfa_mc_maze_nlb_5ms
 ```

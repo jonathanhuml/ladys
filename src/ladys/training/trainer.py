@@ -47,6 +47,7 @@ class Trainer:
     ) -> list[EpochReport]:
         device = torch.device(self.config.device)
         model.to(device)
+        model.fit_training_data(train_loader, device=device)
         strategy.setup(model)
         if strategy_state is not None:
             strategy.load_state_dict(strategy_state)

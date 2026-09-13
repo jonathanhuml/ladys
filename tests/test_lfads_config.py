@@ -21,13 +21,22 @@ def test_lfads_nlb_experiment_configs_load():
     assert all(config.batch_size == 64 for config in configs)
 
 
-def test_real_lfads_folder_contains_only_verified_ladys_configs():
+def test_core_nlb_lfads_folders_contain_only_ladys_configs():
     lfads_paths = sorted(
-        Path("configs/experiment/real").glob("*/lfads/*.yaml")
+        path
+        for dataset in ("mc_maze", "area2_bump", "mc_rtt", "dmfc_rsg")
+        for path in (Path("configs/experiment/real") / dataset / "lfads").glob("*.yaml")
     )
 
     assert lfads_paths == sorted(LFADS_NLB_CONFIGS)
     assert all(path.name.endswith("_ladys.yaml") for path in lfads_paths)
+
+
+def test_allen_lfads_configs_load():
+    paths = sorted(Path("configs/experiment/real/allen_vcn/lfads").glob("*.yaml"))
+    assert paths
+    for path in paths:
+        assert isinstance(load_experiment_config(path).model, LFADSConfig)
 
 
 def test_model_folder_has_single_generic_lfads_preset():

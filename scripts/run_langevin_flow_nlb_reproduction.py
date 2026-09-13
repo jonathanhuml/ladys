@@ -34,6 +34,7 @@ from ladys.data import build_dataset_config
 from ladys.experiment import Experiment, _write_history, _write_json
 from ladys.models.base import OptimizationConfig
 from ladys.models.langevin_flow import LangevinFlowConfig
+from ladys.nlb_eval import prepare_nlb_selection_target
 from ladys.preprocessing import PreprocessingConfig
 from ladys.training import Trainer, TrainerConfig
 from ladys.training.strategies import build_strategy
@@ -103,7 +104,7 @@ def main() -> int:
     parser.add_argument("--bin-size-ms", type=int, choices=(5, 20), default=5)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--output-dir", default="runs/langevin_flow_nlb_reproduction")
-    parser.add_argument("--target-h5", default="data/real/nlb/eval_data_test.h5")
+    parser.add_argument("--target-h5", type=Path, help="Deprecated: selection targets come from the configured validation H5.")
     parser.add_argument("--eval-every", type=int, default=50)
     parser.add_argument("--progress-every", type=int, default=25)
     parser.add_argument(
@@ -120,7 +121,7 @@ def main() -> int:
     parser.add_argument(
         "--stop-at-reported",
         action="store_true",
-        help="Stop a run once co-bps reaches the self-reported LangevinFlow value.",
+        help="Deprecated and rejected: use validation patience instead of published test scores.",
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--run-name-suffix", default="upstream_best")
@@ -152,7 +153,7 @@ def main() -> int:
     for config in configs:
         row = run_config(
             config=config,
-            target_h5=Path(args.target_h5),
+            target_h5=args.target_h5,
             eval_every=args.eval_every,
             progress_every=args.progress_every,
             patience_evals=args.patience_evals,
@@ -201,9 +202,8 @@ def _build_upstream_config(dataset: str, args: argparse.Namespace) -> Experiment
         dataset,
         {
             "name": dataset,
-            "split": "test",
+            "split": "val",
             "bin_size_ms": int(args.bin_size_ms),
-            "data_path": f"data/real/nlb/{dataset}_test_{int(args.bin_size_ms)}ms.h5",
             "input_mode": "heldin",
             "include_forward": True,
             "seed": int(args.seed),
@@ -261,13 +261,19 @@ def _build_upstream_config(dataset: str, args: argparse.Namespace) -> Experiment
 def run_config(
     *,
     config: ExperimentConfig,
-    target_h5: Path,
+    target_h5: Path | None,
     eval_every: int,
     progress_every: int,
     patience_evals: int,
     stop_at_reported: bool,
     skip_validation: bool,
 ) -> dict[str, Any]:
+    if config.dataset.split != "val":
+        raise ValueError("NLB checkpoint selection requires split='val'; use Experiment for final test scoring.")
+    if target_h5 is not None:
+        raise ValueError("Selection targets are read from dataset.data_path; omit --target-h5.")
+    if stop_at_reported:
+        raise ValueError("Published test scores must not determine training duration; use validation patience.")
     experiment = Experiment(config)
     experiment._set_seeds()
     experiment.data.setup()
@@ -278,6 +284,7 @@ def run_config(
     dataset = str(config.dataset.name)
     run_dir = experiment._make_run_dir()
     run_dir.mkdir(parents=True, exist_ok=True)
+    target_h5 = prepare_nlb_selection_target(config.dataset, run_dir)
     _write_json(run_dir / "config.json", _config_payload(config))
 
     best: dict[str, Any] = {
@@ -363,8 +370,6 @@ def run_config(
                 },
             },
         )
-        if should_eval and stop_at_reported and co_bps >= REPORTED_CO_BPS.get(dataset, math.inf):
-            raise StopTraining
         if should_eval and patience_evals > 0 and evals_since_improvement >= patience_evals:
             raise StopTraining
 
@@ -402,13 +407,15 @@ def run_config(
     write_full_artifacts(run_dir=result.run_dir, dataset=dataset, full=best["full"])
     metadata = {
         "dataset": dataset,
+        "selection_split": "val",
+        "selection_target_h5": str(target_h5),
         "best_epoch": int(best["epoch"]),
         "best_metrics": dict(best["metrics"]),
         "config_epochs": int(config.trainer.epochs),
         "eval_every": int(eval_every),
         "progress_every": int(progress_every),
         "patience_evals": int(patience_evals),
-        "reported_co_bps": REPORTED_CO_BPS.get(dataset),
+        "reported_test_co_bps_reference_only": REPORTED_CO_BPS.get(dataset),
     }
     _write_json(result.run_dir / "langevin_flow_reproduction.json", metadata)
     _write_json(

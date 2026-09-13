@@ -1,39 +1,35 @@
 dataset:
   name: area2_bump
-  split: test
+  split: val
   bin_size_ms: 5
-  data_path: data/real/nlb/area2_bump_test_5ms.h5
+  data_path: null
   max_trials: null
 
 model:
   name: ilqr_vae
   objective: ilqr_vae_elbo
+  initialization: random
   params_path: null
-  initialization: checkpoint_transfer
-  template_params_path: data/real/ilqr_vae/final_params.bin
-  random_init_profile: tutorial_mc_maze
+  template_params_path: null
   readout_bias_initialization: empirical_rates
-  empirical_rate_floor_hz: 1.0e-3
-  latent_dim: 90
-  input_dim: 15
+  latent_dim: 20
+  input_dim: 5
   init_seed: 0
   solver: ilqr
-  max_iter: 2
-  lr: null
-  differentiate_controls: false
+  max_iter: 5
+  differentiate_controls: true
   trainable_parameters: true
   n_posterior_samples: 1
   include_elbo_constants: true
   dynamics_regularizer: 1.0e-5
-  held_in_neurons: 49
-  output_neuron_start: 49
-  output_neurons: 16
-  rate_mode: likelihood
-  dt: 0.005
+  held_in_neurons: null
+  output_neuron_start: null
+  output_neurons: null
+  dt: null
   optimization:
     name: gradient
     optimizer: Adam
-    lr: 4.0e-3
+    lr: 1.0e-3
     lr_scheduler: sqrt_decay
     sqrt_decay_scale: 1.0
     weight_decay: 0.0

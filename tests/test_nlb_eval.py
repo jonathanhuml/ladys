@@ -10,6 +10,35 @@ from ladys.datasets import nlb as nlb_module
 from ladys.nlb_eval import nlb_bits_per_spike, score_ladys_predictions
 
 
+@pytest.mark.parametrize("missing", [
+    ("train_spikes_heldin",), ("train_spikes_heldout",),
+    ("train_spikes_heldin", "train_spikes_heldout"),
+])
+def test_training_rejects_missing_training_tensors(tmp_path, missing):
+    path = tmp_path / "incomplete.h5"
+    with h5py.File(path, "w") as handle:
+        for key in ("train_spikes_heldin", "train_spikes_heldout", "eval_spikes_heldin", "eval_spikes_heldout"):
+            if key not in missing:
+                handle[key] = np.ones((2, 4, 3), dtype=np.float32)
+    config = nlb_module.NLBDatasetConfig(data_path=str(path))
+    with pytest.raises(ValueError, match="missing training tensors"):
+        nlb_module.NLBDataset.make_splits(config)
+
+
+def test_evaluation_only_loading_never_creates_training_arrays(tmp_path):
+    path = tmp_path / "eval_only.h5"
+    with h5py.File(path, "w") as handle:
+        handle["eval_spikes_heldin"] = np.ones((2, 4, 3), dtype=np.float32)
+        handle["eval_spikes_heldout"] = np.ones((2, 4, 2), dtype=np.float32)
+    config = nlb_module.NLBDatasetConfig(data_path=str(path))
+    dataset = nlb_module.NLBDataset(config, split="valid")
+    assert len(dataset) == 2
+    assert dataset.arrays.train_heldin_spikes is None
+    assert dataset.arrays.train_heldout_spikes is None
+    with pytest.raises(ValueError, match="Training requires"):
+        nlb_module.NLBDataset(config, split="train", arrays=dataset.arrays)
+
+
 def test_nlb_bits_per_spike_matches_manual_poisson_ratio():
     spikes = np.array([[[0.0, 2.0], [1.0, 0.0]], [[3.0, np.nan], [0.0, 1.0]]])
     rates = np.array([[[0.2, 1.8], [0.9, 0.1]], [[2.7, 1.0], [0.2, 1.2]]])
@@ -53,6 +82,17 @@ def test_score_nlb_cli_for_ladys_predictions(tmp_path: Path, capsys):
 
     assert "co_bps" in payload
     assert payload["prediction_shape"] == [1, 2, 1]
+
+
+def test_synthetic_artifact_scoring_prefers_explicit_count_rates(tmp_path):
+    path = tmp_path / "synthetic.npz"
+    counts = np.array([[[0.1], [0.2]]])
+    spikes = np.array([[[0.0], [1.0]]])
+    np.savez(path, pred_rates=counts / 0.005, pred_count_rates=counts,
+             target_spikes=spikes)
+    assert score_ladys_predictions(path).co_bps == pytest.approx(
+        nlb_bits_per_spike(counts, spikes)
+    )
 
 
 def test_score_nlb_cli_for_evalai_h5_co_bps(tmp_path: Path, capsys):

@@ -553,6 +553,12 @@ class InferenceOnlyStrategy(OptimizationStrategy):
         return StepResult.from_loss(loss, batch_size=int(x.shape[0]))
 
 
+class LibraryFitStrategy(InferenceOnlyStrategy):
+    """Use the trainer's data-fitting phase without gradient optimization."""
+
+    name = "library_fit"
+
+
 def build_strategy(config: OptimizationConfig) -> OptimizationStrategy:
     kwargs = config.kwargs()
     if config.name == "gradient":
@@ -565,6 +571,8 @@ def build_strategy(config: OptimizationConfig) -> OptimizationStrategy:
         return EMStrategy(**kwargs)
     if config.name == "inference_only":
         return InferenceOnlyStrategy(**kwargs)
+    if config.name == "library_fit":
+        return LibraryFitStrategy(**kwargs)
     raise KeyError(f"Unknown optimization strategy '{config.name}'.")
 
 

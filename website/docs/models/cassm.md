@@ -42,6 +42,9 @@ Config for the bundled sparse CASSM adapter.
 | `save_model` | `bool` | `False` |
 | `use_dense_projection` | `bool` | `False` |
 | `health_checks` | `bool` | `True` |
+| `nlb_feature_source` | `Literal['latents', 'rates', 'predict_rates']` | `'latents'` |
+| `nlb_decoder` | `Literal['ridge', 'poisson']` | `'ridge'` |
+| `nlb_ridge_alpha` | `float` | `500.0` |
 | `optimization` | `OptimizationConfig` | `OptimizationConfig(name='gradient', optimizer='Adam', lr=0.05, weight_decay=0.0, gradient_clip=300.0)` |
 
 ## Contracts

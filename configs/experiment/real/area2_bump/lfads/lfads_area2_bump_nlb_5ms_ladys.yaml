@@ -1,7 +1,6 @@
 dataset:
   name: area2_bump
-  data_path: data/real/nlb/area2_bump_test_5ms.h5
-  split: test
+  split: val
   bin_size_ms: 5
   max_trials: null
   input_mode: heldin_full_reconstruction

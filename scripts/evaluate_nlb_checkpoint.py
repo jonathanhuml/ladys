@@ -20,6 +20,8 @@ def main() -> int:
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--split", choices=("val", "test"), help="Override evaluation split without retraining.")
+    parser.add_argument("--data-path", help="Explicit prepared H5 for the selected split.")
     parser.add_argument(
         "--skip-direct-metrics",
         action="store_true",
@@ -33,6 +35,11 @@ def main() -> int:
     args = parser.parse_args()
 
     config = load_experiment_config(args.config)
+    if args.split is not None:
+        config.dataset.split = args.split
+        config.dataset.data_path = None
+    if args.data_path is not None:
+        config.dataset.data_path = args.data_path
     experiment = Experiment(config)
     experiment.data.setup()
     model = experiment.build_model()

@@ -178,11 +178,11 @@ class LorenzDataset(Dataset):
     def __len__(self) -> int:
         return int(self.spikes.shape[0])
 
-    def __getitem__(self, index: int) -> dict[str, Tensor]:
+    def __getitem__(self, index: int) -> dict[str, Tensor | str]:
         return {
             "spikes": self.spikes[index],
             "rates": self.rates[index],
+            "rates_unit": "hz",
             "latents": self.latents[index],
             "dt": torch.tensor(self.arrays.dt, dtype=torch.float32),
         }
-

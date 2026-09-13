@@ -27,13 +27,13 @@ def test_mint_nlb_experiment_configs_load():
     configs = [load_experiment_config(path) for path in paths]
 
     assert [config.model.dataset for config in configs] == ["area2_bump", "dmfc_rsg", "dmfc_rsg", "mc_maze", "mc_rtt"]
-    assert [config.model.train_source for config in configs] == ["nwb", "nwb", "lfads", "nwb", "mat"]
+    assert [config.model.train_source for config in configs] == ["h5", "h5", "lfads", "h5", "lfads"]
     assert all(isinstance(config.model, MINTConfig) for config in configs)
     assert all(config.model.nlb_neural_state_defaults for config in configs)
-    external_root = "../" + "mint"
-    assert all(not config.model.nwb_root.startswith(external_root) for config in configs)
-    assert all(not config.model.mat_data_root.startswith(external_root) for config in configs)
-    assert all(config.model.target_h5 != f"{external_root}/data/eval_data_test.h5" for config in configs)
+    assert all(config.model.nwb_root is None for config in configs)
+    assert all(config.model.mat_data_root is None for config in configs)
+    assert all(config.model.target_h5 is None for config in configs)
+    assert all(config.model.optimization.name == "library_fit" for config in configs)
 
 
 def test_mint_dmfc_uses_paper_trajectory_defaults():
@@ -87,5 +87,6 @@ def test_mint_lorenz_epoch_counts_use_available_repeats():
     train_ds, _ = LorenzDataset.make_splits(config)
     train_ds = PreprocessedDataset(train_ds, PreprocessingConfig())
 
-    assert mint_lorenz_epoch_trial_counts(train_ds, config, requested_epochs=2) == [3, 6]
-    assert mint_lorenz_epoch_trial_counts(train_ds, config, requested_epochs=50) == [3, 6, 9, 12]
+    # Each pass adds one repeat of every condition, as consumed by the benchmark.
+    assert mint_lorenz_epoch_trial_counts(train_ds, config, requested_epochs=2) == [1, 2]
+    assert mint_lorenz_epoch_trial_counts(train_ds, config, requested_epochs=50) == [1, 2, 3, 4]

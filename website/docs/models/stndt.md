@@ -77,6 +77,8 @@ Config for the Spatiotemporal Neural Data Transformer adapter.
 | `mask_random_ratio` | `float` | `0.5` |
 | `mask_max_span` | `int` | `1` |
 | `mask_span_expand_prob` | `float` | `0.0` |
+| `mask_span_ramp_start` | `int` | `0` |
+| `mask_span_ramp_end` | `int` | `0` |
 | `use_zero_mask` | `bool` | `True` |
 | `topk_loss_fraction` | `float` | `1.0` |
 | `do_contrast` | `bool` | `True` |
@@ -86,6 +88,8 @@ Config for the Spatiotemporal Neural Data Transformer adapter.
 | `contrast_mask_random_ratio` | `float` | `0.5` |
 | `contrast_mask_max_span` | `int` | `1` |
 | `contrast_mask_span_expand_prob` | `float` | `0.0` |
+| `contrast_mask_span_ramp_start` | `int` | `0` |
+| `contrast_mask_span_ramp_end` | `int` | `0` |
 | `temperature` | `float` | `0.07` |
 | `contrast_lambda` | `float` | `0.1` |
 | `use_contrast_projector` | `bool` | `False` |

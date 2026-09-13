@@ -51,6 +51,7 @@ Config for the LangevinFlow sequential VAE.
 | `name` | `Literal['langevin_flow']` | `'langevin_flow'` |
 | `objective` | `str` | `'langevin_flow_elbo'` |
 | `hidden_size` | `int` | `64` |
+| `initialization` | `Literal['ladys', 'upstream']` | `'ladys'` |
 | `output_neurons` | `Optional[int]` | `None` |
 | `output_mode` | `Literal['auto', 'heldin', 'heldin_heldout']` | `'auto'` |
 | `fwd_steps` | `int` | `0` |
@@ -66,10 +67,10 @@ Config for the LangevinFlow sequential VAE.
 | `kl_warmup_epochs` | `int` | `500` |
 | `weight_decay_warmup_epochs` | `int` | `500` |
 | `velocity_prior_var` | `float` | `0.1` |
-| `log_rate_min` | `float` | `-8.0` |
-| `log_rate_max` | `float` | `8.0` |
-| `posterior_logvar_min` | `float` | `math.log(0.0001)` |
-| `posterior_logvar_max` | `float` | `5.0` |
+| `log_rate_min` | `Optional[float]` | `-8.0` |
+| `log_rate_max` | `Optional[float]` | `8.0` |
+| `posterior_logvar_min` | `Optional[float]` | `math.log(0.0001)` |
+| `posterior_logvar_max` | `Optional[float]` | `5.0` |
 | `sample_train` | `bool` | `True` |
 | `sample_eval` | `bool` | `False` |
 | `prediction_samples` | `int` | `1` |

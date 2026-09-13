@@ -1,29 +1,26 @@
 dataset:
   name: mc_rtt
-  split: test
+  split: val
   bin_size_ms: 5
-  data_path: data/real/nlb/mc_rtt_test_5ms.h5
   max_trials: null
 
 model:
   name: mint
   objective: mint_likelihood_recursion
   dataset: mc_rtt
-  train_source: mat
-  train_split: trainval
-  nlb_neural_state_defaults: true
-  nwb_root: data/real/nlb/dandi
-  mat_data_root: data/mint
-  target_h5: data/real/nlb/eval_data_test.h5
+  train_source: lfads
   eval_bin_size_ms: 5
-  n_candidates: null
-  window_length: null
-  delta: null
-  sigma: null
-  min_rate: null
-  causal: null
+  n_candidates: 5
+  window_length: 100
+  delta: 4
+  sigma: 0
+  min_rate: 0.1
+  causal: false
+  lfads_epochs: 100
+  lfads_batch_size: 64
+  lfads_seed: 0
   optimization:
-    name: inference_only
+    name: library_fit
 
 preprocessing:
   observations: null

@@ -11,6 +11,9 @@ contract, then writes:
 - `{model}_rate_traces.png`
 - `{model}_rate_traces.csv`
 
+Rate errors and saved rate traces use Hz. Poisson losses use expected counts
+per bin and retain the spike-factorial constant.
+
 Example:
     PYTHONPATH=src python3 scripts/benchmark_lorenz_loss_curves.py \
         --models cassm gpfa kalman --neurons 100 --epochs 30
@@ -26,11 +29,12 @@ import argparse
 import csv
 import json
 import os
+import tempfile
 import time
 from pathlib import Path
 
-os.environ.setdefault("MPLCONFIGDIR", "/private/tmp/ladys_matplotlib")
-os.environ.setdefault("XDG_CACHE_HOME", "/private/tmp/ladys_cache")
+os.environ.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "ladys_matplotlib"))
+os.environ.setdefault("XDG_CACHE_HOME", str(Path(tempfile.gettempdir()) / "ladys_cache"))
 Path(os.environ["MPLCONFIGDIR"]).mkdir(parents=True, exist_ok=True)
 Path(os.environ["XDG_CACHE_HOME"]).mkdir(parents=True, exist_ok=True)
 
@@ -61,6 +65,7 @@ from ladys.models import (
     STNDTConfig,
 )
 from ladys.models.base import BaseModelConfig
+from ladys.metrics import _batch_bin_widths, _target_rate_unit
 from ladys.plotting import (
     legend_outside,
     model_color,
@@ -72,6 +77,7 @@ from ladys.plotting import (
 from ladys.preprocessing import PreprocessedDataset, PreprocessingConfig
 from ladys.training import Trainer, TrainerConfig
 from ladys.training.strategies import build_strategy
+from ladys.types import ModelOutput, move_batch_to_device
 from ladys.utils.yaml import load_yaml
 
 
@@ -845,6 +851,8 @@ def evaluate_rate_mse(
     bgpfa_infer_mc: int = 20,
     bgpfa_infer_lr: float = 1e-1,
 ) -> float:
+    """Mean squared firing-rate error in Hz squared."""
+
     model.eval()
     if hasattr(model, "infer_latents"):
         return evaluate_bgpfa_rate_mse(
@@ -854,6 +862,7 @@ def evaluate_rate_mse(
             bgpfa_infer_steps=bgpfa_infer_steps,
             bgpfa_infer_mc=bgpfa_infer_mc,
             bgpfa_infer_lr=bgpfa_infer_lr,
+            use_raw_spikes=use_raw_spikes,
         )
 
     losses = []
@@ -861,18 +870,13 @@ def evaluate_rate_mse(
     torch_device = torch.device(device)
     with torch.no_grad():
         for batch in loader:
-            spikes = _input_spikes(batch, use_raw_spikes).to(torch_device)
-            rates = batch["rates"].to(torch_device)
-            pred = model.predict_rates(spikes)
-            if type(model).__name__ == "LFADS":
-                dt = batch.get("dt") if isinstance(batch, dict) else None
-                if dt is None:
-                    dt = torch.as_tensor(getattr(model, "dt", 1.0), device=pred.device)
-                else:
-                    dt = dt.to(device=pred.device, dtype=pred.dtype)
-                while dt.ndim < pred.ndim:
-                    dt = dt.unsqueeze(-1)
-                pred = pred * dt
+            batch = move_batch_to_device(batch, torch_device)
+            spikes = _input_spikes(batch, use_raw_spikes)
+            dt = _batch_bin_widths(batch, spikes, model=model)
+            rates = batch["rates"]
+            if _target_rate_unit(batch, dt) == "counts":
+                rates = rates / dt
+            pred = _rate_output(model, spikes).count_rates(dt) / dt
             loss = torch.mean((pred - rates) ** 2)
             losses.append(float(loss.detach().cpu()))
             weights.append(int(spikes.shape[0]))
@@ -887,15 +891,19 @@ def evaluate_poisson_nll(
     device: str,
     use_raw_spikes: bool = False,
 ) -> float:
+    """Poisson count NLL including the spike-factorial constant."""
+
     model.eval()
     losses = []
     weights = []
     torch_device = torch.device(device)
     with torch.no_grad():
         for batch in loader:
-            spikes = _input_spikes(batch, use_raw_spikes).to(torch_device)
-            target = _target_spikes(batch).to(torch_device)
-            rates = model.predict_rates(spikes).to(dtype=target.dtype).clamp_min(1e-8)
+            batch = move_batch_to_device(batch, torch_device)
+            spikes = _input_spikes(batch, use_raw_spikes)
+            target = _target_spikes(batch)
+            dt = _batch_bin_widths(batch, target, model=model)
+            rates = _rate_output(model, spikes).count_rates(dt).to(dtype=target.dtype).clamp_min(1e-8)
             loss = rates - target * torch.log(rates) + torch.lgamma(target + 1.0)
             losses.append(float(torch.mean(loss).detach().cpu()))
             weights.append(int(target.shape[0]))
@@ -914,6 +922,18 @@ def _target_spikes(batch: dict) -> torch.Tensor:
     return batch["raw_spikes"] if "raw_spikes" in batch else batch["spikes"]
 
 
+def _rate_output(model, spikes: torch.Tensor) -> ModelOutput:
+    output = model(spikes)
+    if getattr(model, "prediction_samples", 1) > 1:
+        # Retain each model's existing Monte Carlo prediction policy.
+        rates = model.predict_rates(spikes)
+    else:
+        rates = output.rates if output.rates is not None else output.reconstruction
+        if rates is None:
+            rates = model.predict_rates(spikes)
+    return ModelOutput(rates=rates, rates_unit=output.rates_unit)
+
+
 def evaluate_bgpfa_rate_mse(
     model,
     loader: DataLoader,
@@ -921,18 +941,26 @@ def evaluate_bgpfa_rate_mse(
     bgpfa_infer_steps: int,
     bgpfa_infer_mc: int,
     bgpfa_infer_lr: float,
+    use_raw_spikes: bool = False,
 ) -> float:
     torch_device = torch.device(device)
     batches = []
     rates = []
+    bin_widths = []
     for batch in loader:
-        batches.append(batch["spikes"].to(torch_device))
-        rates.append(batch["rates"].to(torch_device))
+        batch = move_batch_to_device(batch, torch_device)
+        spikes = _input_spikes(batch, use_raw_spikes)
+        batches.append(spikes)
+        dt = _batch_bin_widths(batch, spikes, model=model)
+        bin_widths.append(dt.expand(spikes.shape[0], -1, -1))
+        target = batch["rates"]
+        rates.append(target / dt if _target_rate_unit(batch, dt) == "counts" else target)
     if not batches:
         return float("nan")
 
     spikes = torch.cat(batches, dim=0)
     true_rates = torch.cat(rates, dim=0)
+    dt = torch.cat(bin_widths, dim=0)
     model.infer_latents(
         spikes,
         max_steps=bgpfa_infer_steps,
@@ -941,7 +969,7 @@ def evaluate_bgpfa_rate_mse(
         burnin=1,
     )
     with torch.no_grad():
-        pred = model.predict_rates(spikes)
+        pred = _rate_output(model, spikes).count_rates(dt) / dt
         loss = torch.mean((pred - true_rates.to(pred.device, pred.dtype)) ** 2)
     return float(loss.detach().cpu())
 
@@ -963,7 +991,11 @@ def collect_rate_trace_rows(
     sample_index = min(max(sample_index, 0), len(dataset) - 1)
     sample = dataset[sample_index]
     spikes = sample["spikes"].unsqueeze(0).to(device)
-    true_rates = sample["rates"].cpu()
+    dt = _batch_bin_widths(sample, spikes, model=model)
+    true_rates = sample["rates"].to(device).unsqueeze(0)
+    if _target_rate_unit(sample, dt) == "counts":
+        true_rates = true_rates / dt
+    true_rates = true_rates.squeeze(0).cpu()
     model_input = sample["spikes"].cpu()
     observed = sample.get("raw_spikes", sample["spikes"]).cpu()
 
@@ -977,7 +1009,7 @@ def collect_rate_trace_rows(
             burnin=1,
         )
     with torch.no_grad():
-        pred_rates = model.predict_rates(spikes).squeeze(0).detach().cpu()
+        pred_rates = (_rate_output(model, spikes).count_rates(dt) / dt).squeeze(0).detach().cpu()
 
     n_neurons = min(num_neurons, true_rates.shape[-1], pred_rates.shape[-1])
     rows = []
@@ -991,6 +1023,7 @@ def collect_rate_trace_rows(
                     "time": timestep,
                     "true_rate": float(true_rates[timestep, neuron]),
                     "pred_rate": float(pred_rates[timestep, neuron]),
+                    "rate_unit": "hz",
                     "model_input": float(model_input[timestep, neuron]),
                     "observed_spikes": float(observed[timestep, neuron]),
                 }
@@ -1008,6 +1041,7 @@ def write_rate_traces(path: Path, rows: list[dict]) -> None:
         "time",
         "true_rate",
         "pred_rate",
+        "rate_unit",
         "model_input",
         "observed_spikes",
     ]
@@ -1065,7 +1099,7 @@ def plot_rate_traces(rows: list[dict], path: Path, title: str) -> None:
         fig.legend(handles, labels, loc="upper right")
         fig.suptitle(title)
         fig.supxlabel("Time")
-        fig.supylabel("Firing rate")
+        fig.supylabel("Firing rate (Hz)")
         save_figure(fig, path)
         plt.close(fig)
 
@@ -1152,7 +1186,7 @@ def plot_test_rate_mse(rows: list[dict], path: Path, log_y: bool = False) -> Non
         if log_y:
             ax.set_yscale("log")
         ax.set_xlabel("Epoch")
-        ax.set_ylabel("Held-out firing-rate MSE")
+        ax.set_ylabel("Held-out firing-rate MSE (Hz squared)")
         ax.set_title("Held-out Firing-Rate MSE")
         style_axis(ax)
         legend_outside(ax)
@@ -1465,7 +1499,7 @@ def plot_combined_rate_traces(rows: list[dict], path: Path) -> None:
         fig.legend(by_label.values(), by_label.keys(), loc="upper right")
         fig.suptitle("Held-out Firing-Rate Traces by Model")
         fig.supxlabel("Time")
-        fig.supylabel("Firing rate")
+        fig.supylabel("Firing rate (Hz)")
         save_figure(fig, path)
         plt.close(fig)
 
