@@ -10,7 +10,7 @@ from pydantic import Field
 from torch import Tensor, nn
 import torch.nn.functional as F
 
-from ladys.metrics import EvaluationAdapter, EvaluationResult, compute_available_metrics
+from ladys.metrics import EvaluationAdapter, EvaluationResult, SyntheticEvaluationAdapter, compute_available_metrics
 from ladys.models.base import BaseDynamicsModel, BaseModelConfig, OptimizationConfig
 from ladys.types import LossOutput, ModelOutput, move_batch_to_device, observations_from_batch
 
@@ -843,6 +843,8 @@ class LFADS(BaseDynamicsModel):
             )
 
     def evaluation_adapter(self, task: str) -> EvaluationAdapter | None:
+        if task == "synthetic" and self.prediction_samples > 1:
+            return SyntheticEvaluationAdapter(use_predict_rates=True)
         if (
             task == "nlb"
             and self.output_neuron_start is not None

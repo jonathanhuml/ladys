@@ -26,7 +26,7 @@ run folder through the public `ladys.Experiment` orchestration API.
 Model pages are generated from model class docstrings and config defaults:
 
 ```bash
-python scripts/generate_model_docs.py
+python website/tools/generate_model_docs.py
 ```
 
 Images referenced from model docstrings should live under `website/docs/assets/`.

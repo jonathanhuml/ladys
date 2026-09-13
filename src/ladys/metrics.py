@@ -62,8 +62,9 @@ class SyntheticEvaluationAdapter(EvaluationAdapter):
 
     task: EvaluationTaskName = "synthetic"
 
-    def __init__(self, use_raw_spikes: bool = False) -> None:
+    def __init__(self, use_raw_spikes: bool = False, use_predict_rates: bool = False) -> None:
         self.use_raw_spikes = use_raw_spikes
+        self.use_predict_rates = use_predict_rates
 
     def evaluate(
         self,
@@ -86,7 +87,12 @@ class SyntheticEvaluationAdapter(EvaluationAdapter):
                     x = batch.get("raw_spikes", x)
                 output = model(x)
                 dt = _batch_bin_widths(batch, x, model=model)
-                count_rates = output.count_rates(dt)
+                if self.use_predict_rates:
+                    count_rates = ModelOutput(
+                        rates=model.predict_rates(x), rates_unit=output.rates_unit
+                    ).count_rates(dt)
+                else:
+                    count_rates = output.count_rates(dt)
                 if count_rates is None:
                     rates = output.reconstruction
                     if rates is None:

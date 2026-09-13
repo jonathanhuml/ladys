@@ -4,7 +4,7 @@ docs_dir: website/docs
 site_dir: website/site
 
 hooks:
-  - scripts/mkdocs_favicon.py
+  - website/tools/mkdocs_favicon.py
 
 nav:
   - Home: index.md

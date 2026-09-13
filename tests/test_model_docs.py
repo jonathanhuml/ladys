@@ -6,7 +6,7 @@ from pathlib import Path
 def test_generated_model_docs_are_current():
     root = Path(__file__).resolve().parents[1]
     result = subprocess.run(
-        [sys.executable, "scripts/generate_model_docs.py", "--check"],
+        [sys.executable, "website/tools/generate_model_docs.py", "--check"],
         cwd=root,
         capture_output=True,
         text=True,

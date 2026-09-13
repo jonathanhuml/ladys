@@ -7,7 +7,6 @@ from ladys.models.base import EnsembleDynamicsModel
 from ladys.models.ilqr_vae import ILQRVAEConfig
 from ladys.nlb_eval import _collect_full_rate_parts, nlb_bits_per_spike
 from ladys.types import ModelOutput
-from scripts.export_nlb_full_rates_shard import collect_full_rate_parts
 
 
 def _model(name):
@@ -33,7 +32,7 @@ def _model(name):
 
 
 @pytest.mark.parametrize("name", ["ndt", "stndt", "langevin_flow", "lfads", "ilqr_vae"])
-def test_full_and_sharded_exports_match_direct_count_predictions(name):
+def test_full_exports_match_direct_count_predictions(name):
     torch.manual_seed(3)
     model = _model(name)
     batch = {
@@ -50,16 +49,15 @@ def test_full_and_sharded_exports_match_direct_count_predictions(name):
         expected = rates[..., 3:].numpy()
         if name == "lfads":
             expected = expected * 0.005
-    for collect in (_collect_full_rate_parts, collect_full_rate_parts):
-        torch.manual_seed(5)
-        parts = collect(
-            model=model, loader=[batch], device=torch.device("cpu"), dt=0.005,
-            prediction_floor=1e-9,
-        )
-        np.testing.assert_allclose(parts["rates_heldout"], expected, rtol=1e-6, atol=1e-9)
-        assert nlb_bits_per_spike(parts["rates_heldout"], batch["heldout_spikes"]) == pytest.approx(
-            nlb_bits_per_spike(expected, batch["heldout_spikes"]), abs=1e-6
-        )
+    torch.manual_seed(5)
+    parts = _collect_full_rate_parts(
+        model=model, loader=[batch], device=torch.device("cpu"), dt=0.005,
+        prediction_floor=1e-9,
+    )
+    np.testing.assert_allclose(parts["rates_heldout"], expected, rtol=1e-6, atol=1e-9)
+    assert nlb_bits_per_spike(parts["rates_heldout"], batch["heldout_spikes"]) == pytest.approx(
+        nlb_bits_per_spike(expected, batch["heldout_spikes"]), abs=1e-6
+    )
 
 
 def test_full_rate_units_are_independent_and_required():

@@ -16,7 +16,7 @@ from pydantic import Field, model_validator
 from torch import Tensor, nn
 import torch.nn.functional as F
 
-from ladys.metrics import EvaluationAdapter, EvaluationResult, NLBCoSmoothingAdapter
+from ladys.metrics import EvaluationAdapter, EvaluationResult, NLBCoSmoothingAdapter, SyntheticEvaluationAdapter
 from ladys.metrics import compute_available_metrics
 from ladys.models.base import BaseDynamicsModel, BaseModelConfig, OptimizationConfig
 from ladys.preprocessing import PreprocessedDataset
@@ -464,6 +464,8 @@ class LangevinFlow(BaseDynamicsModel):
         return torch.stack(log_rates, dim=0).mean(dim=0).exp()
 
     def evaluation_adapter(self, task: str) -> EvaluationAdapter | None:
+        if task == "synthetic" and self.prediction_samples > 1:
+            return SyntheticEvaluationAdapter(use_predict_rates=True)
         if task != "nlb":
             return None
         if self.output_neurons > self.n_neurons:

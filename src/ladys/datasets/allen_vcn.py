@@ -83,8 +83,8 @@ def load_allen_vcn_h5(config: AllenVCNDatasetConfig) -> AllenVCNArrays:
     path = config.data_path.expanduser()
     if not path.exists():
         raise FileNotFoundError(
-            f"Allen VCN H5 not found: {path}. Run "
-            "`python scripts/prepare_allen_vcn.py --download --prepare` first."
+            f"Allen VCN H5 not found: {path}. "
+            "Set data_path to an existing prepared Allen VCN H5 file."
         )
     if config.group is None:
         raise ValueError("Allen VCN config group was not resolved.")

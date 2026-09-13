@@ -10,6 +10,8 @@ venv/
 dist/
 build/
 runs/
+# Local scratch and experiment tooling.
+/scripts/
 *.npy
 *.npz
 *.h5

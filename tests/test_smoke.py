@@ -601,13 +601,7 @@ def test_gpfa_nlb_adapter_fits_heldout_decoder(tmp_path: Path):
         DataLoader(valid_ds, batch_size=2),
         train_loader=DataLoader(train_ds, batch_size=5),
     )
-    from scripts.run_nlb_classical_table import collect_heldin_rates
-
-    heldin_rates = collect_heldin_rates(
-        model,
-        DataLoader(valid_ds, batch_size=2),
-        torch.device("cpu"),
-    )
+    heldin_rates = model.predict_rates(valid_ds.spikes)
 
     assert heldin_rates.shape == eval_heldin.shape
     assert result.predictions["rates"].shape == eval_heldout.shape

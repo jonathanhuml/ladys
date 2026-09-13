@@ -4,7 +4,6 @@ import torch
 
 from ladys.config import load_experiment_config
 from ladys.models.stndt import STNDTConfig
-from scripts.run_stndt_nlb_reproduction import _load_configs
 
 
 VALID_STNDT_NLB_CONFIGS = [
@@ -64,30 +63,6 @@ def test_stndt_nlb_experiment_configs_load():
     assert all(config.model.contrast_mask_span_ramp_start == 8000 for config in configs)
     assert all(config.model.contrast_mask_span_ramp_end == 12000 for config in configs)
     assert configs[-1].model.do_contrast is False
-
-
-def test_stndt_mc_maze_single_yaml_expands_to_two_runner_stages():
-    stages = _load_configs(
-        path=Path("configs/experiment/real/mc_maze/stndt/stndt_mc_maze_nlb_5ms.yaml"),
-        epochs=None,
-        batch_size=None,
-        device="cpu",
-        output_dir="runs/stndt_nlb_reproduction",
-        run_name_suffix="",
-    )
-
-    assert [name for name, _ in stages] == ["mask_only", "contrast"]
-    assert [config.dataset.name for _, config in stages] == ["mc_maze", "mc_maze"]
-    assert [config.trainer.epochs for _, config in stages] == [3000, 3000]
-    assert [config.model.do_contrast for _, config in stages] == [False, True]
-    assert [config.model.optimization.lr for _, config in stages] == [
-        8.249215636338611e-3,
-        1.0e-3,
-    ]
-    assert [config.run_name for _, config in stages] == [
-        "stndt_mc_maze_nlb_5ms_mask_only",
-        "stndt_mc_maze_nlb_5ms_contrast",
-    ]
 
 
 def test_stndt_mask_span_ramp_uses_training_epoch():

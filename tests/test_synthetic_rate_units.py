@@ -9,8 +9,10 @@ from ladys.metrics import (
     NLBCoSmoothingAdapter,
     SyntheticEvaluationAdapter,
     bits_per_spike,
+    evaluate_model,
     poisson_negative_log_likelihood,
 )
+from ladys.models import LFADSConfig, LangevinFlowConfig
 from ladys.models.base import BaseDynamicsModel
 from ladys.models.baselines import PSTHConfig
 from ladys.preprocessing import smooth_firing_rate
@@ -173,3 +175,36 @@ def test_ctd_imported_rate_units_are_explicitly_configurable(tmp_path):
     dataset = CTDDataset(config, arrays=arrays)
     assert dataset[0]["rates_unit"] == "hz"
     assert CTDDatasetConfig(data_path=tmp_path / "unused.h5").rates_unit == "counts"
+
+
+@pytest.mark.parametrize("method", ["lfads", "langevin_flow"])
+def test_synthetic_evaluation_honors_prediction_averaging_and_rate_units(method):
+    torch.manual_seed(10)
+    if method == "lfads":
+        config = LFADSConfig(
+            generator_dim=4, factor_dim=2, g0_encoder_dim=4,
+            controller_encoder_dim=4, controller_dim=4, keep_prob=1.0,
+            prediction_samples=4, dt=0.05,
+        )
+    else:
+        config = LangevinFlowConfig(
+            hidden_size=4, transformer_feedforward=8, dropout=0.0,
+            coordinated_dropout_rate=1.0, prediction_samples=4,
+        )
+    model = config.build(n_neurons=3, n_time=4).eval()
+    x = torch.ones(2, 4, 3)
+    with torch.no_grad():
+        deterministic = model(x)
+        torch.manual_seed(123)
+        expected = model.predict_rates(x)
+    assert not torch.allclose(expected, deterministic.rates)
+    expected_counts = expected * 0.05 if deterministic.rates_unit == "hz" else expected
+    expected_hz = expected_counts / 0.05
+    batch = {"spikes": x, "rates": torch.ones_like(x), "rates_unit": "hz", "dt": 0.05}
+
+    torch.manual_seed(123)
+    result = evaluate_model(model, [batch])
+
+    np.testing.assert_allclose(result.predictions["rates"], expected_hz, rtol=1e-5)
+    np.testing.assert_allclose(result.predictions["count_rates"], expected_counts, rtol=1e-5)
+    assert result.metrics["rate_mse"] == pytest.approx(float((expected_hz - 1).square().mean()), rel=1e-5)

@@ -32,7 +32,7 @@ jobs:
         run: python -m pip install "mkdocs>=1.6"
 
       - name: Generate model docs
-        run: python scripts/generate_model_docs.py
+        run: python website/tools/generate_model_docs.py
 
       - name: Build site
         run: |
