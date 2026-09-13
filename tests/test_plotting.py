@@ -41,3 +41,31 @@ def test_plot_context_can_write_png(tmp_path: Path):
 
     assert path.exists()
     assert path.stat().st_size > 0
+
+
+def test_experiment_plots_preserve_display_backend_and_open_figures(tmp_path: Path):
+    from ladys.experiment import _write_history_plots
+    from ladys.training import EpochReport
+    from ladys.types import StepResult
+
+    original_backend = matplotlib.get_backend()
+    try:
+        matplotlib.use("svg", force=True)
+        user_figure, user_axis = plt.subplots()
+        user_axis.plot([0, 1], [1, 0])
+        open_figures = plt.get_fignums()
+        history = [
+            EpochReport(epoch=0, train=StepResult(loss=2.0), valid=StepResult(loss=2.5), seconds=0.1),
+            EpochReport(epoch=1, train=StepResult(loss=1.0), valid=StepResult(loss=1.5), seconds=0.1),
+        ]
+
+        paths = _write_history_plots(tmp_path, history)
+
+        assert matplotlib.get_backend().lower() == "svg"
+        assert plt.get_fignums() == open_figures
+        assert len(paths) == 2
+        for path in paths.values():
+            assert path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    finally:
+        plt.close("all")
+        matplotlib.use(original_backend, force=True)

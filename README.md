@@ -9,20 +9,20 @@ models of neural population dynamics through a shared PyTorch API.
 
 ## Models
 
-| Model (CLI name) | Citation | Description |
+| Model | Citation | Description |
 | --- | --- | --- |
-| bGPFA (`bgpfa`) | [Jensen et al., 2021](https://proceedings.neurips.cc/paper/2021/hash/58238e9ae2dd305d79c2ebc8c1883422-Abstract.html) | Bayesian Gaussian process factor analysis with automatic relevance determination, scalable variational inference, and support for non-Gaussian observation noise. |
-| CASSM (`cassm`) | [Huml et al., 2026](https://arxiv.org/abs/2606.01468) | Learns low-dimensional projections for Kalman filtering while accounting for uncertainty introduced by approximate computation. |
-| GPFA (`gpfa`) | [Yu et al., 2009](https://doi.org/10.1152/jn.90941.2008) | Combines temporal smoothing and dimensionality reduction in a probabilistic model with Gaussian process latent trajectories. |
-| iLQR-VAE (`ilqr_vae`) | [Schimel et al., 2022](https://openreview.net/forum?id=wRODLDHaAiW) | Sequential variational autoencoder that uses iterative linear quadratic regulation to infer latent dynamics, initial conditions, and external inputs. |
-| Kalman filter (`kalman`) | [Kalman, 1960](https://doi.org/10.1115/1.3662552) | Exact inference in linear Gaussian state-space models; the LaDyS implementation uses Matérn dynamics to represent smooth neural trajectories. |
-| LangevinFlow (`langevin_flow`) | [Song et al., 2025](https://arxiv.org/abs/2507.11531) | Sequential variational autoencoder with underdamped Langevin latent dynamics and a learned potential built from locally coupled oscillators. |
-| LFADS (`lfads`) | [Pandarinath et al., 2018](https://doi.org/10.1038/s41592-018-0109-9) | Recurrent sequential variational autoencoder that infers single-trial neural dynamics, initial conditions, and time-varying inputs. |
-| MINT (`mint`) | [Perkins et al., 2025](https://elifesciences.org/articles/89421) | Matches observed spikes to a learned library of neural trajectories using Poisson likelihoods and interpolation. |
-| NDT (`ndt`) | [Ye & Pandarinath, 2021](https://doi.org/10.51628/001c.27358) | Transformer that learns neural activity representations by reconstructing masked spike counts with temporal self-attention. |
-| PSTH (`psth`) | [Palmer & Ashby, 1992](https://pubmed.ncbi.nlm.nih.gov/20870522/) | Estimates event-aligned firing rates by averaging spike counts across repeated trials within each condition. |
-| Gaussian smoothing (`smoothing`) | [Shimazaki & Shinomoto, 2007](https://doi.org/10.1162/neco.2007.19.6.1503) (histogram binning) | Estimates firing rates by convolving spike counts with a Gaussian kernel of configurable width. |
-| STNDT (`stndt`) | [Le & Shlizerman, 2022](https://arxiv.org/abs/2206.04727) | Extends NDT with attention across both time and neurons, combining masked modeling with contrastive learning. |
+| bGPFA | [Jensen et al., 2021](https://proceedings.neurips.cc/paper/2021/hash/58238e9ae2dd305d79c2ebc8c1883422-Abstract.html) | Bayesian Gaussian process factor analysis with automatic relevance determination, scalable variational inference, and support for non-Gaussian observation noise. |
+| CASSM | [Huml et al., 2026](https://arxiv.org/abs/2606.01468) | Learns low-dimensional projections for Kalman filtering while accounting for uncertainty introduced by approximate computation. |
+| GPFA | [Yu et al., 2009](https://doi.org/10.1152/jn.90941.2008) | Combines temporal smoothing and dimensionality reduction in a probabilistic model with Gaussian process latent trajectories. |
+| iLQR-VAE | [Schimel et al., 2022](https://openreview.net/forum?id=wRODLDHaAiW) | Sequential variational autoencoder that uses iterative linear quadratic regulation to infer latent dynamics, initial conditions, and external inputs. |
+| Kalman filter | [Kalman, 1960](https://doi.org/10.1115/1.3662552) | Exact inference in linear Gaussian state-space models; the LaDyS implementation uses Matérn dynamics to represent smooth neural trajectories. |
+| LangevinFlow | [Song et al., 2025](https://arxiv.org/abs/2507.11531) | Sequential variational autoencoder with underdamped Langevin latent dynamics and a learned potential built from locally coupled oscillators. |
+| LFADS | [Pandarinath et al., 2018](https://doi.org/10.1038/s41592-018-0109-9) | Recurrent sequential variational autoencoder that infers single-trial neural dynamics, initial conditions, and time-varying inputs. |
+| MINT | [Perkins et al., 2025](https://elifesciences.org/articles/89421) | Matches observed spikes to a learned library of neural trajectories using Poisson likelihoods and interpolation. |
+| NDT | [Ye & Pandarinath, 2021](https://doi.org/10.51628/001c.27358) | Transformer that learns neural activity representations by reconstructing masked spike counts with temporal self-attention. |
+| PSTH | [Palmer & Ashby, 1992](https://pubmed.ncbi.nlm.nih.gov/20870522/) | Estimates event-aligned firing rates by averaging spike counts across repeated trials within each condition. |
+| Gaussian smoothing | [Shimazaki & Shinomoto, 2007](https://doi.org/10.1162/neco.2007.19.6.1503) (histogram binning) | Estimates firing rates by convolving spike counts with a Gaussian kernel of configurable width. |
+| STNDT | [Le & Shlizerman, 2022](https://arxiv.org/abs/2206.04727) | Extends NDT with attention across both time and neurons, combining masked modeling with contrastive learning. |
 
 ## Quickstart
 

@@ -548,10 +548,8 @@ def _write_history_plots(run_dir: Path, history: list[EpochReport]) -> dict[str,
         return {}
 
     _prepare_matplotlib_cache()
-    import matplotlib
-
-    matplotlib.use("Agg", force=True)
-    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
 
     from ladys.plotting import plot_context, save_figure, style_axis
 
@@ -570,7 +568,10 @@ def _write_history_plots(run_dir: Path, history: list[EpochReport]) -> dict[str,
     plot_paths: dict[str, Path] = {}
     train_test_path = plots_dir / "train_test_objective_curves.png"
     with plot_context(nrows=1, ncols=1, rel_width=0.86, height_scale=1.35):
-        fig, ax = plt.subplots()
+        # Render saved artifacts without changing the caller's display backend.
+        fig = Figure()
+        FigureCanvasAgg(fig)
+        ax = fig.subplots()
         _plot_finite_curve(ax, epochs, train_loss, label="train", linestyle="--")
         _plot_finite_curve(ax, epochs, valid_loss, label="test", linestyle="-")
         ax.set_xlabel("Epoch")
@@ -579,13 +580,14 @@ def _write_history_plots(run_dir: Path, history: list[EpochReport]) -> dict[str,
         style_axis(ax)
         ax.legend()
         save_figure(fig, train_test_path)
-        plt.close(fig)
     plot_paths["train_test_objective"] = train_test_path
 
     if np.isfinite(valid_loss).any():
         test_path = plots_dir / "test_objective_curves.png"
         with plot_context(nrows=1, ncols=1, rel_width=0.86, height_scale=1.35):
-            fig, ax = plt.subplots()
+            fig = Figure()
+            FigureCanvasAgg(fig)
+            ax = fig.subplots()
             _plot_finite_curve(ax, epochs, valid_loss, label="test", linestyle="-")
             ax.set_xlabel("Epoch")
             ax.set_ylabel("Loss")
@@ -593,7 +595,6 @@ def _write_history_plots(run_dir: Path, history: list[EpochReport]) -> dict[str,
             style_axis(ax)
             ax.legend()
             save_figure(fig, test_path)
-            plt.close(fig)
         plot_paths["test_objective"] = test_path
 
     return plot_paths
