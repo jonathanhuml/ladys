@@ -10,7 +10,12 @@ from pydantic import Field
 from torch import Tensor, nn
 import torch.nn.functional as F
 
-from ladys.metrics import EvaluationAdapter, EvaluationResult, SyntheticEvaluationAdapter, compute_available_metrics
+from ladys.metrics import (
+    EvaluationAdapter,
+    EvaluationResult,
+    SyntheticEvaluationAdapter,
+    compute_available_metrics,
+)
 from ladys.models.base import BaseDynamicsModel, BaseModelConfig, OptimizationConfig
 from ladys.types import LossOutput, ModelOutput, move_batch_to_device, observations_from_batch
 

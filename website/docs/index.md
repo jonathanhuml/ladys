@@ -36,5 +36,5 @@ model pages rewrite those links to the correct relative path.
 Serve the documentation site locally with:
 
 ```bash
-mkdocs serve
+mkdocs serve --config-file website/mkdocs.yml
 ```

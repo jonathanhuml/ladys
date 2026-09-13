@@ -16,8 +16,13 @@ from pydantic import Field, model_validator
 from torch import Tensor, nn
 import torch.nn.functional as F
 
-from ladys.metrics import EvaluationAdapter, EvaluationResult, NLBCoSmoothingAdapter, SyntheticEvaluationAdapter
-from ladys.metrics import compute_available_metrics
+from ladys.metrics import (
+    EvaluationAdapter,
+    EvaluationResult,
+    NLBCoSmoothingAdapter,
+    SyntheticEvaluationAdapter,
+    compute_available_metrics,
+)
 from ladys.models.base import BaseDynamicsModel, BaseModelConfig, OptimizationConfig
 from ladys.preprocessing import PreprocessedDataset
 from ladys.types import LossOutput, ModelOutput, move_batch_to_device, observations_from_batch

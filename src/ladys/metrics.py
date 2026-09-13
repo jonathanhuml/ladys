@@ -58,6 +58,8 @@ class SyntheticEvaluationAdapter(EvaluationAdapter):
 
     Saved `rates` are Hz; `count_rates` are expected counts. Target batches with
     non-unit bin widths must declare `rates_unit` as `hz` or `counts`.
+    `use_predict_rates` honors model-specific prediction averaging while keeping
+    forward-pass latents available for latent reconstruction metrics.
     """
 
     task: EvaluationTaskName = "synthetic"

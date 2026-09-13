@@ -26,8 +26,13 @@ models of neural population dynamics through a shared PyTorch API.
 
 ## Quickstart
 
-From the repository root, with LaDyS and a CUDA-enabled PyTorch installation,
-train GPFA on synthetic Lorenz data:
+Install from the repository root, including plotting dependencies:
+
+```bash
+python -m pip install -e ".[benchmarks]"
+```
+
+With a CUDA-enabled PyTorch installation, train GPFA on synthetic Lorenz data:
 
 ```bash
 ladys run -d lorenz -m gpfa --device cuda \
